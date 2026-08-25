@@ -231,6 +231,26 @@ def test_stale_boundary_is_two_weeks():
     assert over.kind == "ask_owner_stale"
 
 
+def test_booking_made_weeks_ahead_is_not_a_tail():
+    """Заказы №451, №523, №574: клиент записался за три недели вперёд.
+
+    Сделке 20 дней, но её «Дата и время заказа» — ровно день работы.
+    Возраст тут ни при чём: это живая запись, а не забытый хвост.
+    """
+    d = match(order_date=ORDER_DAY, candidates=[
+        L(31472345, REAL, CREATED, order_date=ORDER_DAY,
+          created_date=ORDER_DAY - timedelta(days=20))])
+    assert d == Decision(kind="use_realization", lead_id=31472345)
+
+
+def test_old_deal_with_a_different_date_is_still_a_tail():
+    """Заказ №548: сделке 16 дней и её дата заказа — от прошлой работы."""
+    d = match(order_date=date(2026, 8, 7), candidates=[
+        L(31448601, REAL, CREATED, order_date=date(2026, 7, 22),
+          created_date=date(2026, 7, 22))])
+    assert d.kind == "ask_owner_stale"
+
+
 def test_stale_primary_lead_also_asks():
     d = match(order_date=ORDER_DAY, candidates=[
         L(800, PRIM, NEW_LEAD, created_date=date(2024, 1, 10))])
