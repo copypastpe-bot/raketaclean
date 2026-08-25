@@ -94,6 +94,43 @@ async def test_unknown_payment_method_is_not_invented():
     assert ids.FIELD_PAYMENT_TYPE not in fields_of(amo)
 
 
+# --- источник сделки ---
+
+async def test_unsorted_lead_without_source_gets_word_of_mouth():
+    """Лид застрял в «Неразобранном» без источника — значит клиент пришёл по сарафану."""
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600)
+
+    await make_engine(amo, store).process_order(make_order())
+
+    source = fields_of(amo)[ids.FIELD_SOURCE]
+    assert source["values"] == [{"enum_id": ids.SOURCE_ENUM_WORD_OF_MOUTH}]
+
+
+async def test_existing_source_is_never_overwritten():
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600,
+                 custom_fields_values=[{"field_id": ids.FIELD_SOURCE,
+                                        "values": [{"value": "Авито", "enum_id": 8047}]}])
+
+    await make_engine(amo, store).process_order(make_order())
+
+    assert ids.FIELD_SOURCE not in fields_of(amo)
+
+
+async def test_source_is_not_touched_outside_unsorted():
+    """Лид уже разобран оператором — источник его забота, не робота."""
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NEW_LEAD,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600)
+
+    await make_engine(amo, store).process_order(make_order())
+
+    assert ids.FIELD_SOURCE not in fields_of(amo)
+
+
 # --- расчёт по счёту ---
 
 async def test_unpaid_wire_stops_at_order_done_stage():

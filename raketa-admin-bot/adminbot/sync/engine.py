@@ -326,6 +326,12 @@ class Engine:
                 fields.append(enum_field(ids.FIELD_SPECIALIST, enum_id))
                 break                       # одного мастера достаточно
 
+        # «Источник сделки»: лид, оставшийся в «Неразобранном» без источника, — это
+        # клиент, пришедший мимо рекламы и звонков, то есть сарафан (решение владельца).
+        if (existing and existing.get("status_id") in ids.STATUSES_UNSORTED
+                and not field_value(existing, ids.FIELD_SOURCE)):
+            fields.append(enum_field(ids.FIELD_SOURCE, ids.SOURCE_ENUM_WORD_OF_MOUTH))
+
         payment = _payment_enum(order.payment_method)
         if payment:
             fields.append(enum_field(ids.FIELD_PAYMENT_TYPE, payment))
