@@ -120,6 +120,29 @@ async def test_existing_source_is_never_overwritten():
     assert ids.FIELD_SOURCE not in fields_of(amo)
 
 
+async def test_repeat_client_gets_repeat_order_source():
+    """У клиента уже были заказы в боте — источник «Повторный заказ», а не сарафан."""
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600)
+    order = Order(**{**make_order().__dict__, "is_repeat_client": True})
+
+    await make_engine(amo, store).process_order(order)
+
+    assert fields_of(amo)[ids.FIELD_SOURCE]["values"] == [{"enum_id": ids.SOURCE_ENUM_REPEAT}]
+
+
+async def test_robot_created_deal_gets_a_source_too():
+    """Сделку робот заводит сам — следа звонка или заявки нет, значит сарафан."""
+    amo, store = FakeAmo(), FakeStore()          # ни сделок, ни контактов
+
+    await make_engine(amo, store).process_order(make_order())
+
+    created = amo.calls_of("create_lead")[0]
+    sources = [f for f in created["custom_fields"] if f["field_id"] == ids.FIELD_SOURCE]
+    assert sources[0]["values"] == [{"enum_id": ids.SOURCE_ENUM_WORD_OF_MOUTH}]
+
+
 async def test_source_is_not_touched_outside_unsorted():
     """Лид уже разобран оператором — источник его забота, не робота."""
     amo, store = FakeAmo(), FakeStore()

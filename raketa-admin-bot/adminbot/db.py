@@ -34,6 +34,10 @@ SELECT
     o.rating_score,
     o.payment_method,
     o.awaiting_wire_payment,
+    EXISTS (
+        SELECT 1 FROM public.orders prev
+        WHERE prev.phone_digits = o.phone_digits AND prev.created_at < o.created_at
+    ) AS is_repeat_client,
     c.full_name AS client_full_name,
     COALESCE(NULLIF(TRIM(c.address), ''), NULLIF(TRIM(c.last_order_addr), '')) AS address,
     COALESCE((
@@ -81,6 +85,7 @@ def _order_from_row(row: asyncpg.Record) -> Order:
         rating_score=row["rating_score"],
         payment_method=row["payment_method"],
         awaiting_wire_payment=bool(row["awaiting_wire_payment"]),
+        is_repeat_client=bool(row["is_repeat_client"]),
         client_name=(row["client_full_name"] or row["customer_name"]),
         address=row["address"],
     )

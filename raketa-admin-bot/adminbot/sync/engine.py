@@ -289,7 +289,7 @@ class Engine:
                 status_id=ids.PRIM_STAGE_NEW_LEAD,
                 price=order.amount_total,
                 contact_id=self._contacts.get(order.order_id),
-                custom_fields=self._lead_fields(order, existing=None),
+                custom_fields=self._lead_fields(order, existing=None, creating=True),
             ))
         if intent and intent.entity_id:
             await self.store.update(order.order_id, primary_lead_id=intent.entity_id)
@@ -303,7 +303,8 @@ class Engine:
                           self.amo.update_lead(lead_id, price=order.amount_total,
                                                custom_fields=self._lead_fields(order, existing)))
 
-    def _lead_fields(self, order: Order, existing: Optional[dict]) -> list[dict]:
+    def _lead_fields(self, order: Order, existing: Optional[dict],
+                     *, creating: bool = False) -> list[dict]:
         """Что робот проставляет в сделке.
 
         Всё это можно писать в лид первичной воронки: сейлзбот переносит поля
@@ -326,11 +327,19 @@ class Engine:
                 fields.append(enum_field(ids.FIELD_SPECIALIST, enum_id))
                 break                       # одного мастера достаточно
 
-        # «Источник сделки»: лид, оставшийся в «Неразобранном» без источника, — это
-        # клиент, пришедший мимо рекламы и звонков, то есть сарафан (решение владельца).
-        if (existing and existing.get("status_id") in ids.STATUSES_UNSORTED
-                and not field_value(existing, ids.FIELD_SOURCE)):
-            fields.append(enum_field(ids.FIELD_SOURCE, ids.SOURCE_ENUM_WORD_OF_MOUTH))
+        # «Источник сделки». Заполняем в двух случаях: лид застрял в «Неразобранном»
+        # без источника и сделку робот заводит сам. И там, и там клиент пришёл мимо
+        # рекламы и звонков. Первый заказ клиента — сарафан, дальше — повторный.
+        unsorted_without_source = (
+            existing is not None
+            and existing.get("status_id") in ids.STATUSES_UNSORTED
+            and not field_value(existing, ids.FIELD_SOURCE)
+        )
+        if creating or unsorted_without_source:
+            fields.append(enum_field(
+                ids.FIELD_SOURCE,
+                ids.SOURCE_ENUM_REPEAT if order.is_repeat_client
+                else ids.SOURCE_ENUM_WORD_OF_MOUTH))
 
         payment = _payment_enum(order.payment_method)
         if payment:

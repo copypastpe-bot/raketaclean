@@ -51,7 +51,8 @@ FIELD_PAYMENT_DATE = 18643          # Дата оплаты (тип date)
 FIELD_PAYMENT_TYPE = 464605         # Вариант оплаты (select)
 FIELD_CLIENT_TYPE = 1453545         # Тип клиента (select)
 FIELD_SOURCE = 18781                # Источник сделки (select)
-SOURCE_ENUM_WORD_OF_MOUTH = 235979  # «Сарафанное радио»
+SOURCE_ENUM_WORD_OF_MOUTH = 235979  # «Сарафанное радио» — клиент пришёл впервые
+SOURCE_ENUM_REPEAT = 235981         # «Повторный заказ» — у клиента уже были заказы в боте
 FIELD_COMMENT = 18693               # Комментарий к заказу — заполнится на этапе календаря
 FIELD_DISTRICT = 1453415            # Район города — тоже из календаря
 
