@@ -301,11 +301,27 @@ def test_deal_created_after_order_is_still_a_candidate():
 
 # --- заведомо чужая сделка: другой мастер И сумма в разы больше ---
 
-def test_foreign_deal_dropped_when_master_and_amount_both_differ():
-    """Заказ №412: работа Никиты на 4500 ₽, сделка Ольги на 17 550 ₽ (уборка)."""
+def test_foreign_looking_deal_on_the_same_day_asks_the_owner():
+    """Заказ №561: работа Дмитрия на 9980 ₽, а сделка — общий заказ офиса на 34 980 ₽.
+
+    Взять её нельзя (затрём сумму), завести новую — тоже (у владельца одна сделка
+    на весь объект). Отличить от параллельной работы другого мастера нельзя — спрашиваем.
+    """
     d = match(
         order_date=ORDER_DAY,
-        candidates=[L(31241333, REAL, CREATED, order_date=ORDER_DAY,
+        candidates=[L(31515875, REAL, CREATED, order_date=ORDER_DAY,
+                      specialists=[POLOZOV, SKOROPASHKINA], price=Decimal("34980"))],
+        master_specialist_ids=(KOZLOV,),
+        order_amount=Decimal("9980"),
+    )
+    assert d.kind == "ask_owner_unrelated" and d.options == (31515875,)
+
+
+def test_foreign_deal_on_another_date_does_not_block_new_one():
+    """Чужая сделка не на дату заказа вопросов не вызывает — заводим свою."""
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(1, REAL, CREATED, order_date=ORDER_DAY - timedelta(days=9),
                       specialists=[SKOROPASHKINA], price=Decimal("17550"))],
         master_specialist_ids=(POLOZOV,),
         order_amount=Decimal("4500"),

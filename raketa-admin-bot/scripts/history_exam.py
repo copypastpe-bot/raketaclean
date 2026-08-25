@@ -306,6 +306,11 @@ def classify(order: Order, decision: Decision, fact_lead_id: Optional[int],
         return (VERDICT_QUESTION_STALE,
                 f"только старые хвосты: {', '.join('#' + str(x) for x in decision.options)}")
 
+    if decision.kind == "ask_owner_unrelated":
+        return (VERDICT_QUESTION_STALE,
+                f"сделка похожа на чужую работу: "
+                f"{', '.join('#' + str(x) for x in decision.options)}")
+
     hit_kinds = ("use_realization", "already_done", "use_primary")
     if decision.kind in hit_kinds:
         target = decision.lead_id
@@ -408,16 +413,22 @@ def _mark_swaps(rows: list[ExamRow]) -> None:
             by_phone.setdefault(row.order.phone10, []).append(row)
 
     for client_rows in by_phone.values():
+        if len(client_rows) < 2:
+            continue                       # перестановка возможна только при нескольких заказах
         wrong = [row for row in client_rows if row.verdict == VERDICT_WRONG]
-        if len(wrong) < 2:
+        if not wrong:
             continue
-        robot_leads = {row.decision.lead_id for row in wrong if row.decision.lead_id}
-        fact_leads = {row.fact_lead_id for row in wrong if row.fact_lead_id}
-        if robot_leads and robot_leads == fact_leads:
+
+        robot_leads = {row.decision.lead_id for row in client_rows if row.decision.lead_id}
+        fact_leads = {row.fact_lead_id for row in client_rows if row.fact_lead_id}
+        # Робот не взял ни одной сделки за пределами «правильного» набора: он не тронул
+        # чужого и не создал дубль поверх свободной сделки — только разложил иначе.
+        if robot_leads and robot_leads <= fact_leads:
             for row in wrong:
                 row.verdict = VERDICT_SWAPPED
-                row.note = (f"сделки переставлены между заказами клиента: робот взял "
-                            f"#{row.decision.lead_id}, проверка ждала #{row.fact_lead_id}")
+                taken = f"#{row.decision.lead_id}" if row.decision.lead_id else "новую сделку"
+                row.note = (f"сделки разошлись между заказами клиента: робот взял {taken}, "
+                            f"проверка ждала #{row.fact_lead_id}")
 
 
 def _listing(rows: list[ExamRow], title: str, note: str = "") -> list[str]:

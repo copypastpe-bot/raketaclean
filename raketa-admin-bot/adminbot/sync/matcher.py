@@ -96,6 +96,8 @@ class Decision:
       create_new       — сделки нет вовсе, заводим с нуля (путь В)
       ask_owner        — кандидатов несколько, правила не решили (путь Г)
       ask_owner_stale  — свежих сделок нет, есть старые хвосты: «заводи новую» / «сам разберусь»
+      ask_owner_unrelated — единственная подходящая по дате сделка выглядит чужой
+                            (другой мастер и сумма в разы): «заводи новую» / «сам разберусь»
       already_done     — заказ уже проведён руками: только привязать, не трогать
     """
 
@@ -264,10 +266,13 @@ def match(*, order_date: date, candidates: Iterable[LeadInfo],
     #    ковровым быть не может: ковры приходят только через Excel партнёра.
     #    Занятые сделки тоже прочь — они уже принадлежат другому заказу.
     taken = set(taken_lead_ids)
-    leads = [lead for lead in candidates
-             if lead.pipeline_id not in ids.PIPELINES_IGNORED
-             and lead.lead_id not in taken
-             and not _is_foreign(lead, master_specialist_ids, order_amount)]
+    ours = [lead for lead in candidates
+            if lead.pipeline_id not in ids.PIPELINES_IGNORED and lead.lead_id not in taken]
+
+    # Сделки, похожие на чужую работу, откладываем: сами их не трогаем, но и
+    # молча заводить новую поверх них нельзя — спросим владельца (см. ниже).
+    foreign = [lead for lead in ours if _is_foreign(lead, master_specialist_ids, order_amount)]
+    leads = [lead for lead in ours if lead not in foreign]
 
     realization = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_REALIZATION]
     primary = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_PRIMARY]
@@ -316,5 +321,14 @@ def match(*, order_date: date, candidates: Iterable[LeadInfo],
     if stale:
         return _ask(stale, kind="ask_owner_stale")
 
-    # 6. Ничего подходящего — заводим сделку с нуля (путь В, ~1 раз в неделю).
+    # 6. Своих сделок нет, но есть отложенная чужая ровно на дату заказа. Это либо
+    #    параллельная работа другого мастера (тогда нужна новая сделка), либо общая
+    #    сделка на весь объект (тогда трогать нельзя и заводить вторую тоже).
+    #    Отличить нельзя — решает владелец.
+    unrelated = [lead for lead in foreign
+                 if lead.is_open and _in_order_date_window(order_date, lead)]
+    if unrelated:
+        return _ask(unrelated, kind="ask_owner_unrelated")
+
+    # 7. Ничего подходящего — заводим сделку с нуля (путь В, ~1 раз в неделю).
     return Decision(kind="create_new")
