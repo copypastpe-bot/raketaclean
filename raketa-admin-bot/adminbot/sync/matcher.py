@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from typing import Collection, Iterable, Optional, Sequence
 
 from adminbot.amo import ids
@@ -49,6 +50,12 @@ STALE_LEAD_DAYS = 14
 # (25 сделок из 142 за квартал). Небольшой запас вперёд обязателен.
 FUTURE_CREATION_DAYS = 30
 
+# Во сколько раз сумма сделки должна разойтись с чеком, чтобы считать это уликой.
+# Двукратная разница — заведомо не «доп. продажа сверх плана», а другая работа.
+PRICE_MISMATCH_RATIO = Decimal(2)
+# Ниже этого порога бюджет сделки — заглушка (встречаются сделки с ценой 1 ₽).
+PLACEHOLDER_PRICE = Decimal(100)
+
 
 @dataclass(frozen=True)
 class LeadInfo:
@@ -61,6 +68,7 @@ class LeadInfo:
     closed_date: Optional[date] = None     # когда сделку закрыли
     created_date: Optional[date] = None    # когда сделку завели
     specialist_ids: tuple[int, ...] = ()   # поле «Специалист»: enum-значения мастеров
+    price: Optional[Decimal] = None        # бюджет сделки: часто плановый или заглушка
     name: Optional[str] = None             # для карточки-вопроса владельцу
 
     @property
@@ -120,6 +128,26 @@ def _is_fresh(order_date: date, lead: LeadInfo) -> bool:
         return True                        # даты создания нет — не наказываем
     age = (order_date - lead.created_date).days
     return -FUTURE_CREATION_DAYS <= age <= STALE_LEAD_DAYS
+
+
+def _is_foreign(lead: LeadInfo, master_ids: Sequence[int], order_amount: Optional[Decimal]) -> bool:
+    """Сделка явно чужая: и мастер другой, и сумма расходится в разы.
+
+    Порознь эти признаки ненадёжны: «Специалист» показывает планируемого мастера
+    (заказы №418 и №445), а бюджет сделки бывает плановым или заглушкой в 1 рубль.
+    Вместе они весомы — заказ №412: работа Никиты на 4500 ₽, а сделка Ольги
+    на 17 550 ₽ (уборка того же клиента, шла параллельно).
+    """
+    if not master_ids or not lead.specialist_ids:
+        return False
+    if set(master_ids) & set(lead.specialist_ids):
+        return False                       # мастер наш — сделка точно не чужая
+    if order_amount is None or lead.price is None:
+        return False
+    if lead.price < PLACEHOLDER_PRICE or order_amount <= 0:
+        return False                       # заглушка вместо суммы — не улика
+    ratio = max(lead.price, order_amount) / min(lead.price, order_amount)
+    return ratio >= PRICE_MISMATCH_RATIO
 
 
 def _ask(leads: Iterable[LeadInfo], kind: str = "ask_owner") -> Decision:
@@ -220,12 +248,16 @@ def _pick_completed(order_date: date, realization: list[LeadInfo],
 
 def match(*, order_date: date, candidates: Iterable[LeadInfo],
           master_specialist_ids: Sequence[int] = (),
-          taken_lead_ids: Collection[int] = ()) -> Decision:
+          taken_lead_ids: Collection[int] = (),
+          order_amount: Optional[Decimal] = None) -> Decision:
     """Решить, что делать с заказом бота, по списку сделок его телефона.
 
     taken_lead_ids — сделки, уже закреплённые за другими заказами этого клиента.
     Одна сделка не может закрывать два заказа: у клиента бывает несколько работ
     подряд (например, пять заказов за май), и каждой полагается своя сделка.
+
+    order_amount — сумма чека. Нужна не для выбора, а для отсева заведомо чужих
+    сделок: работа на 4500 ₽ не может быть сделкой на 17 550 ₽ другого мастера.
     """
 
     # 1. Ковровые и архивные воронки — не наш случай. Заказ, заведённый в боте,
@@ -233,7 +265,9 @@ def match(*, order_date: date, candidates: Iterable[LeadInfo],
     #    Занятые сделки тоже прочь — они уже принадлежат другому заказу.
     taken = set(taken_lead_ids)
     leads = [lead for lead in candidates
-             if lead.pipeline_id not in ids.PIPELINES_IGNORED and lead.lead_id not in taken]
+             if lead.pipeline_id not in ids.PIPELINES_IGNORED
+             and lead.lead_id not in taken
+             and not _is_foreign(lead, master_specialist_ids, order_amount)]
 
     realization = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_REALIZATION]
     primary = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_PRIMARY]

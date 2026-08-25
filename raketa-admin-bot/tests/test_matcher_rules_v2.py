@@ -5,6 +5,7 @@
 """
 
 from datetime import date, timedelta
+from decimal import Decimal
 
 from adminbot.sync.matcher import STALE_LEAD_DAYS, Decision, LeadInfo, match
 
@@ -22,12 +23,13 @@ KOZLOV, POLOZOV, SKOROPASHKINA = 951507, 951505, 952251
 ORDER_DAY = date(2026, 8, 20)
 
 
-def L(id, pipeline, status, *, order_date=None, closed_date=None, created_date=None, specialists=()):
+def L(id, pipeline, status, *, order_date=None, closed_date=None, created_date=None,
+      specialists=(), price=None):
     return LeadInfo(
         lead_id=id, pipeline_id=pipeline, status_id=status,
         order_date=order_date, closed_date=closed_date,
         created_date=created_date or ORDER_DAY - timedelta(days=1),   # по умолчанию свежая
-        specialist_ids=tuple(specialists),
+        specialist_ids=tuple(specialists), price=price,
     )
 
 
@@ -295,6 +297,67 @@ def test_deal_created_after_order_is_still_a_candidate():
     d = match(order_date=ORDER_DAY, candidates=[
         L(1, REAL, CREATED, created_date=ORDER_DAY + timedelta(days=8))])
     assert d == Decision(kind="use_realization", lead_id=1)
+
+
+# --- заведомо чужая сделка: другой мастер И сумма в разы больше ---
+
+def test_foreign_deal_dropped_when_master_and_amount_both_differ():
+    """Заказ №412: работа Никиты на 4500 ₽, сделка Ольги на 17 550 ₽ (уборка)."""
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(31241333, REAL, CREATED, order_date=ORDER_DAY,
+                      specialists=[SKOROPASHKINA], price=Decimal("17550"))],
+        master_specialist_ids=(POLOZOV,),
+        order_amount=Decimal("4500"),
+    )
+    assert d.kind == "create_new"
+
+
+def test_other_master_but_matching_amount_is_ours():
+    """Заказ №418: мастера подменили, но сумма совпадает — сделка наша."""
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(31271495, REAL, CREATED, order_date=ORDER_DAY,
+                      specialists=[KOZLOV], price=Decimal("3000"))],
+        master_specialist_ids=(POLOZOV,),
+        order_amount=Decimal("3000"),
+    )
+    assert d == Decision(kind="use_realization", lead_id=31271495)
+
+
+def test_upsell_does_not_make_the_deal_foreign():
+    """Заказ №445: в сделке план 5200 ₽, по факту чек 5500 ₽ — расхождение обычное."""
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(1, REAL, CREATED, order_date=ORDER_DAY,
+                      specialists=[POLOZOV], price=Decimal("5200"))],
+        master_specialist_ids=(KOZLOV,),
+        order_amount=Decimal("5500"),
+    )
+    assert d.kind == "use_realization"
+
+
+def test_placeholder_price_is_not_evidence():
+    """В сделках встречается цена 1 ₽ как заглушка — это не улика против."""
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(1, REAL, CREATED, order_date=ORDER_DAY,
+                      specialists=[SKOROPASHKINA], price=Decimal("1"))],
+        master_specialist_ids=(POLOZOV,),
+        order_amount=Decimal("4500"),
+    )
+    assert d.kind == "use_realization"
+
+
+def test_our_master_is_never_foreign_however_odd_the_amount():
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(1, REAL, CREATED, order_date=ORDER_DAY,
+                      specialists=[KOZLOV], price=Decimal("50000"))],
+        master_specialist_ids=(KOZLOV,),
+        order_amount=Decimal("4500"),
+    )
+    assert d.kind == "use_realization"
 
 
 # --- одна сделка не закрывает два заказа ---

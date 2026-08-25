@@ -69,6 +69,7 @@ VERDICT_QUESTION_STALE = "question_stale"   # вопрос: только ста�
 VERDICT_WRONG = "wrong"               # уверенно, но мимо — этого быть не должно
 VERDICT_NO_PHONE = "no_phone"         # телефон заказа не распознан
 VERDICT_AMBIGUOUS = "ambiguous"       # сам факт неоднозначен — сверять не с чем
+VERDICT_SWAPPED = "swapped"           # сделки переставлены между заказами клиента
 
 # Названия признаков, которыми опознан «факт»
 SOURCE_ORDER_DATE = "по полю «Дата и время заказа»"
@@ -170,6 +171,7 @@ def to_lead_info(lead: dict) -> LeadInfo:
         closed_date=_closed_date(lead),
         created_date=_created_date(lead),
         specialist_ids=specialist_ids(lead),
+        price=None if lead.get("price") is None else Decimal(str(lead["price"])),
         name=lead.get("name"),
     )
 
@@ -208,6 +210,7 @@ def to_lead_info_as_of(lead: dict, moment: datetime) -> Optional[LeadInfo]:
         closed_date=None if was_open else _closed_date(lead),
         created_date=_created_date(lead),
         specialist_ids=specialist_ids(lead),
+        price=None if lead.get("price") is None else Decimal(str(lead["price"])),
         name=lead.get("name"),
     )
 
@@ -372,7 +375,8 @@ async def run_exam(orders: list[Order], client: AmoClient, pause: float,
         fact_taken = taken_by_fact.setdefault(order.phone10, set())
 
         decision = match(order_date=order.order_date, candidates=candidates,
-                         master_specialist_ids=master_ids, taken_lead_ids=robot_taken)
+                         master_specialist_ids=master_ids, taken_lead_ids=robot_taken,
+                         order_amount=order.amount_total)
         fact_lead_id, fact_source = find_fact_lead(
             order.order_date, raw_leads, order.amount_total, fact_taken)
         verdict, note = classify(order, decision, fact_lead_id, candidates, fact_source)
@@ -387,7 +391,33 @@ async def run_exam(orders: list[Order], client: AmoClient, pause: float,
             print(f"  обработано {index}/{len(orders)}…", flush=True)
         await asyncio.sleep(pause)
 
+    _mark_swaps(rows)
     return rows
+
+
+def _mark_swaps(rows: list[ExamRow]) -> None:
+    """Отметить случаи, когда сделки просто переставлены между заказами клиента.
+
+    У клиента два заказа и две сделки: робот отдал первую сделку первому заказу,
+    а проверка — второму. Набор сделок один и тот же, дублей нет, чужого никто не
+    трогал — итог в CRM верный, различаются только ярлыки. Это не ошибка.
+    """
+    by_phone: dict[str, list[ExamRow]] = {}
+    for row in rows:
+        if row.order.phone10:
+            by_phone.setdefault(row.order.phone10, []).append(row)
+
+    for client_rows in by_phone.values():
+        wrong = [row for row in client_rows if row.verdict == VERDICT_WRONG]
+        if len(wrong) < 2:
+            continue
+        robot_leads = {row.decision.lead_id for row in wrong if row.decision.lead_id}
+        fact_leads = {row.fact_lead_id for row in wrong if row.fact_lead_id}
+        if robot_leads and robot_leads == fact_leads:
+            for row in wrong:
+                row.verdict = VERDICT_SWAPPED
+                row.note = (f"сделки переставлены между заказами клиента: робот взял "
+                            f"#{row.decision.lead_id}, проверка ждала #{row.fact_lead_id}")
 
 
 def _listing(rows: list[ExamRow], title: str, note: str = "") -> list[str]:
@@ -436,6 +466,7 @@ def build_report(rows: list[ExamRow], days: int, as_of_order: bool,
         f"| Вопрос: какую сделку брать | {counts[VERDICT_QUESTION]} | {pct(counts[VERDICT_QUESTION])} |",
         f"| Вопрос: только старые хвосты | {counts[VERDICT_QUESTION_STALE]} | {pct(counts[VERDICT_QUESTION_STALE])} |",
         f"| Сверять не с чем (факт неоднозначен) | {counts[VERDICT_AMBIGUOUS]} | {pct(counts[VERDICT_AMBIGUOUS])} |",
+        f"| Сделки переставлены между заказами клиента | {counts[VERDICT_SWAPPED]} | {pct(counts[VERDICT_SWAPPED])} |",
         f"| **Уверенно, но неверно** | **{counts[VERDICT_WRONG]}** | {pct(counts[VERDICT_WRONG])} |",
         f"| Телефон не распознан | {counts[VERDICT_NO_PHONE]} | {pct(counts[VERDICT_NO_PHONE])} |",
         "",
@@ -450,6 +481,11 @@ def build_report(rows: list[ExamRow], days: int, as_of_order: bool,
     lines += _listing([r for r in rows if r.verdict == VERDICT_WEAK],
                       "Подтверждено слабым признаком — проверить глазами",
                       "Сделка опознана по дате закрытия, а не по «Дате и времени заказа».")
+    lines += _listing([r for r in rows if r.verdict == VERDICT_SWAPPED],
+                      "Сделки переставлены между заказами клиента",
+                      "У клиента несколько заказов и столько же сделок. Робот и проверка "
+                      "разложили их по-разному, но набор сделок один и тот же: дублей нет, "
+                      "чужого никто не трогал, суммы в CRM верные.")
     lines += _listing([r for r in rows if r.verdict == VERDICT_AMBIGUOUS],
                       "Сверять не с чем — проверить глазами",
                       "У клиента несколько одинаково подходящих проведённых сделок, "
