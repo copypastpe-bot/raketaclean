@@ -21,6 +21,7 @@ CREATE TABLE public.staff (
     full_name   text,
     first_name  text,
     last_name   text,
+    phone       text,
     role        text NOT NULL DEFAULT 'master',
     is_active   boolean NOT NULL DEFAULT true
 );

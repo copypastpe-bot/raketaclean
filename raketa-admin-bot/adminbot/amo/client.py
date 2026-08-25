@@ -257,3 +257,11 @@ class AmoClient:
 
     async def get_contact(self, contact_id: int) -> Optional[dict]:
         return await self.get(f"/api/v4/contacts/{contact_id}")
+
+    async def get_lead_field_enums(self, field_id: int) -> list[dict]:
+        """Варианты списочного поля сделки (например, все «Специалисты»).
+
+        Читаем из амо, а не держим у себя: список мастеров меняется.
+        """
+        payload = await self.get(f"/api/v4/leads/custom_fields/{field_id}")
+        return list((payload or {}).get("enums") or [])

@@ -6,7 +6,7 @@ from aiohttp.test_utils import TestServer
 
 from adminbot.amo import ids
 from adminbot.amo.client import AmoAuthError, AmoClient, AmoError, AmoRateLimitError
-from adminbot.amo.fields import contact_phones, field_value, order_date_msk
+from adminbot.amo.fields import contact_phones, field_value, order_date_msk, specialist_ids
 
 CONTACT_PAGE_1 = {
     "_page": 1,
@@ -256,6 +256,33 @@ def test_order_date_uses_moscow_time():
     # 1755000000 = 2025-08-12 12:40 UTC → в Москве 15:40 того же дня
     assert order_date_msk(LEAD_WITH_FIELDS).isoformat() == "2025-08-12"
     assert order_date_msk({}) is None                            # «Дата заказа» не заполнена
+
+
+async def test_get_lead_field_enums(amo):
+    client, fake = amo
+    fake.stub("/api/v4/leads/custom_fields/39243", {
+        "id": 39243, "name": "Специалист",
+        "enums": [{"id": 951507, "value": "Дмитрий Козлов +79306858534"}],
+    })
+
+    enums = await client.get_lead_field_enums(ids.FIELD_SPECIALIST)
+    assert enums == [{"id": 951507, "value": "Дмитрий Козлов +79306858534"}]
+
+
+def test_specialist_ids_read_from_lead():
+    lead = {
+        "custom_fields_values": [
+            {"field_id": ids.FIELD_SPECIALIST, "values": [
+                {"value": "Дмитрий Козлов +79306858534", "enum_id": 951507}]},
+            {"field_id": ids.FIELD_SERVICE, "values": [
+                {"value": "Чистка мебели", "enum_id": 933165}]},
+        ]
+    }
+    assert specialist_ids(lead) == (951507,)
+    assert specialist_ids({}) == ()
+    # текстовое поле без enum_id в список не попадает
+    assert specialist_ids({"custom_fields_values": [
+        {"field_id": ids.FIELD_SPECIALIST, "values": [{"value": "Кто-то"}]}]}) == ()
 
 
 def test_contact_phones_normalized_to_last10():

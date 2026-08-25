@@ -19,7 +19,10 @@ class Order:
     # Доп. продажу (orders.upsale_amount) сюда НЕ подмешиваем: в амо её нет,
     # она нужна только для расчёта зарплаты мастера внутри бота.
     amount_total: Decimal
-    master_names: list[str] = field(default_factory=list)  # основной мастер первым
+    # Мастера заказа, основной первым: (имя, телефон). Телефон нужен, чтобы связать
+    # мастера со «Специалистом» в амо — так различаются уборка и химчистка
+    # одному клиенту в один день.
+    masters: list[tuple[str, Optional[str]]] = field(default_factory=list)
     rating_score: Optional[int] = None   # оценка клиента: есть → задачу «Получить ОС» закрываем
     client_name: Optional[str] = None
     address: Optional[str] = None
@@ -28,6 +31,10 @@ class Order:
     def order_date(self):
         """Дата заказа — по ней матчер сверяется со сделками амо."""
         return self.created_at.date()
+
+    @property
+    def master_names(self) -> list[str]:
+        return [name for name, _ in self.masters]
 
 
 @dataclass(frozen=True)

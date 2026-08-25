@@ -2,9 +2,17 @@
 
 РЕЖИМ ТОЛЬКО ЧТЕНИЕ. Скрипт ничего не меняет ни в амо, ни в БД бота.
 
-Что делает: берёт заказы бота за период, по телефону каждого находит сделки в амо,
-спрашивает у матчера решение и сравнивает его с фактом — какая сделка реально
-проведена в воронке реализации. Считает три числа из дизайна §6:
+Два режима:
+
+* `--mode as-of-order` (по умолчанию) — «экзамен во времени». Для каждого заказа
+  восстанавливаем, как выглядела CRM В МОМЕНТ заказа: какие сделки уже
+  существовали и какие были ещё открыты. Это проверяет ту ветку, которой робот
+  будет жить каждый день — выбор среди ОТКРЫТЫХ сделок.
+
+* `--mode now` — прогон по сегодняшнему состоянию CRM. Вся история уже разобрана
+  владельцем, поэтому здесь почти всегда срабатывает ветка «уже проведено руками».
+
+Считаем три числа из дизайна §6:
   - доля решённых автоматически (цель ≥92%);
   - доля вопросов владельцу (цель ≤8%);
   - «уверенно, но неверно» (цель 0) — самое важное число.
@@ -14,17 +22,18 @@
 
 Доступы (оба на чтение):
     DB_DSN            — из ~/Projects/tgbot-v1/.env (--bot-env)
-    AMOCRM_API_TOKEN  — из ./.env.exam (--amo-env), копируется с сервера владельцем
+    AMOCRM_API_TOKEN  — из ./.env.exam (--amo-env)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -35,28 +44,34 @@ from dotenv import dotenv_values
 
 from adminbot.amo import ids
 from adminbot.amo.client import AmoClient
-from adminbot.amo.fields import MOSCOW_TZ, order_date_msk
+from adminbot.amo.fields import MOSCOW_TZ, order_date_msk, specialist_ids
 from adminbot.models import Order
 from adminbot.phone import last10
-from adminbot.sync.matcher import DATE_WINDOW_DAYS, Decision, LeadInfo, match
+from adminbot.sync.matcher import (
+    CLOSED_WINDOW_DAYS, DATE_WINDOW_DAYS, STALE_LEAD_DAYS, Decision, LeadInfo, match,
+)
+from adminbot.sync.specialists import SpecialistIndex
 
 DEFAULT_BOT_ENV = Path.home() / "Projects" / "tgbot-v1" / ".env"
 DEFAULT_AMO_ENV = Path(__file__).resolve().parent.parent / ".env.exam"
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "docs" / "plans" / "history-exam-result.md"
 
-# Окно для запасного признака «когда сделку реально закрыли». Поле «Дата и время
-# заказа» заполнено лишь у 78% сделок, а вот момент закрытия есть всегда.
-CLOSED_WINDOW_DAYS = 3
-
 # Потолок здравого смысла: рекорд по разведке — 53 сделки у постоянного B2B-клиента.
 # Больше сотни означает, что амо отдала чужие сделки, а не сделки клиента.
 MAX_LEADS_PER_CLIENT = 150
 
-VERDICT_AUTO = "auto"           # решено автоматически и совпало с фактом
-VERDICT_PENDING = "pending"     # робот сработал бы, заказ ещё не проведён руками
-VERDICT_QUESTION = "question"   # честный вопрос владельцу
-VERDICT_WRONG = "wrong"         # уверенно, но мимо — этого быть не должно
-VERDICT_NO_PHONE = "no_phone"   # телефон заказа не распознан
+VERDICT_AUTO = "auto"                 # решено автоматически и совпало с фактом
+VERDICT_WEAK = "weak"                 # совпало, но факт подтверждён слабым признаком
+VERDICT_PENDING = "pending"           # робот сработал бы, заказ ещё не проведён руками
+VERDICT_QUESTION = "question"         # вопрос: какую сделку брать
+VERDICT_QUESTION_STALE = "question_stale"   # вопрос: только старые хвосты, что делать
+VERDICT_WRONG = "wrong"               # уверенно, но мимо — этого быть не должно
+VERDICT_NO_PHONE = "no_phone"         # телефон заказа не распознан
+
+# Названия признаков, которыми опознан «факт»
+SOURCE_ORDER_DATE = "по полю «Дата и время заказа»"
+SOURCE_CLOSED = "по дате закрытия сделки"
+WEAK_SOURCES = (SOURCE_CLOSED,)
 
 
 @dataclass
@@ -67,10 +82,6 @@ class ExamRow:
     verdict: str
     note: str = ""
     candidates: list[LeadInfo] = field(default_factory=list)
-    # Решение принято по запасному признаку (дате закрытия сделки), а не по
-    # «Дате и времени заказа». Такие случаи и матчер, и проверка считают одинаково,
-    # то есть проверка их не подтверждает — нужен взгляд человека.
-    by_closed_date: bool = False
 
     @property
     def phone_masked(self) -> str:
@@ -81,7 +92,20 @@ ORDERS_SQL = """
 SELECT o.id, o.phone, o.phone_digits, o.customer_name, o.created_at,
        o.amount_total, o.rating_score,
        c.full_name AS client_full_name,
-       COALESCE(NULLIF(TRIM(c.address), ''), NULLIF(TRIM(c.last_order_addr), '')) AS address
+       COALESCE(NULLIF(TRIM(c.address), ''), NULLIF(TRIM(c.last_order_addr), '')) AS address,
+       COALESCE((
+           SELECT jsonb_agg(jsonb_build_array(m.name, m.phone) ORDER BY m.is_primary DESC, m.name)
+           FROM (
+               SELECT COALESCE(NULLIF(TRIM(s.full_name), ''),
+                               NULLIF(TRIM(CONCAT_WS(' ', s.first_name, s.last_name)), '')) AS name,
+                      s.phone AS phone,
+                      (s.id = o.master_id) AS is_primary
+               FROM public.staff s
+               WHERE s.id = o.master_id
+                  OR s.id IN (SELECT om.master_id FROM public.order_masters om WHERE om.order_id = o.id)
+           ) m
+           WHERE m.name IS NOT NULL
+       ), '[]'::jsonb) AS masters
 FROM public.orders o
 LEFT JOIN public.clients c ON c.id = o.client_id
 WHERE o.created_at >= now() - ($1::int || ' days')::interval
@@ -89,8 +113,12 @@ ORDER BY o.created_at, o.id
 """
 
 
+async def _init_json(conn: asyncpg.Connection) -> None:
+    await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
+
+
 async def load_orders(dsn: str, days: int) -> list[Order]:
-    conn = await asyncpg.connect(dsn)
+    conn = await asyncpg.connect(dsn, init=_init_json)
     try:
         rows = await conn.fetch(ORDERS_SQL, days)
     finally:
@@ -101,7 +129,7 @@ async def load_orders(dsn: str, days: int) -> list[Order]:
             phone10=last10(row["phone_digits"]) or last10(row["phone"]),
             created_at=row["created_at"].astimezone(MOSCOW_TZ),
             amount_total=row["amount_total"] or 0,
-            master_names=[],
+            masters=[(str(name), phone) for name, phone in (row["masters"] or [])],
             rating_score=row["rating_score"],
             client_name=row["client_full_name"] or row["customer_name"],
             address=row["address"],
@@ -110,20 +138,68 @@ async def load_orders(dsn: str, days: int) -> list[Order]:
     ]
 
 
-def _closed_date(lead: dict) -> Optional[date]:
-    raw = lead.get("closed_at")
-    if not raw:
+def _to_msk_date(stamp: Optional[int]) -> Optional[date]:
+    if not stamp:
         return None
-    return datetime.fromtimestamp(int(raw), tz=timezone.utc).astimezone(MOSCOW_TZ).date()
+    return datetime.fromtimestamp(int(stamp), tz=timezone.utc).astimezone(MOSCOW_TZ).date()
+
+
+def _closed_date(lead: dict) -> Optional[date]:
+    return _to_msk_date(lead.get("closed_at"))
+
+
+def _created_date(lead: dict) -> Optional[date]:
+    return _to_msk_date(lead.get("created_at"))
 
 
 def to_lead_info(lead: dict) -> LeadInfo:
+    """Сделка в том виде, в каком её видит матчер СЕГОДНЯ."""
     return LeadInfo(
         lead_id=int(lead["id"]),
         pipeline_id=int(lead.get("pipeline_id") or 0),
         status_id=int(lead.get("status_id") or 0),
         order_date=order_date_msk(lead),
         closed_date=_closed_date(lead),
+        created_date=_created_date(lead),
+        specialist_ids=specialist_ids(lead),
+        name=lead.get("name"),
+    )
+
+
+# Чем подменяем неизвестный этап у сделки, которая на момент заказа была открыта.
+# Точный этап в истории не сохраняется, но матчеру важно лишь «открыта или нет».
+OPEN_STAGE_STANDIN = {
+    ids.PIPELINE_REALIZATION: ids.REAL_STAGE_CREATED,
+    ids.PIPELINE_PRIMARY: ids.PRIM_STAGE_NEW_LEAD,
+}
+
+
+def to_lead_info_as_of(lead: dict, moment: datetime) -> Optional[LeadInfo]:
+    """Сделка в том виде, в каком её увидел бы робот В МОМЕНТ заказа.
+
+    None — если на тот момент сделки ещё не существовало.
+    """
+    created_at = lead.get("created_at")
+    if created_at and int(created_at) > moment.timestamp():
+        return None
+
+    closed_at = lead.get("closed_at")
+    was_open = not closed_at or int(closed_at) > moment.timestamp()
+    pipeline_id = int(lead.get("pipeline_id") or 0)
+    status_id = int(lead.get("status_id") or 0)
+
+    if was_open and status_id in ids.STATUSES_FINAL:
+        # Сейчас закрыта, но тогда была ещё в работе: точный этап неизвестен.
+        status_id = OPEN_STAGE_STANDIN.get(pipeline_id, ids.REAL_STAGE_CREATED)
+
+    return LeadInfo(
+        lead_id=int(lead["id"]),
+        pipeline_id=pipeline_id,
+        status_id=status_id,
+        order_date=order_date_msk(lead),
+        closed_date=None if was_open else _closed_date(lead),
+        created_date=_created_date(lead),
+        specialist_ids=specialist_ids(lead),
         name=lead.get("name"),
     )
 
@@ -133,6 +209,9 @@ def find_fact_lead(order_date: date, leads: list[dict]) -> tuple[Optional[int], 
 
     Сначала по полю «Дата и время заказа» (±2 дня), затем по моменту закрытия
     сделки (±3 дня) — для сделок, где поле даты не заполняли.
+
+    Дату создания сделки здесь СОЗНАТЕЛЬНО не используем: этим признаком
+    пользуется сам матчер, и проверка перестала бы быть независимой.
     """
     completed = [
         lead for lead in leads
@@ -148,7 +227,7 @@ def find_fact_lead(order_date: date, leads: list[dict]) -> tuple[Optional[int], 
         and abs((order_date_msk(lead) - order_date).days) <= DATE_WINDOW_DAYS
     ]
     if dated:
-        return min(dated)[1], "по полю «Дата и время заказа»"
+        return min(dated)[1], SOURCE_ORDER_DATE
 
     by_closed = [
         (abs((_closed_date(lead) - order_date).days), int(lead["id"]))
@@ -156,47 +235,42 @@ def find_fact_lead(order_date: date, leads: list[dict]) -> tuple[Optional[int], 
         and abs((_closed_date(lead) - order_date).days) <= CLOSED_WINDOW_DAYS
     ]
     if by_closed:
-        return min(by_closed)[1], "по дате закрытия сделки"
+        return min(by_closed)[1], SOURCE_CLOSED
 
     return None, ""
 
 
 def classify(order: Order, decision: Decision, fact_lead_id: Optional[int],
-             candidates: list[LeadInfo]) -> tuple[str, str]:
+             candidates: list[LeadInfo], fact_source: str = "") -> tuple[str, str]:
     """Сравнить решение матчера с фактом."""
     if decision.kind == "ask_owner":
         return VERDICT_QUESTION, f"кандидаты: {', '.join('#' + str(x) for x in decision.options)}"
 
-    if decision.kind in ("use_realization", "already_done"):
+    if decision.kind == "ask_owner_stale":
+        return (VERDICT_QUESTION_STALE,
+                f"только старые хвосты: {', '.join('#' + str(x) for x in decision.options)}")
+
+    hit_kinds = ("use_realization", "already_done", "use_primary")
+    if decision.kind in hit_kinds:
         target = decision.lead_id
         if fact_lead_id is None:
             open_target = any(c.lead_id == target and c.is_open for c in candidates)
             if open_target:
-                return VERDICT_PENDING, f"взял бы открытую сделку #{target}, руками ещё не проведено"
+                return VERDICT_PENDING, f"взял бы сделку #{target}, руками ещё не проведено"
+            if decision.kind == "use_primary":
+                return VERDICT_AUTO, f"через первичную сделку #{target} (путь Б)"
             return VERDICT_WRONG, f"взял #{target}, но проведённой сделки по заказу не видно"
         if target == fact_lead_id:
-            return VERDICT_AUTO, f"сделка #{target}"
+            verdict = VERDICT_WEAK if fact_source in WEAK_SOURCES else VERDICT_AUTO
+            return verdict, f"сделка #{target}" + (f" ({fact_source})" if fact_source else "")
+        if decision.kind == "use_primary":
+            return VERDICT_WRONG, f"пошёл бы через первичную #{target}, а проведена #{fact_lead_id}"
         return VERDICT_WRONG, f"взял #{target}, а проведена #{fact_lead_id}"
-
-    if decision.kind == "use_primary":
-        if fact_lead_id is None:
-            return VERDICT_AUTO, f"через первичную сделку #{decision.lead_id} (путь Б)"
-        return VERDICT_WRONG, f"пошёл бы через первичную #{decision.lead_id}, а проведена #{fact_lead_id}"
 
     # create_new
     if fact_lead_id is None:
         return VERDICT_AUTO, "сделки нет — создал бы новую (путь В)"
     return VERDICT_WRONG, f"создал бы дубль: сделка #{fact_lead_id} уже проведена"
-
-
-def _used_closed_date(order_date: date, decision: Decision, candidates: list[LeadInfo]) -> bool:
-    """Решение опирается на дату закрытия сделки, а не на «Дату и время заказа»?"""
-    if decision.kind != "already_done":
-        return False
-    chosen = next((lead for lead in candidates if lead.lead_id == decision.lead_id), None)
-    if chosen is None or chosen.order_date is None:
-        return True
-    return abs((chosen.order_date - order_date).days) > DATE_WINDOW_DAYS
 
 
 async def collect_candidates(client: AmoClient, phone10: str, cache: dict) -> list[dict]:
@@ -216,7 +290,8 @@ async def collect_candidates(client: AmoClient, phone10: str, cache: dict) -> li
     return leads
 
 
-async def run_exam(orders: list[Order], client: AmoClient, pause: float) -> list[ExamRow]:
+async def run_exam(orders: list[Order], client: AmoClient, pause: float,
+                   specialists: SpecialistIndex, as_of_order: bool) -> list[ExamRow]:
     cache: dict[str, list[dict]] = {}
     rows: list[ExamRow] = []
 
@@ -227,14 +302,20 @@ async def run_exam(orders: list[Order], client: AmoClient, pause: float) -> list
             continue
 
         raw_leads = await collect_candidates(client, order.phone10, cache)
-        candidates = [to_lead_info(lead) for lead in raw_leads]
-        decision = match(order_date=order.order_date, candidates=candidates)
+
+        if as_of_order:
+            candidates = [info for info in
+                          (to_lead_info_as_of(lead, order.created_at) for lead in raw_leads)
+                          if info is not None]
+        else:
+            candidates = [to_lead_info(lead) for lead in raw_leads]
+
+        master_ids = specialists.resolve_many(order.masters)
+        decision = match(order_date=order.order_date, candidates=candidates,
+                         master_specialist_ids=master_ids)
         fact_lead_id, fact_source = find_fact_lead(order.order_date, raw_leads)
-        verdict, note = classify(order, decision, fact_lead_id, candidates)
-        if fact_source and verdict == VERDICT_AUTO:
-            note = f"{note} ({fact_source})"
-        rows.append(ExamRow(order, decision, fact_lead_id, verdict, note, candidates,
-                            by_closed_date=_used_closed_date(order.order_date, decision, candidates)))
+        verdict, note = classify(order, decision, fact_lead_id, candidates, fact_source)
+        rows.append(ExamRow(order, decision, fact_lead_id, verdict, note, candidates))
 
         if index % 25 == 0:
             print(f"  обработано {index}/{len(orders)}…", flush=True)
@@ -243,87 +324,98 @@ async def run_exam(orders: list[Order], client: AmoClient, pause: float) -> list
     return rows
 
 
-def build_report(rows: list[ExamRow], days: int) -> str:
+def _listing(rows: list[ExamRow], title: str, note: str = "") -> list[str]:
+    if not rows:
+        return []
+    lines = [f"## {title}", ""]
+    if note:
+        lines += [note, ""]
+    for row in rows:
+        lines.append(
+            f"- Заказ №{row.order.order_id} · {row.phone_masked} · "
+            f"{row.order.order_date.isoformat()} — {row.note}"
+        )
+    lines.append("")
+    return lines
+
+
+def build_report(rows: list[ExamRow], days: int, as_of_order: bool) -> str:
     counts = Counter(row.verdict for row in rows)
     total = len(rows) or 1
-    auto = counts[VERDICT_AUTO] + counts[VERDICT_PENDING]
+    auto = counts[VERDICT_AUTO] + counts[VERDICT_WEAK] + counts[VERDICT_PENDING]
+    questions = counts[VERDICT_QUESTION] + counts[VERDICT_QUESTION_STALE]
 
     def pct(n: int) -> str:
         return f"{100 * n / total:.1f}%"
+
+    mode = ("во времени: CRM восстановлена на момент каждого заказа"
+            if as_of_order else "по сегодняшнему состоянию CRM")
 
     lines = [
         "# Экзамен на истории — результат",
         "",
         f"Дата прогона: {datetime.now(MOSCOW_TZ).date().isoformat()}. "
-        f"Период: {days} дней. Заказов: {len(rows)}. Режим: только чтение.",
+        f"Период: {days} дней. Заказов: {len(rows)}. Режим: только чтение, {mode}.",
         "",
         "## Итог",
         "",
         "| Исход | Кол-во | Доля |",
         "|---|---|---|",
-        f"| Решено автоматически и совпало с фактом | {counts[VERDICT_AUTO]} | {pct(counts[VERDICT_AUTO])} |",
-        f"| Робот сработал бы, заказ ещё не проведён руками | {counts[VERDICT_PENDING]} | {pct(counts[VERDICT_PENDING])} |",
-        f"| Вопрос владельцу | {counts[VERDICT_QUESTION]} | {pct(counts[VERDICT_QUESTION])} |",
+        f"| Решено автоматически и подтверждено фактом | {counts[VERDICT_AUTO]} | {pct(counts[VERDICT_AUTO])} |",
+        f"| Совпало, но подтверждение слабое | {counts[VERDICT_WEAK]} | {pct(counts[VERDICT_WEAK])} |",
+        f"| Сработал бы, заказ ещё не проведён руками | {counts[VERDICT_PENDING]} | {pct(counts[VERDICT_PENDING])} |",
+        f"| Вопрос: какую сделку брать | {counts[VERDICT_QUESTION]} | {pct(counts[VERDICT_QUESTION])} |",
+        f"| Вопрос: только старые хвосты | {counts[VERDICT_QUESTION_STALE]} | {pct(counts[VERDICT_QUESTION_STALE])} |",
         f"| **Уверенно, но неверно** | **{counts[VERDICT_WRONG]}** | {pct(counts[VERDICT_WRONG])} |",
         f"| Телефон не распознан | {counts[VERDICT_NO_PHONE]} | {pct(counts[VERDICT_NO_PHONE])} |",
         "",
         f"**Автоматически проводимо: {pct(auto)}** (порог дизайна ≥92%). "
-        f"Вопросов: {pct(counts[VERDICT_QUESTION])} (порог ≤8%). "
+        f"Вопросов: {pct(questions)} (порог ≤8%). "
         f"Уверенно-неверных: {counts[VERDICT_WRONG]} (порог 0).",
         "",
     ]
 
-    problems = [row for row in rows if row.verdict in (VERDICT_WRONG, VERDICT_NO_PHONE)]
-    if problems:
-        lines += ["## Ошибки (разбирать в первую очередь)", ""]
-        for row in problems:
-            lines.append(
-                f"- Заказ №{row.order.order_id} · {row.phone_masked} · "
-                f"{row.order.order_date.isoformat()} — {row.note}"
-            )
-        lines.append("")
-
-    fallback = [row for row in rows if row.by_closed_date]
-    if fallback:
-        lines += [
-            "## Решено по дате закрытия сделки — проверить глазами",
-            "",
-            "В этих заказах поле «Дата и время заказа» не совпало с датой заказа, "
-            "и робот опознал сделку по моменту её закрытия. Проверка «правды» устроена "
-            "так же, поэтому подтвердить эти случаи может только человек.",
-            "",
-        ]
-        for row in fallback:
-            lines.append(
-                f"- Заказ №{row.order.order_id} · {row.phone_masked} · "
-                f"{row.order.order_date.isoformat()} → сделка #{row.decision.lead_id}"
-            )
-        lines.append("")
-
-    questions = [row for row in rows if row.verdict == VERDICT_QUESTION]
-    if questions:
-        lines += ["## Вопросы владельцу", ""]
-        for row in questions:
-            lines.append(
-                f"- Заказ №{row.order.order_id} · {row.phone_masked} · "
-                f"{row.order.order_date.isoformat()} — {row.note}"
-            )
-        lines.append("")
+    lines += _listing([r for r in rows if r.verdict in (VERDICT_WRONG, VERDICT_NO_PHONE)],
+                      "Ошибки (разбирать в первую очередь)")
+    lines += _listing([r for r in rows if r.verdict == VERDICT_WEAK],
+                      "Подтверждено слабым признаком — проверить глазами",
+                      "Сделка опознана по дате закрытия, а не по «Дате и времени заказа».")
+    lines += _listing([r for r in rows if r.verdict == VERDICT_QUESTION],
+                      "Вопросы: какую сделку брать")
+    lines += _listing([r for r in rows if r.verdict == VERDICT_QUESTION_STALE],
+                      "Вопросы: остались только старые хвосты",
+                      "Робот предложит две кнопки: «заводи новую» и «сам разберусь».")
 
     lines += [
         "## Как считалось",
         "",
-        "«Факт» — сделка воронки реализации на успешном этапе, найденная сначала по полю "
-        "«Дата и время заказа» (±2 дня), затем по дате закрытия сделки (±3 дня). "
-        "Телефоны в отчёте маскированы до последних 4 цифр.",
+        "«Факт» — сделка воронки реализации на успешном этапе, найденная по полю "
+        f"«Дата и время заказа» (±{DATE_WINDOW_DAYS} дня), а если оно пустое или неверное — "
+        f"по дате закрытия сделки (±{CLOSED_WINDOW_DAYS} дня). Дата создания сделки в проверке "
+        "СОЗНАТЕЛЬНО не используется: этим признаком пользуется матчер, и проверка "
+        "перестала бы быть независимой.",
+        "",
+        f"Граница «живая сделка / старый хвост» — {STALE_LEAD_DAYS} дней "
+        "(измерено по истории: медиана 1 день, максимум 22 дня).",
+        "",
+        "Телефоны маскированы до последних 4 цифр.",
         "",
     ]
+    if as_of_order:
+        lines += [
+            "Оговорка режима «во времени»: точный этап сделки на момент заказа в амо "
+            "не сохраняется. Известно лишь, была ли она тогда открыта — этого матчеру "
+            "достаточно, но различить «Неразобранное» и «Новый лид» задним числом нельзя.",
+            "",
+        ]
     return "\n".join(lines)
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Экзамен матчера на истории (только чтение)")
     parser.add_argument("--days", type=int, default=90)
+    parser.add_argument("--mode", choices=("as-of-order", "now"), default="as-of-order",
+                        help="as-of-order: CRM на момент заказа; now: сегодняшнее состояние")
     parser.add_argument("--bot-env", type=Path, default=DEFAULT_BOT_ENV)
     parser.add_argument("--amo-env", type=Path, default=DEFAULT_AMO_ENV)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -348,6 +440,7 @@ async def main() -> int:
         print(f"  AMOCRM_* ожидаются в {args.amo_env}", file=sys.stderr)
         return 2
 
+    as_of_order = args.mode == "as-of-order"
     print(f"Беру заказы бота за {args.days} дней…", flush=True)
     orders = await load_orders(dsn, args.days)
     if args.limit:
@@ -356,20 +449,23 @@ async def main() -> int:
 
     client = AmoClient(base_url=base_url, token=token)
     try:
-        rows = await run_exam(orders, client, args.pause)
+        enums = await client.get_lead_field_enums(ids.FIELD_SPECIALIST)
+        specialists = SpecialistIndex.from_enums(enums)
+        print(f"Справочник «Специалист»: {len(enums)} значений, "
+              f"из них с телефоном {len(specialists.by_phone)}", flush=True)
+        rows = await run_exam(orders, client, args.pause, specialists, as_of_order)
     finally:
         await client.close()
 
-    report = build_report(rows, args.days)
+    report = build_report(rows, args.days, as_of_order)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(report, encoding="utf-8")
 
     print()
-    print(report.split("## Ошибки")[0].split("## Вопросы")[0])
+    print(report.split("## Ошибки")[0].split("## Подтверждено")[0].split("## Вопросы")[0])
     print(f"Отчёт сохранён: {args.out}")
 
-    wrong = sum(1 for row in rows if row.verdict == VERDICT_WRONG)
-    return 1 if wrong else 0
+    return 1 if any(row.verdict == VERDICT_WRONG for row in rows) else 0
 
 
 if __name__ == "__main__":

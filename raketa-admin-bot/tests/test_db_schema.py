@@ -37,9 +37,9 @@ async def pool():
         await conn.execute(BOT_FIXTURE.read_text())
         await conn.execute(
             """
-            INSERT INTO public.staff (id, full_name, first_name, last_name) VALUES
-                (1, 'Никита Иванов', 'Никита', 'Иванов'),
-                (2, NULL, 'Оля', 'Петрова')
+            INSERT INTO public.staff (id, full_name, first_name, last_name, phone) VALUES
+                (1, 'Никита Иванов', 'Никита', 'Иванов', '+79101251720'),
+                (2, NULL, 'Оля', 'Петрова', NULL)
             """
         )
         await conn.execute(
@@ -85,6 +85,7 @@ async def test_fetch_unprocessed_orders_reads_bot_data(pool):
     assert order.client_name == "Ирина"
     assert order.address == "ул. Ленина, 5"
     assert order.master_names == ["Никита Иванов", "Оля Петрова"]   # основной мастер первым
+    assert order.masters == [("Никита Иванов", "+79101251720"), ("Оля Петрова", None)]
 
     older = await db.fetch_unprocessed_orders(pool, pool, since=NOW.date() - timedelta(days=60))
     assert [o.order_id for o in older] == [500, 597, 596]

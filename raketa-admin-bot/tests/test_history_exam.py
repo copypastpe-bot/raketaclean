@@ -7,7 +7,7 @@ from adminbot.models import Order
 from adminbot.sync.matcher import Decision, LeadInfo
 from scripts.history_exam import (
     VERDICT_AUTO, VERDICT_PENDING, VERDICT_WRONG,
-    classify, find_fact_lead, to_lead_info,
+    classify, find_fact_lead, to_lead_info, to_lead_info_as_of,
 )
 
 REAL, PRIM, SUCCESS, CREATED = 4482787, 4482751, 142, 41463832
@@ -28,7 +28,7 @@ def order(order_id=596, day=date(2025, 8, 12)):
     return Order(
         order_id=order_id, phone10="9601861067",
         created_at=datetime(day.year, day.month, day.day, 12, tzinfo=timezone.utc),
-        amount_total=Decimal("5950"), master_names=[],
+        amount_total=Decimal("5950"), masters=[],
     )
 
 
@@ -95,6 +95,53 @@ def test_open_deal_without_fact_is_pending_not_error():
 def test_path_b_without_fact_is_correct():
     verdict, _ = classify(order(), Decision(kind="use_primary", lead_id=90), None, [])
     assert verdict == VERDICT_AUTO
+
+
+# --- восстановление состояния CRM на момент заказа ---
+
+MOMENT = datetime(2025, 8, 12, 18, 0, tzinfo=timezone.utc)      # момент заказа
+BEFORE = int(datetime(2025, 8, 10, 12, 0, tzinfo=timezone.utc).timestamp())
+AFTER = int(datetime(2025, 8, 20, 12, 0, tzinfo=timezone.utc).timestamp())
+
+
+def test_lead_created_later_did_not_exist_yet():
+    later = lead(1, status=CREATED)
+    later["created_at"] = AFTER
+    assert to_lead_info_as_of(later, MOMENT) is None
+
+
+def test_lead_closed_later_was_open_at_that_moment():
+    """Сделка сейчас проведена, но на момент заказа была ещё в работе."""
+    payload = lead(2, status=SUCCESS, closed_at=AFTER)
+    payload["created_at"] = BEFORE
+
+    info = to_lead_info_as_of(payload, MOMENT)
+
+    assert info.is_open                       # тогда она была открыта
+    assert info.status_id == 41463832         # точный этап неизвестен — подставной
+    assert info.closed_date is None
+
+
+def test_lead_closed_earlier_stays_closed():
+    payload = lead(3, status=SUCCESS, closed_at=BEFORE)
+    payload["created_at"] = BEFORE
+
+    info = to_lead_info_as_of(payload, MOMENT)
+
+    assert not info.is_open and info.is_success
+    assert info.closed_date == date(2025, 8, 10)
+
+
+def test_open_lead_keeps_its_stage():
+    payload = lead(4, status=CREATED)
+    payload["created_at"] = BEFORE
+    assert to_lead_info_as_of(payload, MOMENT).status_id == CREATED
+
+
+def test_primary_lead_open_at_that_moment_gets_new_lead_stage():
+    payload = lead(5, pipeline=PRIM, status=SUCCESS, closed_at=AFTER)
+    payload["created_at"] = BEFORE
+    assert to_lead_info_as_of(payload, MOMENT).status_id == 41463535    # «Новый лид»
 
 
 def test_to_lead_info_reads_pipeline_and_both_dates():

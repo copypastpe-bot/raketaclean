@@ -35,20 +35,21 @@ SELECT
     c.full_name AS client_full_name,
     COALESCE(NULLIF(TRIM(c.address), ''), NULLIF(TRIM(c.last_order_addr), '')) AS address,
     COALESCE((
-        SELECT array_agg(m.name ORDER BY m.is_primary DESC, m.name)
+        SELECT jsonb_agg(jsonb_build_array(m.name, m.phone) ORDER BY m.is_primary DESC, m.name)
         FROM (
             SELECT
                 COALESCE(
                     NULLIF(TRIM(s.full_name), ''),
                     NULLIF(TRIM(CONCAT_WS(' ', s.first_name, s.last_name)), '')
                 ) AS name,
+                s.phone AS phone,
                 (s.id = o.master_id) AS is_primary
             FROM public.staff s
             WHERE s.id = o.master_id
                OR s.id IN (SELECT om.master_id FROM public.order_masters om WHERE om.order_id = o.id)
         ) m
         WHERE m.name IS NOT NULL
-    ), ARRAY[]::text[]) AS master_names
+    ), '[]'::jsonb) AS masters
 FROM public.orders o
 LEFT JOIN public.clients c ON c.id = o.client_id
 WHERE o.created_at >= ($1::date AT TIME ZONE 'Europe/Moscow')
@@ -74,7 +75,7 @@ def _order_from_row(row: asyncpg.Record) -> Order:
         phone10=phone10,
         created_at=row["created_at"],
         amount_total=Decimal(row["amount_total"] or 0),
-        master_names=list(row["master_names"] or []),
+        masters=[(str(name), phone) for name, phone in (row["masters"] or [])],
         rating_score=row["rating_score"],
         client_name=(row["client_full_name"] or row["customer_name"]),
         address=row["address"],

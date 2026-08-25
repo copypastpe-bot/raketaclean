@@ -63,6 +63,34 @@ def contact_phones(contact: Optional[Mapping[str, Any]]) -> list[str]:
     return phones
 
 
+def enum_ids(entity: Optional[Mapping[str, Any]], field_id: int) -> tuple[int, ...]:
+    """Выбранные значения multiselect-поля (id вариантов из списка).
+
+    Для «Специалиста» это мастера, назначенные на сделку; для «Услуги» — виды работ.
+    """
+    if not entity:
+        return ()
+    found: list[int] = []
+    for field in entity.get("custom_fields_values") or []:
+        if not isinstance(field, Mapping) or field.get("field_id") != field_id:
+            continue
+        for item in field.get("values") or []:
+            if not isinstance(item, Mapping) or item.get("enum_id") is None:
+                continue
+            try:
+                value = int(item["enum_id"])
+            except (TypeError, ValueError):
+                continue
+            if value not in found:
+                found.append(value)
+    return tuple(found)
+
+
+def specialist_ids(lead: Optional[Mapping[str, Any]]) -> tuple[int, ...]:
+    """Мастера, указанные в сделке в поле «Специалист»."""
+    return enum_ids(lead, ids.FIELD_SPECIALIST)
+
+
 def contact_lead_ids(contact: Optional[Mapping[str, Any]]) -> list[int]:
     """id сделок, привязанных к контакту (нужен параметр with=leads).
 

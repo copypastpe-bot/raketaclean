@@ -1,12 +1,21 @@
 """Матчер («сваха»): какой сделке amoCRM соответствует заказ бота.
 
 Чистая функция без сети и без БД — поэтому её можно прогнать по всей истории
-заказов за квартал («экзамен на истории», задача 6 плана).
+заказов («экзамен на истории») и проверить решения против фактов.
 
-Правила выведены из разведки (`tgbot-v1/recon/06-matching-metrics.md`) и дизайна §4.
-Ключевой факт: на один заказ в амо существуют ДВЕ сделки — успешная в первичной
-воронке и отдельная в воронке реализации, созданная сейлзботом. Поэтому воронка
-реализации всегда имеет приоритет, а «две сделки по телефону» — это не спор.
+Что робот знает о жизни заказа (дизайн §4 + уточнения владельца 2026-08-25):
+
+1. Заказ уже проведён руками до конца — только привязать, ничего не делать.
+2. Лид доведён до «Передано в работу», сейлзбот создал сделку в воронке
+   реализации — она открыта на «Заказ оформлен» или «Заказ подтвержден».
+   Её и надо довести до «ЗАКАЗ ВЫПОЛНЕН и Оплата получена».
+3. Сделки нет вовсе — создать в первичной воронке и провести по всей цепочке.
+4. Свежих сделок нет, но висят старые хвосты — спросить владельца
+   («заводи новую» / «сам разберусь»). Циклы сделок короткие: за 90 дней
+   ни одна верная сделка не была старше 22 дней (измерено 2026-08-25).
+
+Ковровая воронка — параллельный процесс с партнёром «Кристалл». Ковровые сделки
+никогда не относятся к заказу из бота: они не кандидаты и не помеха.
 
 Принцип: лучше спросить владельца, чем уверенно ошибиться.
 """
@@ -15,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 from adminbot.amo import ids
 
@@ -26,9 +35,17 @@ DATE_WINDOW_DAYS = 2
 
 # Запасной признак для проведённых сделок: когда сделку реально закрыли.
 # Поле «Дата и время заказа» заполняют не всегда и не всегда верно (заказ №421:
-# в сделке стояло 14.06 при заказе 01.06), а момент закрытия есть у каждой сделки
-# и почти всегда совпадает с датой заказа плюс день-два.
+# в сделке стояло 14.06 при заказе 01.06), а момент закрытия есть у каждой сделки.
 CLOSED_WINDOW_DAYS = 3
+
+# Живая сделка заводится незадолго до выполнения заказа. Измерено по 142 заказам
+# за 90 дней: медиана 1 день, 95% укладываются в 9 дней, максимум 22 дня.
+# Всё, что старше 30 дней, — недобитый хвост, а не наш заказ.
+STALE_LEAD_DAYS = 30
+
+# Сделку могут завести и ПОСЛЕ выполнения заказа: владелец разбирает CRM пачками
+# (25 сделок из 142 за квартал). Небольшой запас вперёд обязателен.
+FUTURE_CREATION_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -38,9 +55,11 @@ class LeadInfo:
     lead_id: int
     pipeline_id: int
     status_id: int
-    order_date: Optional[date] = None    # поле «Дата и время заказа», может быть пустым/протухшим
-    closed_date: Optional[date] = None   # когда сделку закрыли — запасной признак
-    name: Optional[str] = None           # для карточки-вопроса владельцу
+    order_date: Optional[date] = None      # поле «Дата и время заказа»: бывает пустым и неверным
+    closed_date: Optional[date] = None     # когда сделку закрыли
+    created_date: Optional[date] = None    # когда сделку завели
+    specialist_ids: tuple[int, ...] = ()   # поле «Специалист»: enum-значения мастеров
+    name: Optional[str] = None             # для карточки-вопроса владельцу
 
     @property
     def is_open(self) -> bool:
@@ -51,88 +70,126 @@ class LeadInfo:
     def is_success(self) -> bool:
         return self.status_id == ids.STATUS_SUCCESS
 
+    @property
+    def is_unsorted(self) -> bool:
+        """«Неразобранное» — сырой след обращения, до него очередь доходит последней."""
+        return self.status_id in ids.STATUSES_UNSORTED
+
 
 @dataclass(frozen=True)
 class Decision:
     """Решение матчера по одному заказу.
 
     kind:
-      use_realization — есть автосделка в воронке реализации (путь А)
-      use_primary     — есть только лид в первичной воронке (путь Б)
-      create_new      — сделки нет вовсе, заводим с нуля (путь В)
-      ask_owner       — кандидатов несколько, правила не решили (путь Г)
-      already_done    — заказ уже проведён руками: только привязать, не трогать
+      use_realization  — есть открытая сделка в воронке реализации (путь А)
+      use_primary      — есть лид в первичной воронке, ведём цепочку с него (путь Б)
+      create_new       — сделки нет вовсе, заводим с нуля (путь В)
+      ask_owner        — кандидатов несколько, правила не решили (путь Г)
+      ask_owner_stale  — свежих сделок нет, есть старые хвосты: «заводи новую» / «сам разберусь»
+      already_done     — заказ уже проведён руками: только привязать, не трогать
     """
 
     kind: str
     lead_id: Optional[int] = None
     options: tuple[int, ...] = field(default=())
+    duplicates: tuple[int, ...] = field(default=())   # лидам-дублям робот пишет комментарий
 
 
-def _order_date_gap(order_date: date, lead: LeadInfo) -> Optional[int]:
-    """На сколько дней «Дата и время заказа» сделки расходится с датой заказа."""
-    if lead.order_date is None:
-        return None
-    return abs((lead.order_date - order_date).days)
-
-
-def _closed_gap(order_date: date, lead: LeadInfo) -> Optional[int]:
-    """На сколько дней момент закрытия сделки расходится с датой заказа."""
-    if lead.closed_date is None:
-        return None
-    return abs((lead.closed_date - order_date).days)
+def _gap(order_date: date, value: Optional[date]) -> Optional[int]:
+    return None if value is None else abs((value - order_date).days)
 
 
 def _in_order_date_window(order_date: date, lead: LeadInfo) -> bool:
-    gap = _order_date_gap(order_date, lead)
+    gap = _gap(order_date, lead.order_date)
     return gap is not None and gap <= DATE_WINDOW_DAYS
 
 
-def _ask(leads: Iterable[LeadInfo]) -> Decision:
-    return Decision(kind="ask_owner", options=tuple(sorted(lead.lead_id for lead in leads)))
+def _is_fresh(order_date: date, lead: LeadInfo) -> bool:
+    """Сделка заведена рядом с заказом, а не осталась хвостом с прошлых времён."""
+    if lead.created_date is None:
+        return True                        # даты создания нет — не наказываем
+    age = (order_date - lead.created_date).days
+    return -FUTURE_CREATION_DAYS <= age <= STALE_LEAD_DAYS
 
 
-def _pick_open(order_date: date, open_leads: list[LeadInfo], kind: str) -> Optional[Decision]:
-    """Выбор среди открытых сделок: сначала по дате, потом по единственности."""
-    if not open_leads:
+def _ask(leads: Iterable[LeadInfo], kind: str = "ask_owner") -> Decision:
+    return Decision(kind=kind, options=tuple(sorted(lead.lead_id for lead in leads)))
+
+
+def _narrow_by_specialist(leads: list[LeadInfo], master_ids: Sequence[int]) -> list[LeadInfo]:
+    """Оставить сделки того мастера, который выполнил заказ.
+
+    Так различаются уборка и химчистка одному клиенту в один день (заказ №575).
+    Если мастер неизвестен или ни одна сделка ему не соответствует — признак
+    не применяется, чтобы не потерять единственного верного кандидата.
+    """
+    if not master_ids or len(leads) < 2:
+        return leads
+    wanted = set(master_ids)
+    matching = [lead for lead in leads if wanted & set(lead.specialist_ids)]
+    return matching if matching else leads
+
+
+def _choose(order_date: date, leads: list[LeadInfo], kind: str,
+            master_ids: Sequence[int], duplicates: tuple[int, ...] = ()) -> Optional[Decision]:
+    """Выбрать одну сделку из группы: мастер → дата заказа → единственность."""
+    if not leads:
         return None
 
-    dated = [lead for lead in open_leads if _in_order_date_window(order_date, lead)]
+    narrowed = _narrow_by_specialist(leads, master_ids)
+    if len(narrowed) == 1:
+        return Decision(kind=kind, lead_id=narrowed[0].lead_id, duplicates=duplicates)
+
+    dated = [lead for lead in narrowed if _in_order_date_window(order_date, lead)]
     if len(dated) == 1:
-        return Decision(kind=kind, lead_id=dated[0].lead_id)
+        return Decision(kind=kind, lead_id=dated[0].lead_id, duplicates=duplicates)
     if len(dated) > 1:
-        return _ask(dated)
+        return _ask(dated)                 # дата не различает — вопрос владельцу
 
-    # Дата не помогла (пустая или протухшая). Если открытая сделка одна — она и есть.
-    if len(open_leads) == 1:
-        return Decision(kind=kind, lead_id=open_leads[0].lead_id)
-    return None          # несколько открытых без дат — решаем дальше по цепочке
+    # Дата не помогла (пустая или неверная). Дата создания — довод слишком слабый,
+    # чтобы выбирать ею между сделками: спрашиваем владельца.
+    return _ask(narrowed)
 
 
-def _pick_completed(order_date: date, realization: list[LeadInfo]) -> Optional[Decision]:
-    """Проведённая сделка по этому заказу — владелец успел раньше робота (дизайн §5.1).
+def _pick_completed(order_date: date, realization: list[LeadInfo],
+                    master_ids: Sequence[int]) -> Optional[Decision]:
+    """Заказ уже проведён руками? Тогда только привязать (дизайн §5.1).
 
-    Сначала по «Дате и времени заказа», затем по моменту закрытия сделки: поле даты
-    заполняют не всегда и не всегда верно, а закрытие фиксируется само.
+    Три признака по убыванию надёжности: «Дата и время заказа», дата закрытия
+    сделки, дата создания сделки. Последний нужен, когда владелец разбирал CRM
+    пачкой: и поле даты пустое, и закрыли сделку через две недели.
     """
     completed = [lead for lead in realization if lead.is_success]
     if not completed:
         return None
 
     by_order_date = [(gap, lead.lead_id) for lead in completed
-                     if (gap := _order_date_gap(order_date, lead)) is not None and gap <= DATE_WINDOW_DAYS]
+                     if (gap := _gap(order_date, lead.order_date)) is not None
+                     and gap <= DATE_WINDOW_DAYS]
     if by_order_date:
         return Decision(kind="already_done", lead_id=min(by_order_date)[1])
 
     by_closed = [(gap, lead.lead_id) for lead in completed
-                 if (gap := _closed_gap(order_date, lead)) is not None and gap <= CLOSED_WINDOW_DAYS]
+                 if (gap := _gap(order_date, lead.closed_date)) is not None
+                 and gap <= CLOSED_WINDOW_DAYS]
     if by_closed:
         return Decision(kind="already_done", lead_id=min(by_closed)[1])
+
+    # Третий признак — самый слабый, поэтому требует данных: сделки без даты
+    # создания через него не опознаём, чтобы не привязать заказ к чужой сделке.
+    fresh = [lead for lead in completed
+             if lead.created_date is not None and _is_fresh(order_date, lead)]
+    fresh = _narrow_by_specialist(fresh, master_ids)
+    if len(fresh) == 1:
+        return Decision(kind="already_done", lead_id=fresh[0].lead_id)
+    if len(fresh) > 1:
+        return _ask(fresh)
 
     return None
 
 
-def match(*, order_date: date, candidates: Iterable[LeadInfo]) -> Decision:
+def match(*, order_date: date, candidates: Iterable[LeadInfo],
+          master_specialist_ids: Sequence[int] = ()) -> Decision:
     """Решить, что делать с заказом бота, по списку сделок его телефона."""
 
     # 1. Ковровые и архивные воронки — не наш случай. Заказ, заведённый в боте,
@@ -141,37 +198,50 @@ def match(*, order_date: date, candidates: Iterable[LeadInfo]) -> Decision:
 
     realization = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_REALIZATION]
     primary = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_PRIMARY]
+
     open_realization = [lead for lead in realization if lead.is_open]
+    fresh_realization = [lead for lead in open_realization if _is_fresh(order_date, lead)]
 
-    # 2. Открытая сделка реализации на дату заказа — самый частый случай (путь А).
-    dated_open = [lead for lead in open_realization if _in_order_date_window(order_date, lead)]
-    if len(dated_open) == 1:
-        return Decision(kind="use_realization", lead_id=dated_open[0].lead_id)
-    if len(dated_open) > 1:
-        return _ask(dated_open)          # две открытые на одну дату — вопрос владельцу
+    # 2. Свежая открытая сделка реализации — самый частый случай (путь А).
+    open_decision = _choose(order_date, fresh_realization, "use_realization", master_specialist_ids)
+    if open_decision is not None and open_decision.kind == "use_realization":
+        return open_decision
 
-    # 3. Открытой сделки на дату нет. Проверяем, не проведён ли заказ руками.
-    #    Важно делать это ДО разбора открытых без дат: у постоянных клиентов годами
-    #    висят забытые открытые сделки, и раньше они перехватывали решение (заказ №508).
-    decision = _pick_completed(order_date, realization)
-    if decision is not None:
-        return decision
+    # 3. Открытой сделки нет либо среди них не выбрать. Не проведён ли заказ уже
+    #    руками? Проверяем ДО вопроса владельцу и до разбора хвостов: у постоянных
+    #    клиентов годами висят забытые сделки, они перехватывали решение (заказ №508).
+    done_decision = _pick_completed(order_date, realization, master_specialist_ids)
+    if done_decision is not None and done_decision.kind == "already_done":
+        return done_decision
 
-    # 4. Проведённой нет. Единственная открытая сделка реализации — берём её,
-    #    даже если дата в ней пустая или протухшая.
-    decision = _pick_open(order_date, open_realization, "use_realization")
-    if decision is not None:
-        return decision
-    if open_realization:
-        return _ask(open_realization)    # несколько открытых, дата не решает
+    # Ни одна ветка не дала уверенного ответа — спрашиваем владельца.
+    if open_decision is not None:
+        return open_decision
+    if done_decision is not None:
+        return done_decision
 
-    # 5. В реализации пусто — работаем с открытым лидом первичной воронки (путь Б).
-    open_primary = [lead for lead in primary if lead.is_open]
-    decision = _pick_open(order_date, open_primary, "use_primary")
-    if decision is not None:
-        return decision
-    if open_primary:
-        return _ask(open_primary)
+    # 4. Первичная воронка: сначала обработанные лиды, «Неразобранное» — в последнюю
+    #    очередь. Клиент мог звонить дважды: не дозвонился, потом дозвонился (заказ №583).
+    fresh_primary = [lead for lead in primary if lead.is_open and _is_fresh(order_date, lead)]
+    handled = [lead for lead in fresh_primary if not lead.is_unsorted]
+    unsorted = [lead for lead in fresh_primary if lead.is_unsorted]
+
+    if handled:
+        # Остальные лиды того же клиента — дубли обращения: робот пометит их комментарием.
+        others = tuple(sorted(lead.lead_id for lead in fresh_primary if lead not in handled))
+        decision = _choose(order_date, handled, "use_primary", master_specialist_ids, duplicates=others)
+        if decision is not None:
+            return decision
+    if unsorted:
+        decision = _choose(order_date, unsorted, "use_primary", master_specialist_ids)
+        if decision is not None:
+            return decision
+
+    # 5. Свежего ничего нет. Есть старые хвосты — решение за владельцем.
+    stale = [lead for lead in open_realization + [x for x in primary if x.is_open]
+             if not _is_fresh(order_date, lead)]
+    if stale:
+        return _ask(stale, kind="ask_owner_stale")
 
     # 6. Ничего подходящего — заводим сделку с нуля (путь В, ~1 раз в неделю).
     return Decision(kind="create_new")

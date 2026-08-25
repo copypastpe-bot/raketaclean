@@ -20,6 +20,19 @@ STATUS_SUCCESS = 142                # успешный этап любой во�
 STATUS_CLOSED = 143                 # «Закрыто и не реализовано»
 STATUSES_FINAL = frozenset((STATUS_SUCCESS, STATUS_CLOSED))
 
+# «Неразобранное» есть в каждой воронке под своим id. Это сырой след обращения
+# (пропущенный звонок, заявка с сайта): кандидат последней очереди.
+STATUS_UNSORTED_PRIMARY = 41463532
+STATUS_UNSORTED_REALIZATION = 41463829
+STATUSES_UNSORTED = frozenset((STATUS_UNSORTED_PRIMARY, STATUS_UNSORTED_REALIZATION))
+
+# --- Этапы воронки первичной обработки ---
+PRIM_STAGE_NEW_LEAD = 41463535       # Новый лид
+PRIM_STAGE_CORRESPONDENCE = 41463538  # Переписка
+PRIM_STAGE_NO_CONTACT = 41463541      # Не было 1-го касания
+PRIM_STAGE_DIALOG_DONE = 41463544     # Диалог состоялся
+PRIM_STAGE_DIALOG = 43489399          # Ведем Диалог
+
 # --- Этапы воронки реализации ---
 REAL_STAGE_CREATED = 41463832       # Заказ оформлен
 REAL_STAGE_CONFIRMED = 41463838     # Заказ подтвержден, Мастер назначен
@@ -27,6 +40,7 @@ REAL_STAGE_DONE = 41463964          # Заказ выполнен
 
 # --- Кастомные поля сделки ---
 FIELD_SERVICE = 271915              # Услуга (multiselect)
+FIELD_SPECIALIST = 39243            # Специалист (multiselect): мастер, выполнявший заказ
 FIELD_ORDER_DATETIME = 18701        # Дата и время заказа (unix-время)
 FIELD_ADDRESS = 18639               # Адрес
 
