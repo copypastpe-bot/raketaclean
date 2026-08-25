@@ -20,11 +20,12 @@ import signal
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import asyncpg
 from aiogram import Bot, Dispatcher
 
 from adminbot import db
 from adminbot.amo import ids
-from adminbot.amo.client import AmoClient
+from adminbot.amo.client import AmoAuthError, AmoClient, AmoError
 from adminbot.config import Settings
 from adminbot.control import PgControlPanel, sync_allowed
 from adminbot.sync.backlog import BacklogRunner
@@ -210,12 +211,37 @@ def _install_stop_handlers(app: App) -> None:
             pass
 
 
+def startup_hint(exc: BaseException) -> str:
+    """Перевести ошибку запуска в понятную владельцу подсказку.
+
+    Первый запуск на сервере почти всегда спотыкается о доступы, и разбирать
+    стек вызовов владелец не должен.
+    """
+    from aiogram.utils.token import TokenValidationError
+
+    if isinstance(exc, asyncpg.InvalidPasswordError):
+        return ("База не приняла пароль пользователя adminbot. "
+                "Проверьте BOT_DB_DSN и ADMINBOT_DB_DSN в файле .env")
+    if isinstance(exc, (ConnectionRefusedError, OSError)) and not isinstance(exc, AmoError):
+        return ("Не могу подключиться к базе данных. Проверьте BOT_DB_DSN "
+                "в файле .env и что Postgres запущен")
+    if isinstance(exc, AmoAuthError):
+        return "amoCRM не принимает токен: проверьте AMO_TOKEN в файле .env"
+    if isinstance(exc, TokenValidationError):
+        return "Telegram не принимает токен бота: проверьте ADMINBOT_TG_TOKEN (выдаёт BotFather)"
+    return f"{type(exc).__name__}: {exc}"
+
+
 async def main(settings: Optional[Settings] = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    app = await build_app(settings or Settings.from_env())
+    try:
+        app = await build_app(settings or Settings.from_env())
+    except Exception as exc:                           # noqa: BLE001
+        log.error("Запуск не удался. %s", startup_hint(exc))
+        raise SystemExit(1) from exc
     _install_stop_handlers(app)
     try:
         await app.run()
