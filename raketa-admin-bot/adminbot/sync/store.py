@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, Optional, Protocol
 
 import asyncpg
@@ -30,6 +32,56 @@ class LinkStore(Protocol):
                   payload: Optional[Any] = None) -> None: ...
 
     async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]: ...
+
+
+class MemoryLinkStore:
+    """Хранилище в памяти: для репетиции и разовых прогонов.
+
+    Ничего не пишет ни в какую базу — состояние живёт только на время запуска.
+    """
+
+    def __init__(self, now: Optional[Any] = None) -> None:
+        self.links: dict[int, AmoLink] = {}
+        self.actions: list[dict] = []
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    async def get(self, order_id: int) -> Optional[AmoLink]:
+        return self.links.get(order_id)
+
+    async def create(self, order_id: int, phone10: Optional[str]) -> AmoLink:
+        link = self.links.get(order_id)
+        if link is None:
+            link = AmoLink(order_id=order_id, phone10=phone10 or "", status="new",
+                           checklist={}, created_at=self._now(), updated_at=self._now())
+            self.links[order_id] = link
+        return link
+
+    async def update(self, order_id: int, **fields: Any) -> Optional[AmoLink]:
+        link = self.links.get(order_id)
+        if link is None:
+            return None
+        self.links[order_id] = replace(link, **fields, updated_at=self._now())
+        return self.links[order_id]
+
+    async def mark_step(self, order_id: int, step: str) -> None:
+        link = self.links[order_id]
+        checklist = dict(link.checklist)
+        checklist.setdefault(step, self._now().isoformat())
+        self.links[order_id] = replace(link, checklist=checklist, updated_at=self._now())
+
+    async def log(self, order_id: int, action: str, *, dry_run: bool,
+                  entity: Optional[str] = None, amo_id: Optional[int] = None,
+                  payload: Optional[Any] = None) -> None:
+        self.actions.append({"order_id": order_id, "action": action, "dry_run": dry_run,
+                             "entity": entity, "amo_id": amo_id, "payload": payload})
+
+    async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]:
+        taken: set[int] = set()
+        for link in self.links.values():
+            if link.phone10 != phone10 or link.order_id == exclude_order_id:
+                continue
+            taken.update(value for value in (link.primary_lead_id, link.real_lead_id) if value)
+        return taken
 
 
 class PgLinkStore:
