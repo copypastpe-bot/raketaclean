@@ -243,7 +243,22 @@ def find_fact_lead(order_date: date, leads: list[dict]) -> tuple[Optional[int], 
 
 def classify(order: Order, decision: Decision, fact_lead_id: Optional[int],
              candidates: list[LeadInfo], fact_source: str = "") -> tuple[str, str]:
-    """Сравнить решение матчера с фактом."""
+    """Сравнить решение матчера с фактом.
+
+    Тонкость режима «во времени»: сделки реализации часто ещё НЕ СУЩЕСТВОВАЛО
+    в момент заказа — её создаёт сейлзбот после того, как лид первичной воронки
+    переводят в «Передано в работу». Значит, «пошёл через первичную» и «создал
+    новую» — это не ошибка, а ровно тот путь, которым эта сделка и появляется.
+    """
+    existed = {lead.lead_id for lead in candidates}
+    fact_not_yet = fact_lead_id is not None and fact_lead_id not in existed
+
+    if fact_not_yet and decision.kind == "use_primary":
+        return VERDICT_AUTO, (f"через первичную #{decision.lead_id} → сейлзбот создаст "
+                              f"#{fact_lead_id} (путь Б)")
+    if fact_not_yet and decision.kind == "create_new":
+        return VERDICT_AUTO, f"сделки ещё не было — создал бы новую (путь В)"
+
     if decision.kind == "ask_owner":
         return VERDICT_QUESTION, f"кандидаты: {', '.join('#' + str(x) for x in decision.options)}"
 

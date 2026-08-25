@@ -76,7 +76,9 @@ def test_miss_counts_as_wrong():
 
 
 def test_creating_duplicate_is_the_worst_case():
-    verdict, note = classify(order(), Decision(kind="create_new"), 77, [])
+    """Сделка уже существовала и была проведена, а робот всё равно завёл бы новую."""
+    existing = [LeadInfo(lead_id=77, pipeline_id=REAL, status_id=SUCCESS)]
+    verdict, note = classify(order(), Decision(kind="create_new"), 77, existing)
     assert verdict == VERDICT_WRONG and "дубль" in note
 
 
@@ -95,6 +97,28 @@ def test_open_deal_without_fact_is_pending_not_error():
 def test_path_b_without_fact_is_correct():
     verdict, _ = classify(order(), Decision(kind="use_primary", lead_id=90), None, [])
     assert verdict == VERDICT_AUTO
+
+
+def test_path_b_is_correct_when_the_deal_did_not_exist_yet():
+    """Заказ №426: сделку реализации сейлзбот создаст ПОСЛЕ перевода лида в работу."""
+    existing = [LeadInfo(lead_id=31300017, pipeline_id=PRIM, status_id=41463535)]
+    verdict, note = classify(
+        order(), Decision(kind="use_primary", lead_id=31300017), 31311313, existing)
+    assert verdict == VERDICT_AUTO and "31311313" in note
+
+
+def test_create_new_is_correct_when_nothing_existed_yet():
+    """Заказ №429: в момент заказа в CRM не было ничего, сделки завели назавтра."""
+    verdict, _ = classify(order(), Decision(kind="create_new"), 31312227, [])
+    assert verdict == VERDICT_AUTO
+
+
+def test_taking_a_deal_that_is_not_the_eventual_one_is_still_wrong():
+    """Взял существовавшую сделку, а провели другую — это настоящая ошибка."""
+    existing = [LeadInfo(lead_id=100, pipeline_id=REAL, status_id=CREATED)]
+    verdict, _ = classify(
+        order(), Decision(kind="use_realization", lead_id=100), 200, existing)
+    assert verdict == VERDICT_WRONG
 
 
 # --- восстановление состояния CRM на момент заказа ---

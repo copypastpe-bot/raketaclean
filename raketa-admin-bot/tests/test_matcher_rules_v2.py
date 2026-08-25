@@ -58,8 +58,8 @@ def test_specialist_ignored_when_master_unknown():
     assert d.kind == "ask_owner" and set(d.options) == {1, 2}
 
 
-def test_specialist_ignored_when_nobody_matches():
-    """Если ни у одной сделки нет нашего мастера — признак не сужает выбор."""
+def test_deal_without_specialist_beats_another_masters_deal():
+    """Нашего мастера нет ни в одной сделке: чужая отпадает, сделка без мастера остаётся."""
     d = match(
         order_date=ORDER_DAY,
         candidates=[
@@ -68,7 +68,77 @@ def test_specialist_ignored_when_nobody_matches():
         ],
         master_specialist_ids=(POLOZOV,),
     )
-    assert d.kind == "ask_owner" and set(d.options) == {1, 2}
+    assert d == Decision(kind="use_realization", lead_id=2)
+
+
+def test_deal_of_another_master_is_not_ours():
+    """Заказ №548: заказ выполнил Козлов, а открытая сделка — Полозова.
+
+    Чужой мастер в сделке — довод ПРОТИВ неё, а не отсутствие сведений.
+    """
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(31448601, REAL, CREATED, order_date=ORDER_DAY, specialists=[POLOZOV])],
+        master_specialist_ids=(KOZLOV,),
+    )
+    assert d.kind == "create_new"
+
+
+def test_deal_without_specialist_stays_candidate():
+    """Поле «Специалист» заполнено не всегда — пустое не отбрасываем."""
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(1, REAL, CREATED, order_date=ORDER_DAY, specialists=[])],
+        master_specialist_ids=(KOZLOV,),
+    )
+    assert d == Decision(kind="use_realization", lead_id=1)
+
+
+def test_conflicting_specialist_dropped_but_own_kept():
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[
+            L(1, REAL, CREATED, order_date=ORDER_DAY, specialists=[POLOZOV]),
+            L(2, REAL, CREATED, order_date=ORDER_DAY, specialists=[]),
+            L(3, REAL, CREATED, order_date=ORDER_DAY, specialists=[KOZLOV]),
+        ],
+        master_specialist_ids=(KOZLOV,),
+    )
+    assert d == Decision(kind="use_realization", lead_id=3)
+
+
+def test_completed_deal_of_another_master_is_not_ours():
+    d = match(
+        order_date=ORDER_DAY,
+        candidates=[L(1, REAL, SUCCESS, closed_date=ORDER_DAY + timedelta(days=1),
+                      created_date=ORDER_DAY - timedelta(days=1), specialists=[POLOZOV])],
+        master_specialist_ids=(KOZLOV,),
+    )
+    assert d.kind == "create_new"
+
+
+# --- сделка, закрытая до выполнения заказа, не может быть нашей (заказ №570) ---
+
+def test_deal_closed_before_the_job_is_not_ours():
+    """Заказ 17.08, сделка закрыта 04.08 — работа тогда ещё не была сделана."""
+    d = match(order_date=date(2026, 8, 17), candidates=[
+        L(31489155, REAL, SUCCESS, order_date=date(2026, 8, 3),
+          closed_date=date(2026, 8, 4), created_date=date(2026, 8, 3))])
+    assert d.kind == "create_new"
+
+
+def test_deal_closed_on_the_order_day_is_ours():
+    """Владелец успел провести сделку в тот же день — это наш заказ."""
+    d = match(order_date=ORDER_DAY, candidates=[
+        L(1, REAL, SUCCESS, order_date=ORDER_DAY, closed_date=ORDER_DAY)])
+    assert d == Decision(kind="already_done", lead_id=1)
+
+
+def test_deal_closed_a_day_before_is_still_ours():
+    """Мастер закрыл заказ в боте на следующий день после проведения сделки."""
+    d = match(order_date=ORDER_DAY, candidates=[
+        L(1, REAL, SUCCESS, order_date=ORDER_DAY, closed_date=ORDER_DAY - timedelta(days=1))])
+    assert d == Decision(kind="already_done", lead_id=1)
 
 
 def test_two_deals_same_master_still_ask():

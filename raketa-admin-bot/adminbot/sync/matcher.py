@@ -117,17 +117,26 @@ def _ask(leads: Iterable[LeadInfo], kind: str = "ask_owner") -> Decision:
 
 
 def _narrow_by_specialist(leads: list[LeadInfo], master_ids: Sequence[int]) -> list[LeadInfo]:
-    """Оставить сделки того мастера, который выполнил заказ.
+    """Отбросить сделки чужих мастеров и оставить сделки нашего.
 
-    Так различаются уборка и химчистка одному клиенту в один день (заказ №575).
-    Если мастер неизвестен или ни одна сделка ему не соответствует — признак
-    не применяется, чтобы не потерять единственного верного кандидата.
+    Так различаются уборка и химчистка одному клиенту в один день (заказ №575)
+    и отсеиваются недобитые сделки другого мастера (заказ №548).
+
+    Порядок предпочтения:
+      1. «Специалист» — наш мастер: сделка наша, остальные не нужны;
+      2. «Специалист» пуст (поле заполняют не всегда): сведений нет, годится;
+      3. «Специалист» — другой мастер: сделка ЧУЖАЯ, довод против неё.
+
+    Если мастер заказа неизвестен амо, признак не применяется вовсе.
+    Пустой список на выходе означает «подходящих сделок нет».
     """
-    if not master_ids or len(leads) < 2:
+    if not master_ids:
         return leads
     wanted = set(master_ids)
-    matching = [lead for lead in leads if wanted & set(lead.specialist_ids)]
-    return matching if matching else leads
+    ours = [lead for lead in leads if wanted & set(lead.specialist_ids)]
+    if ours:
+        return ours
+    return [lead for lead in leads if not lead.specialist_ids]
 
 
 def _choose(order_date: date, leads: list[LeadInfo], kind: str,
@@ -137,6 +146,8 @@ def _choose(order_date: date, leads: list[LeadInfo], kind: str,
         return None
 
     narrowed = _narrow_by_specialist(leads, master_ids)
+    if not narrowed:
+        return None                        # все кандидаты — сделки чужих мастеров
     if len(narrowed) == 1:
         return Decision(kind=kind, lead_id=narrowed[0].lead_id, duplicates=duplicates)
 
@@ -159,7 +170,17 @@ def _pick_completed(order_date: date, realization: list[LeadInfo],
     сделки, дата создания сделки. Последний нужен, когда владелец разбирал CRM
     пачкой: и поле даты пустое, и закрыли сделку через две недели.
     """
-    completed = [lead for lead in realization if lead.is_success]
+    # Сделка, закрытая заметно РАНЬШЕ выполнения заказа, относиться к нему не может:
+    # работы тогда ещё не было (заказ №570 — заказ 17.08, сделка закрыта 04.08).
+    # Небольшой допуск назад: владелец мог провести сделку в день работы, а мастер
+    # закрыть заказ в боте на следующий день.
+    completed = [
+        lead for lead in realization
+        if lead.is_success
+        and (lead.closed_date is None
+             or (order_date - lead.closed_date).days <= DATE_WINDOW_DAYS)
+    ]
+    completed = _narrow_by_specialist(completed, master_ids)
     if not completed:
         return None
 
