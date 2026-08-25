@@ -15,8 +15,10 @@ class Order:
     order_id: int                     # «Заказ №N» = orders.id, отдельного счётчика нет
     phone10: Optional[str]            # 10 цифр номера клиента; None — номер не распознан
     created_at: datetime              # момент закрытия заказа мастером
-    amount_total: Decimal             # сумма чека
-    upsell_amount: Decimal            # из них доп. продажа
+    # Финальная сумма чека = бюджет сделки в амо (решение владельца №8, уточнено 2026-08-25).
+    # Доп. продажу (orders.upsale_amount) сюда НЕ подмешиваем: в амо её нет,
+    # она нужна только для расчёта зарплаты мастера внутри бота.
+    amount_total: Decimal
     master_names: list[str] = field(default_factory=list)  # основной мастер первым
     rating_score: Optional[int] = None   # оценка клиента: есть → задачу «Получить ОС» закрываем
     client_name: Optional[str] = None

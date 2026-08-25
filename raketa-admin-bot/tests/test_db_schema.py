@@ -79,9 +79,9 @@ async def test_fetch_unprocessed_orders_reads_bot_data(pool):
 
     order = orders[1]
     assert order.phone10 == "9601861067"                   # канонические 10 цифр
-    assert order.amount_total == Decimal("5950.00")
-    assert order.upsell_amount == Decimal("950.00")
-    assert order.rating_score == 5                          # оценка есть → «Получить ОС» закроем
+    assert order.amount_total == Decimal("5950.00")     # бюджет сделки в амо = финальная сумма чека
+    assert not hasattr(order, "upsell_amount")          # доп. продажа в амо не уходит (только ЗП мастера)
+    assert order.rating_score == 5                         # оценка есть → «Получить ОС» закроем
     assert order.client_name == "Ирина"
     assert order.address == "ул. Ленина, 5"
     assert order.master_names == ["Никита Иванов", "Оля Петрова"]   # основной мастер первым
