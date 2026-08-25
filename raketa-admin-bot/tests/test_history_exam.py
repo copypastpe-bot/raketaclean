@@ -97,7 +97,7 @@ def test_path_b_without_fact_is_correct():
     assert verdict == VERDICT_AUTO
 
 
-def test_to_lead_info_reads_pipeline_and_date():
-    info = to_lead_info(lead(11, status=CREATED, order_ts=TS_2025_08_12))
+def test_to_lead_info_reads_pipeline_and_both_dates():
+    info = to_lead_info(lead(11, status=CREATED, order_ts=TS_2025_08_12, closed_at=TS_2025_08_12))
     assert info == LeadInfo(lead_id=11, pipeline_id=REAL, status_id=CREATED,
-                            order_date=date(2025, 8, 12), name=None)
+                            order_date=date(2025, 8, 12), closed_date=date(2025, 8, 12), name=None)

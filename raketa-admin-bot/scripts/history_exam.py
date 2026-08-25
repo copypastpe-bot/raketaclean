@@ -67,6 +67,10 @@ class ExamRow:
     verdict: str
     note: str = ""
     candidates: list[LeadInfo] = field(default_factory=list)
+    # Решение принято по запасному признаку (дате закрытия сделки), а не по
+    # «Дате и времени заказа». Такие случаи и матчер, и проверка считают одинаково,
+    # то есть проверка их не подтверждает — нужен взгляд человека.
+    by_closed_date: bool = False
 
     @property
     def phone_masked(self) -> str:
@@ -119,6 +123,7 @@ def to_lead_info(lead: dict) -> LeadInfo:
         pipeline_id=int(lead.get("pipeline_id") or 0),
         status_id=int(lead.get("status_id") or 0),
         order_date=order_date_msk(lead),
+        closed_date=_closed_date(lead),
         name=lead.get("name"),
     )
 
@@ -184,6 +189,16 @@ def classify(order: Order, decision: Decision, fact_lead_id: Optional[int],
     return VERDICT_WRONG, f"создал бы дубль: сделка #{fact_lead_id} уже проведена"
 
 
+def _used_closed_date(order_date: date, decision: Decision, candidates: list[LeadInfo]) -> bool:
+    """Решение опирается на дату закрытия сделки, а не на «Дату и время заказа»?"""
+    if decision.kind != "already_done":
+        return False
+    chosen = next((lead for lead in candidates if lead.lead_id == decision.lead_id), None)
+    if chosen is None or chosen.order_date is None:
+        return True
+    return abs((chosen.order_date - order_date).days) > DATE_WINDOW_DAYS
+
+
 async def collect_candidates(client: AmoClient, phone10: str, cache: dict) -> list[dict]:
     """Все сделки, найденные по телефону клиента. Кэш — постоянные клиенты повторяются."""
     if phone10 in cache:
@@ -218,7 +233,8 @@ async def run_exam(orders: list[Order], client: AmoClient, pause: float) -> list
         verdict, note = classify(order, decision, fact_lead_id, candidates)
         if fact_source and verdict == VERDICT_AUTO:
             note = f"{note} ({fact_source})"
-        rows.append(ExamRow(order, decision, fact_lead_id, verdict, note, candidates))
+        rows.append(ExamRow(order, decision, fact_lead_id, verdict, note, candidates,
+                            by_closed_date=_used_closed_date(order.order_date, decision, candidates)))
 
         if index % 25 == 0:
             print(f"  обработано {index}/{len(orders)}…", flush=True)
@@ -264,6 +280,23 @@ def build_report(rows: list[ExamRow], days: int) -> str:
             lines.append(
                 f"- Заказ №{row.order.order_id} · {row.phone_masked} · "
                 f"{row.order.order_date.isoformat()} — {row.note}"
+            )
+        lines.append("")
+
+    fallback = [row for row in rows if row.by_closed_date]
+    if fallback:
+        lines += [
+            "## Решено по дате закрытия сделки — проверить глазами",
+            "",
+            "В этих заказах поле «Дата и время заказа» не совпало с датой заказа, "
+            "и робот опознал сделку по моменту её закрытия. Проверка «правды» устроена "
+            "так же, поэтому подтвердить эти случаи может только человек.",
+            "",
+        ]
+        for row in fallback:
+            lines.append(
+                f"- Заказ №{row.order.order_id} · {row.phone_masked} · "
+                f"{row.order.order_date.isoformat()} → сделка #{row.decision.lead_id}"
             )
         lines.append("")
 

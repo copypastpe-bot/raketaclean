@@ -5,8 +5,9 @@ from datetime import date
 from adminbot.sync.matcher import match, Decision, LeadInfo
 
 
-def L(id, pipeline, status, order_date=None):
-    return LeadInfo(lead_id=id, pipeline_id=pipeline, status_id=status, order_date=order_date)
+def L(id, pipeline, status, order_date=None, closed_date=None):
+    return LeadInfo(lead_id=id, pipeline_id=pipeline, status_id=status,
+                    order_date=order_date, closed_date=closed_date)
 
 
 REAL, PRIM, SUCCESS, CLOSED = 4482787, 4482751, 142, 143
@@ -132,6 +133,59 @@ def test_date_window_is_two_days_inclusive():
     assert match(order_date=date(2026, 8, 20), candidates=[
         L(152, REAL, CREATED, date(2026, 8, 22)), L(153, REAL, CREATED, date(2026, 8, 26)),
     ]) == Decision(kind="use_realization", lead_id=152)
+
+
+# --- случаи, вскрытые экзаменом на истории 2026-08-25 ---
+
+def test_completed_deal_found_by_closed_date_when_order_date_lies():
+    """Заказ №421: в сделке «Дата заказа» = 14.06, а заказ выполнен 01.06.
+
+    Сделку закрыли 03.06 — через два дня после заказа. Без этого признака
+    робот создал бы дубль поверх уже проведённой сделки.
+    """
+    d = match(order_date=date(2026, 6, 1), candidates=[
+        L(31276741, PRIM, SUCCESS, date(2026, 6, 14), closed_date=date(2026, 6, 1)),
+        L(31281427, REAL, SUCCESS, date(2026, 6, 14), closed_date=date(2026, 6, 3))])
+    assert d == Decision(kind="already_done", lead_id=31281427)
+
+
+def test_stale_open_deals_do_not_hide_the_completed_one():
+    """Заказ №508: у постоянного клиента с 2025 года висят две забытые открытые сделки.
+
+    Рядом — свежая проведённая сделка ровно на дату заказа. Раньше матчер до неё
+    не доходил и шёл спрашивать владельца.
+    """
+    d = match(order_date=date(2026, 7, 20), candidates=[
+        L(30469023, REAL, 41463964, date(2025, 9, 16)),      # забыта с сентября 2025
+        L(30893137, REAL, CREATED, date(2025, 12, 24)),      # забыта с декабря 2025
+        L(31442723, REAL, SUCCESS, date(2026, 7, 20), closed_date=date(2026, 7, 28))])
+    assert d == Decision(kind="already_done", lead_id=31442723)
+
+
+def test_fresh_open_deal_wins_over_completed_one_in_window():
+    """Открытая сделка на ту же дату важнее проведённой: её и надо довести."""
+    d = match(order_date=date(2026, 8, 20), candidates=[
+        L(200, REAL, SUCCESS, date(2026, 8, 20), closed_date=date(2026, 8, 20)),
+        L(201, REAL, CREATED, date(2026, 8, 20))])
+    assert d == Decision(kind="use_realization", lead_id=201)
+
+
+def test_closed_date_window_is_three_days():
+    near = match(order_date=date(2026, 6, 1), candidates=[
+        L(210, REAL, SUCCESS, date(2024, 1, 1), closed_date=date(2026, 6, 4))])
+    assert near == Decision(kind="already_done", lead_id=210)
+
+    far = match(order_date=date(2026, 6, 1), candidates=[
+        L(211, REAL, SUCCESS, date(2024, 1, 1), closed_date=date(2026, 6, 5))])
+    assert far.kind == "create_new"          # четыре дня — уже не наш заказ
+
+
+def test_two_stale_open_deals_without_completed_still_ask():
+    """Если проведённой сделки нет, две забытые открытые — честный вопрос владельцу."""
+    d = match(order_date=date(2026, 7, 20), candidates=[
+        L(220, REAL, 41463964, date(2025, 9, 16)),
+        L(221, REAL, CREATED, date(2025, 12, 24))])
+    assert d.kind == "ask_owner" and set(d.options) == {220, 221}
 
 
 def test_options_are_sorted_for_stable_cards():

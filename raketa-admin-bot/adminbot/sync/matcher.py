@@ -24,6 +24,12 @@ from adminbot.amo import ids
 # разрешает 19% случаев с несколькими кандидатами.
 DATE_WINDOW_DAYS = 2
 
+# Запасной признак для проведённых сделок: когда сделку реально закрыли.
+# Поле «Дата и время заказа» заполняют не всегда и не всегда верно (заказ №421:
+# в сделке стояло 14.06 при заказе 01.06), а момент закрытия есть у каждой сделки
+# и почти всегда совпадает с датой заказа плюс день-два.
+CLOSED_WINDOW_DAYS = 3
+
 
 @dataclass(frozen=True)
 class LeadInfo:
@@ -33,6 +39,7 @@ class LeadInfo:
     pipeline_id: int
     status_id: int
     order_date: Optional[date] = None    # поле «Дата и время заказа», может быть пустым/протухшим
+    closed_date: Optional[date] = None   # когда сделку закрыли — запасной признак
     name: Optional[str] = None           # для карточки-вопроса владельцу
 
     @property
@@ -62,32 +69,67 @@ class Decision:
     options: tuple[int, ...] = field(default=())
 
 
-def _within_window(order_date: date, lead: LeadInfo) -> bool:
+def _order_date_gap(order_date: date, lead: LeadInfo) -> Optional[int]:
+    """На сколько дней «Дата и время заказа» сделки расходится с датой заказа."""
     if lead.order_date is None:
-        return False
-    return abs((lead.order_date - order_date).days) <= DATE_WINDOW_DAYS
+        return None
+    return abs((lead.order_date - order_date).days)
 
 
-def _pick_by_date(order_date: date, leads: list[LeadInfo]) -> Optional[LeadInfo]:
-    """Одна сделка, чья дата укладывается в окно. None — если таких не ровно одна."""
-    near = [lead for lead in leads if _within_window(order_date, lead)]
-    return near[0] if len(near) == 1 else None
+def _closed_gap(order_date: date, lead: LeadInfo) -> Optional[int]:
+    """На сколько дней момент закрытия сделки расходится с датой заказа."""
+    if lead.closed_date is None:
+        return None
+    return abs((lead.closed_date - order_date).days)
+
+
+def _in_order_date_window(order_date: date, lead: LeadInfo) -> bool:
+    gap = _order_date_gap(order_date, lead)
+    return gap is not None and gap <= DATE_WINDOW_DAYS
 
 
 def _ask(leads: Iterable[LeadInfo]) -> Decision:
     return Decision(kind="ask_owner", options=tuple(sorted(lead.lead_id for lead in leads)))
 
 
-def _resolve(order_date: date, leads: list[LeadInfo], kind: str) -> Optional[Decision]:
-    """Общая развилка: одна сделка → берём; несколько → пробуем дату; иначе вопрос."""
-    if not leads:
+def _pick_open(order_date: date, open_leads: list[LeadInfo], kind: str) -> Optional[Decision]:
+    """Выбор среди открытых сделок: сначала по дате, потом по единственности."""
+    if not open_leads:
         return None
-    if len(leads) == 1:
-        return Decision(kind=kind, lead_id=leads[0].lead_id)
-    chosen = _pick_by_date(order_date, leads)
-    if chosen is not None:
-        return Decision(kind=kind, lead_id=chosen.lead_id)
-    return _ask(leads)
+
+    dated = [lead for lead in open_leads if _in_order_date_window(order_date, lead)]
+    if len(dated) == 1:
+        return Decision(kind=kind, lead_id=dated[0].lead_id)
+    if len(dated) > 1:
+        return _ask(dated)
+
+    # Дата не помогла (пустая или протухшая). Если открытая сделка одна — она и есть.
+    if len(open_leads) == 1:
+        return Decision(kind=kind, lead_id=open_leads[0].lead_id)
+    return None          # несколько открытых без дат — решаем дальше по цепочке
+
+
+def _pick_completed(order_date: date, realization: list[LeadInfo]) -> Optional[Decision]:
+    """Проведённая сделка по этому заказу — владелец успел раньше робота (дизайн §5.1).
+
+    Сначала по «Дате и времени заказа», затем по моменту закрытия сделки: поле даты
+    заполняют не всегда и не всегда верно, а закрытие фиксируется само.
+    """
+    completed = [lead for lead in realization if lead.is_success]
+    if not completed:
+        return None
+
+    by_order_date = [(gap, lead.lead_id) for lead in completed
+                     if (gap := _order_date_gap(order_date, lead)) is not None and gap <= DATE_WINDOW_DAYS]
+    if by_order_date:
+        return Decision(kind="already_done", lead_id=min(by_order_date)[1])
+
+    by_closed = [(gap, lead.lead_id) for lead in completed
+                 if (gap := _closed_gap(order_date, lead)) is not None and gap <= CLOSED_WINDOW_DAYS]
+    if by_closed:
+        return Decision(kind="already_done", lead_id=min(by_closed)[1])
+
+    return None
 
 
 def match(*, order_date: date, candidates: Iterable[LeadInfo]) -> Decision:
@@ -99,26 +141,37 @@ def match(*, order_date: date, candidates: Iterable[LeadInfo]) -> Decision:
 
     realization = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_REALIZATION]
     primary = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_PRIMARY]
+    open_realization = [lead for lead in realization if lead.is_open]
 
-    # 2. Приоритет — открытые сделки воронки реализации (путь А).
-    decision = _resolve(order_date, [lead for lead in realization if lead.is_open], "use_realization")
+    # 2. Открытая сделка реализации на дату заказа — самый частый случай (путь А).
+    dated_open = [lead for lead in open_realization if _in_order_date_window(order_date, lead)]
+    if len(dated_open) == 1:
+        return Decision(kind="use_realization", lead_id=dated_open[0].lead_id)
+    if len(dated_open) > 1:
+        return _ask(dated_open)          # две открытые на одну дату — вопрос владельцу
+
+    # 3. Открытой сделки на дату нет. Проверяем, не проведён ли заказ руками.
+    #    Важно делать это ДО разбора открытых без дат: у постоянных клиентов годами
+    #    висят забытые открытые сделки, и раньше они перехватывали решение (заказ №508).
+    decision = _pick_completed(order_date, realization)
     if decision is not None:
         return decision
 
-    # 3. Открытых нет, но есть проведённая сделка с подходящей датой —
-    #    владелец успел провести заказ руками. Привязываем, ничего не меняем (дизайн §5.1).
-    done_near = [lead for lead in realization if lead.is_success and _within_window(order_date, lead)]
-    if done_near:
-        # Несколько проведённых с датой в окне — редкость; берём ближайшую по дате,
-        # при равенстве — меньший id, чтобы решение было воспроизводимым.
-        # Риска нет: в этой ветке робот в амо ничего не пишет.
-        best = min(done_near, key=lambda lead: (abs((lead.order_date - order_date).days), lead.lead_id))
-        return Decision(kind="already_done", lead_id=best.lead_id)
-
-    # 4. В реализации пусто — работаем с открытым лидом первичной воронки (путь Б).
-    decision = _resolve(order_date, [lead for lead in primary if lead.is_open], "use_primary")
+    # 4. Проведённой нет. Единственная открытая сделка реализации — берём её,
+    #    даже если дата в ней пустая или протухшая.
+    decision = _pick_open(order_date, open_realization, "use_realization")
     if decision is not None:
         return decision
+    if open_realization:
+        return _ask(open_realization)    # несколько открытых, дата не решает
 
-    # 5. Ничего подходящего — заводим сделку с нуля (путь В, ~1 раз в неделю).
+    # 5. В реализации пусто — работаем с открытым лидом первичной воронки (путь Б).
+    open_primary = [lead for lead in primary if lead.is_open]
+    decision = _pick_open(order_date, open_primary, "use_primary")
+    if decision is not None:
+        return decision
+    if open_primary:
+        return _ask(open_primary)
+
+    # 6. Ничего подходящего — заводим сделку с нуля (путь В, ~1 раз в неделю).
     return Decision(kind="create_new")
