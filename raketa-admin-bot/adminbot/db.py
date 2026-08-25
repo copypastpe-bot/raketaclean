@@ -215,6 +215,28 @@ async def fetch_actions(own_pool: asyncpg.Pool, order_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
+                               exclude_order_id: int) -> set[int]:
+    """Сделки, уже закреплённые за другими заказами этого клиента.
+
+    Одна сделка не может закрывать два заказа: у клиента бывает несколько работ
+    подряд, и каждой полагается своя сделка.
+    """
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT primary_lead_id, real_lead_id
+            FROM adminbot.amo_links
+            WHERE phone10 = $1 AND order_id <> $2
+            """,
+            phone10, exclude_order_id,
+        )
+    taken: set[int] = set()
+    for row in rows:
+        taken.update(value for value in (row["primary_lead_id"], row["real_lead_id"]) if value)
+    return taken
+
+
 async def count_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]:
     """Сводка очереди для команды /status и вечерней сверки."""
     async with own_pool.acquire() as conn:
