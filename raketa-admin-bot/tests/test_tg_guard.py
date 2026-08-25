@@ -69,8 +69,19 @@ async def test_stranger_gets_refusal_and_changes_nothing():
 
 
 def test_router_registers_owner_commands():
-    """Роутер собирается и знает все четыре команды владельца."""
+    """Роутер собирается и знает все команды владельца."""
     router = build_router(make_commands())
 
     assert router.message.handlers                    # обработчики зарегистрированы
-    assert len(router.message.handlers) == 5          # четыре команды и отказ для чужих
+    assert len(router.message.handlers) == 6          # пять команд и отказ для чужих
+    assert router.callback_query.handlers == []       # карточки не подключены — кнопок нет
+
+
+def test_router_wires_card_buttons_when_answers_are_given():
+    from adminbot.control import MemoryControlPanel
+    from adminbot.tg.bot import OwnerAnswers
+
+    answers = OwnerAnswers(owner_tg_id=OWNER_ID, store=None)
+    router = build_router(make_commands(control=MemoryControlPanel()), answers)
+
+    assert len(router.callback_query.handlers) == 2    # выбор сделки и кнопки хвоста

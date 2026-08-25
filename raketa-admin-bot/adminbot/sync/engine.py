@@ -130,7 +130,15 @@ class Engine:
             await self.store.log(order.order_id, "ask_owner", dry_run=self.dry_run,
                                  payload={"reason": decision.kind,
                                           "options": list(decision.options)})
-            return await self.store.update(order.order_id, status="waiting_owner")
+            # Варианты кладём рядом с заказом: карточку владельцу может отправить
+            # уже другой проход, а сделки к тому времени надо чем-то подписать.
+            question = {
+                "reason": decision.kind,
+                "options": [_option(info) for info in candidates
+                            if info.lead_id in decision.options],
+            }
+            return await self.store.update(order.order_id, status="waiting_owner",
+                                           question=question)
 
         path = _PATH_BY_KIND[decision.kind]
         fields: dict[str, Any] = {"path": path, "status": "in_progress"}
@@ -411,6 +419,7 @@ class Engine:
         await self.store.log(order.order_id, "ask_owner", dry_run=self.dry_run,
                              payload={"reason": reason})
         return await self.store.update(order.order_id, status="waiting_owner",
+                                       question={"reason": reason, "options": []},
                                        last_error=None)
 
     def _to_lead_info(self, lead: dict) -> LeadInfo:
@@ -438,6 +447,19 @@ PAYMENT_ENUM_BY_METHOD = {
 
 # Названия контактов, которые амо ставит сама и которые не жалко заменить.
 _AUTO_NAME_PREFIXES = ("входящий", "пропущенный", "заявка", "сделка", "автосделка", "звонок")
+
+
+def _option(info: LeadInfo) -> dict:
+    """Сделка-кандидат в том виде, в каком её увидит владелец на кнопке."""
+    # Дата сделки: сначала заявленная дата заказа, иначе когда её завели или закрыли.
+    when = info.order_date or info.created_date or info.closed_date
+    return {
+        "lead_id": info.lead_id,
+        "pipeline_id": info.pipeline_id,
+        "date": when.isoformat() if when else None,
+        "price": None if info.price is None else int(info.price),
+        "name": info.name,
+    }
 
 
 def _payment_enum(method: Optional[str]) -> Optional[int]:

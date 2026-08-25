@@ -18,7 +18,8 @@ from adminbot.phone import last10
 
 # Колонки adminbot.amo_links, которые разрешено менять через update_link.
 _UPDATABLE_LINK_FIELDS = frozenset(
-    {"phone10", "status", "path", "primary_lead_id", "real_lead_id", "question_msg_id", "last_error"}
+    {"phone10", "status", "path", "primary_lead_id", "real_lead_id", "question",
+     "question_msg_id", "last_error"}
 )
 
 # Заказы рабочего бота за период. Мастера: основной (orders.master_id) первым,
@@ -134,6 +135,9 @@ def _link_from_row(row: Optional[asyncpg.Record]) -> Optional[AmoLink]:
     checklist = row["checklist"]
     if isinstance(checklist, str):          # на случай пула без нашего json-кодека
         checklist = json.loads(checklist)
+    question = row["question"]
+    if isinstance(question, str):
+        question = json.loads(question)
     return AmoLink(
         order_id=row["order_id"],
         phone10=row["phone10"],
@@ -142,6 +146,7 @@ def _link_from_row(row: Optional[asyncpg.Record]) -> Optional[AmoLink]:
         primary_lead_id=row["primary_lead_id"],
         real_lead_id=row["real_lead_id"],
         checklist=checklist or {},
+        question=question,
         question_msg_id=row["question_msg_id"],
         last_error=row["last_error"],
         created_at=row["created_at"],

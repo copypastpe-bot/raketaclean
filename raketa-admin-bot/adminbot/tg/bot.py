@@ -18,10 +18,14 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import BaseFilter, Command
 
 from adminbot.control import ControlPanel
+from adminbot.tg.cards import (
+    BACKLOG_GO, BACKLOG_HOLD, CHOICE_PREFIX, PATH_BY_PIPELINE, live_report_text,
+    parse_choice, preview_card,
+)
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +46,7 @@ QUEUE_NAMES: tuple[tuple[str, str], ...] = (
 HELP_TEXT = (
     "🤖 Я слежу за заказами рабочего бота и сам оформляю по ним сделки в amoCRM.\n\n"
     "/status — что происходит: режим, пауза, очередь заказов\n"
+    "/backlog — показать хвост непроведённых заказов и что я с ними сделаю\n"
     "/pause — остановиться: в amoCRM ничего трогать не буду\n"
     "/resume — продолжить работу\n"
     "/help — эта справка\n\n"
@@ -72,12 +77,14 @@ class OwnerCommands:
         sync_enabled: bool,
         dry_run: bool,
         watcher: Optional[Any] = None,
+        backlog: Optional[Any] = None,
     ) -> None:
         self.owner_tg_id = owner_tg_id
         self.control = control
         self.sync_enabled = sync_enabled
         self.dry_run = dry_run
         self.watcher = watcher
+        self.backlog = backlog
 
     async def status(self, message: Any) -> None:
         await message.answer(status_text(
@@ -115,6 +122,17 @@ class OwnerCommands:
             if was_paused else "Я и так работаю. Ничего менять не стал."
         )
 
+    async def backlog_preview(self, message: Any) -> None:
+        """Показать хвост и спросить разрешения его провести."""
+        if self.backlog is None:
+            await message.answer("Разбор хвоста сейчас недоступен.")
+            return
+
+        await message.answer("Смотрю хвост, это займёт минуту…")
+        plan = await self.backlog.preview()
+        text, keyboard = preview_card(plan)
+        await message.answer(text, reply_markup=keyboard)
+
     async def help(self, message: Any) -> None:
         await message.answer(HELP_TEXT)
 
@@ -124,16 +142,112 @@ class OwnerCommands:
         await message.answer(OWNER_ONLY_REPLY)
 
 
-def build_router(commands: OwnerCommands) -> Router:
+class OwnerAnswers:
+    """Нажатия на кнопки карточек.
+
+    Ответ владельца никогда не идёт в amoCRM напрямую: он записывается рядом
+    с заказом, а работу доделает обычный проход наблюдателя. Поэтому решение
+    не потеряется, даже если робота перезапустят сразу после нажатия.
+    """
+
+    def __init__(self, *, owner_tg_id: int, store: Any, backlog: Optional[Any] = None) -> None:
+        self.owner_tg_id = owner_tg_id
+        self.store = store
+        self.backlog = backlog
+
+    async def on_choice(self, callback: Any) -> None:
+        if not self._is_owner(callback):
+            return
+        choice = parse_choice(getattr(callback, "data", None))
+        if choice is None:
+            await callback.answer()
+            return
+
+        order_id, kind, lead_id = choice
+        link = await self.store.get(order_id)
+        if link is None:
+            log.warning("Ответ по заказу №%s, которого нет в базе", order_id)
+            await callback.answer("Этого заказа у меня уже нет.")
+            return
+
+        fields, reply = self._apply_choice(link, kind, lead_id)
+        await self.store.update(order_id, **fields)
+        log.info("Заказ №%s: владелец выбрал %s", order_id, kind)
+        await callback.answer()
+        await callback.message.edit_text(f"Заказ №{order_id}: {reply}")
+
+    async def on_backlog(self, callback: Any) -> None:
+        if not self._is_owner(callback):
+            return
+        data = getattr(callback, "data", None)
+
+        if data == BACKLOG_HOLD:
+            await callback.answer()
+            await callback.message.edit_text("Отложил. Хвост никуда не денется — "
+                                             "покажу снова по команде /backlog.")
+            return
+
+        if data != BACKLOG_GO or self.backlog is None:
+            await callback.answer()
+            return
+
+        await callback.answer("Поехали")
+        await callback.message.edit_text("Провожу хвост…")
+        done = await self.backlog.run_live()
+        await callback.message.edit_text(live_report_text(done))
+
+    # --- внутреннее ---
+
+    def _is_owner(self, event: Any) -> bool:
+        user = getattr(event, "from_user", None)
+        return bool(user and user.id == self.owner_tg_id)
+
+    def _apply_choice(self, link: Any, kind: str, lead_id: Optional[int]):
+        """Что записать по выбору владельца и что ему ответить."""
+        if kind == "manual":
+            return ({"status": "done", "path": "done", "question": None},
+                    "понял, оставляю вам. Ничего трогать не буду.")
+
+        if kind == "new":
+            return ({"status": "new", "path": "C", "question": None},
+                    "создам новую сделку с нуля.")
+
+        if kind == "retry":
+            return ({"status": "new", "question": None},
+                    "проверю ещё раз.")
+
+        # Выбрана конкретная сделка: путь зависит от того, в какой она воронке.
+        pipeline_id = self._pipeline_of(link, lead_id)
+        path = PATH_BY_PIPELINE.get(pipeline_id, "A")
+        fields = {"status": "new", "path": path, "question": None}
+        fields["real_lead_id" if path == "A" else "primary_lead_id"] = lead_id
+        return fields, f"беру сделку #{lead_id}."
+
+    @staticmethod
+    def _pipeline_of(link: Any, lead_id: Optional[int]) -> Optional[int]:
+        for option in ((link.question or {}).get("options") or []):
+            if option.get("lead_id") == lead_id:
+                return option.get("pipeline_id")
+        return None
+
+
+def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None) -> Router:
     """Собрать роутер: сначала команды владельца, последним — отказ всем прочим."""
     router = Router(name="owner")
     owner = OwnerOnly(commands.owner_tg_id)
 
     router.message.register(commands.status, owner, Command("status"))
+    router.message.register(commands.backlog_preview, owner, Command("backlog"))
     router.message.register(commands.pause, owner, Command("pause"))
     router.message.register(commands.resume, owner, Command("resume"))
     router.message.register(commands.help, owner, Command("help", "start"))
     router.message.register(commands.stranger)          # порядок важен: это «всё остальное»
+
+    if answers is not None:
+        router.callback_query.register(answers.on_choice, owner,
+                                       F.data.startswith(f"{CHOICE_PREFIX}:"))
+        router.callback_query.register(answers.on_backlog, owner,
+                                       F.data.startswith("backlog:"))
     return router
 
 

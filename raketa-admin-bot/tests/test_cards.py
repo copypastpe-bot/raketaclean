@@ -1,0 +1,183 @@
+"""Карточки владельцу: вопрос с кнопками, вечерняя сводка, предпросмотр хвоста.
+
+Здесь проверяется то, что владелец увидит своими глазами: понятный текст,
+замаскированные телефоны (правило проекта по персональным данным) и кнопки,
+по нажатию которых робот поймёт, что именно выбрали.
+"""
+
+from datetime import datetime
+from decimal import Decimal
+
+from adminbot.amo import ids
+from adminbot.amo.fields import MOSCOW_TZ
+from adminbot.models import Order
+from adminbot.sync.backlog import PlannedOrder
+from adminbot.sync.reconcile import DailySummary, SummaryRow
+from adminbot.tg.cards import (
+    BACKLOG_GO, BACKLOG_HOLD, parse_choice, preview_card, question_card, summary_text,
+)
+
+ORDER_MOMENT = datetime(2026, 8, 24, 17, 53, tzinfo=MOSCOW_TZ)
+
+
+def make_order(order_id=596):
+    return Order(order_id=order_id, phone10="9601861067", created_at=ORDER_MOMENT,
+                 amount_total=Decimal("5950"), client_name="Ирина",
+                 masters=[("Дмитрий Козлов", "79306858534")])
+
+
+def buttons(keyboard):
+    return [button for row in keyboard.inline_keyboard for button in row]
+
+
+# --- карточка-вопрос ---
+
+def test_question_card_shows_order_and_choices():
+    question = {"reason": "ask_owner", "options": [
+        {"lead_id": 41400001, "pipeline_id": ids.PIPELINE_REALIZATION,
+         "date": "2026-07-22", "price": 5000, "name": "Ниж! Матрас, Юлия"},
+        {"lead_id": 41400002, "pipeline_id": ids.PIPELINE_REALIZATION,
+         "date": "2026-07-24", "price": 6000, "name": None},
+    ]}
+
+    text, keyboard = question_card(make_order(), question)
+
+    assert "Заказ №596" in text
+    assert "Ирина" in text
+    assert "5 950" in text                      # чек с разделителем разрядов
+    assert "24.08" in text
+    assert "какая из них" in text.lower()       # причина вопроса словами
+
+    labels = [button.text for button in buttons(keyboard)]
+    assert labels[:2] == ["Сделка 22.07 · 5 000 ₽", "Сделка 24.07 · 6 000 ₽"]
+    assert "➕ Создать новую" in labels
+    assert "✋ Сам разберусь" in labels
+
+    data = [button.callback_data for button in buttons(keyboard)]
+    assert data[:2] == ["amosync:596:41400001", "amosync:596:41400002"]
+    assert "amosync:596:new" in data and "amosync:596:manual" in data
+
+
+def test_question_card_masks_the_phone():
+    """Персональные данные: в сообщение уходят только последние 4 цифры."""
+    text, _ = question_card(make_order(), {"reason": "ask_owner", "options": []})
+
+    assert "…1067" in text
+    assert "9601861067" not in text
+
+
+def test_question_card_for_stale_leads_offers_a_new_deal():
+    question = {"reason": "ask_owner_stale", "options": [
+        {"lead_id": 41400003, "pipeline_id": ids.PIPELINE_PRIMARY,
+         "date": "2026-05-14", "price": 3000, "name": "Лен! Ковролин"},
+    ]}
+
+    text, keyboard = question_card(make_order(), question)
+
+    assert "свежих сделок нет" in text.lower()
+    assert "amosync:596:new" in [button.callback_data for button in buttons(keyboard)]
+
+
+def test_question_card_when_salesbot_is_silent_offers_a_retry():
+    text, keyboard = question_card(make_order(), {"reason": "сейлзбот не создал автосделку"})
+
+    assert "автосделку" in text
+    assert "amosync:596:retry" in [button.callback_data for button in buttons(keyboard)]
+
+
+def test_question_card_without_a_known_reason_still_works():
+    text, keyboard = question_card(make_order(), None)
+
+    assert "Заказ №596" in text
+    assert buttons(keyboard)                    # кнопки есть всегда: тупика быть не должно
+
+
+# --- разбор нажатия ---
+
+def test_parse_choice_understands_every_button():
+    assert parse_choice("amosync:596:41400001") == (596, "lead", 41400001)
+    assert parse_choice("amosync:596:new") == (596, "new", None)
+    assert parse_choice("amosync:596:manual") == (596, "manual", None)
+    assert parse_choice("amosync:596:retry") == (596, "retry", None)
+
+
+def test_parse_choice_rejects_junk():
+    for data in ("", "amosync", "amosync:596", "другое:596:new", "amosync:абв:new", None):
+        assert parse_choice(data) is None
+
+
+# --- вечерняя сводка ---
+
+def summary_with(**fields):
+    return DailySummary(**fields)
+
+
+def test_summary_lists_what_the_robot_did():
+    summary = summary_with(
+        processed=(SummaryRow(581, "done", "A", 41400001),
+                   SummaryRow(585, "done", "B", 41400002)),
+        created=(SummaryRow(590, "done", "C", 41400003),),
+        already_done=(SummaryRow(591, "done", "done", 41400004),),
+        total_orders=4,
+    )
+
+    text = summary_text(summary)
+
+    assert "Проведено: 2" in text
+    assert "№581" in text and "#41400001" in text
+    assert "Создано новых сделок: 1" in text
+    assert "провели сами" in text.lower()
+
+
+def test_summary_puts_owner_business_first():
+    """Главное для владельца — что требует его внимания, а не что прошло гладко."""
+    summary = summary_with(
+        processed=(SummaryRow(581, "done", "A", 41400001),),
+        waiting_owner=(SummaryRow(596, "waiting_owner"),),
+        stuck=(SummaryRow(593, "error", "A", 41400005, "AmoError: 502"),),
+        missed=(598,),
+        total_orders=4,
+    )
+
+    text = summary_text(summary)
+
+    assert text.index("№596") < text.index("№581")     # вопросы выше отчёта об успехах
+    assert "AmoError: 502" in text
+    assert "№598" in text
+
+
+def test_summary_of_a_quiet_day():
+    text = summary_text(summary_with(processed=(SummaryRow(581, "done", "A", 1),), total_orders=1))
+
+    assert "разбираться не с чем" in text.lower()
+
+
+# --- предпросмотр хвоста ---
+
+def test_preview_lists_planned_actions_and_asks_for_a_go():
+    plan = [
+        PlannedOrder(order_id=582, title="Заказ №582 · Ирина …1067 · 5 950 ₽ · 24.08",
+                     status="in_progress", path="A",
+                     actions=(("update_lead", 41400001), ("move_lead", 41400001),
+                              ("complete_task", 5001))),
+        PlannedOrder(order_id=583, title="Заказ №583 · Юлия …6642 · 3 300 ₽ · 23.08",
+                     status="waiting_owner", path=None, actions=(("ask_owner", None),)),
+    ]
+
+    text, keyboard = preview_card(plan)
+
+    assert "2 заказ" in text
+    assert "заполню сделку #41400001" in text
+    assert "закрою задачу" in text
+    assert "спрошу вас" in text
+    assert "ничего не изменил" in text.lower()          # это ещё репетиция
+
+    data = [button.callback_data for button in buttons(keyboard)]
+    assert data == [BACKLOG_GO, BACKLOG_HOLD]
+
+
+def test_preview_of_an_empty_backlog_has_no_go_button():
+    text, keyboard = preview_card([])
+
+    assert "нечего" in text.lower()
+    assert keyboard is None

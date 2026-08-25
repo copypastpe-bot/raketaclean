@@ -55,6 +55,9 @@ class AmoLink:
     primary_lead_id: Optional[int] = None
     real_lead_id: Optional[int] = None
     checklist: dict[str, Any] = field(default_factory=dict)   # шаг → время выполнения
+    # Вопрос владельцу: причина и варианты сделок на выбор. Хранится рядом с заказом,
+    # чтобы карточку можно было отправить (или переотправить) в любой момент.
+    question: Optional[dict[str, Any]] = None
     question_msg_id: Optional[int] = None
     last_error: Optional[str] = None
     created_at: Optional[datetime] = None

@@ -27,12 +27,14 @@ from adminbot.amo import ids
 from adminbot.amo.client import AmoClient
 from adminbot.config import Settings
 from adminbot.control import PgControlPanel, sync_allowed
+from adminbot.sync.backlog import BacklogRunner
 from adminbot.sync.engine import Engine
 from adminbot.sync.reconcile import PgSummarySource, Reconciler
 from adminbot.sync.specialists import SpecialistIndex
-from adminbot.sync.store import PgLinkStore
+from adminbot.sync.store import MemoryLinkStore, PgLinkStore
 from adminbot.sync.watcher import PgOrderSource, Watcher
-from adminbot.tg.bot import OwnerCommands, build_router
+from adminbot.tg.bot import OwnerAnswers, OwnerCommands, build_router
+from adminbot.tg.cards import question_card, summary_text
 
 log = logging.getLogger("adminbot")
 
@@ -44,7 +46,7 @@ class App:
     settings: Settings
     bot_pool: Any
     own_pool: Any
-    amo: AmoClient
+    amo_clients: tuple[AmoClient, ...]
     bot: Bot
     dispatcher: Dispatcher
     watcher: Watcher
@@ -79,7 +81,8 @@ class App:
         await self.dispatcher.stop_polling()
 
     async def close(self) -> None:
-        await self.amo.close()
+        for client in self.amo_clients:
+            await client.close()
         await self.bot.session.close()
         await self.bot_pool.close()
         if self.own_pool is not self.bot_pool:
@@ -92,26 +95,42 @@ async def build_app(settings: Settings) -> App:
     own_pool = (bot_pool if settings.own_db_dsn == settings.bot_db_dsn
                 else await db.create_pool(settings.own_db_dsn))
 
-    amo = AmoClient(base_url=settings.amo_base_url, token=settings.amo_token,
-                    dry_run=settings.amo_sync_dry_run)
+    # Два клиента амо с разными правами на запись. Репетиционный читает CRM,
+    # но никогда в неё не пишет; боевой пишет. Роль клиента видна из его имени,
+    # и её нельзя случайно переключить на ходу.
+    rehearsal_amo = AmoClient(base_url=settings.amo_base_url, token=settings.amo_token,
+                              dry_run=True)
+    live_amo = AmoClient(base_url=settings.amo_base_url, token=settings.amo_token,
+                         dry_run=False)
+    amo = rehearsal_amo if settings.amo_sync_dry_run else live_amo
+
     # Список «Специалистов» читаем один раз при старте: он меняется редко,
     # а сопоставление мастера со значением списка нужно на каждом заказе.
     specialists = SpecialistIndex.from_enums(
         await amo.get_lead_field_enums(ids.FIELD_SPECIALIST))
 
     control = PgControlPanel(own_pool)
-    engine = Engine(amo=amo, store=PgLinkStore(own_pool), specialists=specialists,
+
+    # Важная тонкость репетиции. Движок отмечает выполненные шаги в хранилище,
+    # чтобы после сбоя продолжить с места остановки. Если писать такие отметки
+    # в базу ещё и в репетиции, боевой прогон решит, что работа уже сделана,
+    # и молча пропустит её. Поэтому репетиция живёт в памяти процесса: отметки
+    # не попадают в базу, но в пределах запуска робот помнит, о чём уже спросил.
+    store = MemoryLinkStore() if settings.amo_sync_dry_run else PgLinkStore(own_pool)
+    engine = Engine(amo=amo, store=store, specialists=specialists,
                     dry_run=settings.amo_sync_dry_run,
                     salesbot_wait_sec=settings.salesbot_wait_sec)
 
+    bot = Bot(token=settings.tg_token)
+    source = PgOrderSource(bot_pool, own_pool, settings.backlog_from)
     watcher = Watcher(
         engine=engine,
-        source=PgOrderSource(bot_pool, own_pool, settings.backlog_from),
+        source=source,
         is_enabled=sync_allowed(sync_enabled=settings.amo_sync_enabled, control=control),
         poll_interval_sec=settings.poll_interval_sec,
+        on_question=_make_question_sender(bot, settings.owner_tg_id),
     )
 
-    bot = Bot(token=settings.tg_token)
     reconciler = Reconciler(
         watcher=watcher,
         source=PgSummarySource(bot_pool, own_pool, settings.backlog_from),
@@ -119,16 +138,33 @@ async def build_app(settings: Settings) -> App:
         hour_msk=settings.reconcile_hour_msk,
     )
 
-    dispatcher = Dispatcher()
-    dispatcher.include_router(build_router(OwnerCommands(
-        owner_tg_id=settings.owner_tg_id,
-        control=control,
-        sync_enabled=settings.amo_sync_enabled,
-        dry_run=settings.amo_sync_dry_run,
-        watcher=watcher,
-    )))
+    # Хвост проводится отдельным, всегда боевым движком: кнопка «Поехали» —
+    # это осознанное разрешение владельца, даже когда сервис работает в репетиции.
+    backlog = BacklogRunner(
+        fetch_orders=source.pending,
+        rehearsal_engine=lambda scratch: Engine(
+            amo=rehearsal_amo, store=scratch, specialists=specialists, dry_run=True,
+            salesbot_wait_sec=settings.salesbot_wait_sec),
+        live_engine=Engine(amo=live_amo, store=PgLinkStore(own_pool),
+                           specialists=specialists, dry_run=False,
+                           salesbot_wait_sec=settings.salesbot_wait_sec),
+    )
 
-    return App(settings=settings, bot_pool=bot_pool, own_pool=own_pool, amo=amo, bot=bot,
+    dispatcher = Dispatcher()
+    dispatcher.include_router(build_router(
+        OwnerCommands(
+            owner_tg_id=settings.owner_tg_id,
+            control=control,
+            sync_enabled=settings.amo_sync_enabled,
+            dry_run=settings.amo_sync_dry_run,
+            watcher=watcher,
+            backlog=backlog,
+        ),
+        OwnerAnswers(owner_tg_id=settings.owner_tg_id, store=store, backlog=backlog),
+    ))
+
+    return App(settings=settings, bot_pool=bot_pool, own_pool=own_pool,
+               amo_clients=(rehearsal_amo, live_amo), bot=bot,
                dispatcher=dispatcher, watcher=watcher, reconciler=reconciler,
                stop=asyncio.Event())
 
@@ -137,26 +173,28 @@ def _make_summary_sender(bot: Bot, owner_tg_id: int):
     """Вечерняя сводка владельцу."""
 
     async def send(summary) -> None:
-        await bot.send_message(owner_tg_id, _plain_summary(summary))
+        await bot.send_message(owner_tg_id, summary_text(summary))
 
     return send
 
 
-def _plain_summary(summary) -> str:
-    """Короткий отчёт за день. Развёрнутое оформление — в карточках (задача 12)."""
-    lines = [
-        f"Вечерняя сверка. Проведено: {len(summary.processed)}, "
-        f"создано новых сделок: {len(summary.created)}."
-    ]
-    if summary.waiting_owner:
-        lines.append(f"Ждут вашего ответа: {len(summary.waiting_owner)}.")
-    if summary.stuck:
-        lines.append(f"Зависли: {len(summary.stuck)}.")
-    if summary.missed:
-        lines.append(f"Не разобрано: {len(summary.missed)}.")
-    if summary.is_quiet:
-        lines.append("Хвостов нет, разбираться не с чем.")
-    return "\n".join(lines)
+def _make_question_sender(bot: Bot, owner_tg_id: int):
+    """Карточка-вопрос владельцу. Возвращает id сообщения — признак «уже спросили».
+
+    Если Telegram недоступен, возвращаем None: наблюдатель попробует ещё раз
+    на следующем проходе, и вопрос не потеряется.
+    """
+
+    async def send(order, link) -> Optional[int]:
+        text, keyboard = question_card(order, link.question)
+        try:
+            sent = await bot.send_message(owner_tg_id, text, reply_markup=keyboard)
+        except Exception:                              # noqa: BLE001
+            log.exception("Заказ №%s: карточку отправить не удалось", order.order_id)
+            return None
+        return sent.message_id
+
+    return send
 
 
 def _install_stop_handlers(app: App) -> None:
