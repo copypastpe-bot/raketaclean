@@ -1,0 +1,45 @@
+"""Объекты предметной области: заказ бота и привязка заказа к сделкам амо."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+from typing import Any, Optional
+
+
+@dataclass(frozen=True)
+class Order:
+    """Закрытый мастером заказ из БД рабочего бота (только чтение)."""
+
+    order_id: int                     # «Заказ №N» = orders.id, отдельного счётчика нет
+    phone10: Optional[str]            # 10 цифр номера клиента; None — номер не распознан
+    created_at: datetime              # момент закрытия заказа мастером
+    amount_total: Decimal             # сумма чека
+    upsell_amount: Decimal            # из них доп. продажа
+    master_names: list[str] = field(default_factory=list)  # основной мастер первым
+    rating_score: Optional[int] = None   # оценка клиента: есть → задачу «Получить ОС» закрываем
+    client_name: Optional[str] = None
+    address: Optional[str] = None
+
+    @property
+    def order_date(self):
+        """Дата заказа — по ней матчер сверяется со сделками амо."""
+        return self.created_at.date()
+
+
+@dataclass(frozen=True)
+class AmoLink:
+    """Строка adminbot.amo_links: что робот знает и уже сделал по заказу."""
+
+    order_id: int
+    phone10: str
+    status: str                       # new|in_progress|waiting_owner|waiting_salesbot|done|error
+    path: Optional[str] = None        # A|B|C|D — путь заказа из дизайна §4
+    primary_lead_id: Optional[int] = None
+    real_lead_id: Optional[int] = None
+    checklist: dict[str, Any] = field(default_factory=dict)   # шаг → время выполнения
+    question_msg_id: Optional[int] = None
+    last_error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
