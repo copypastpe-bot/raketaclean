@@ -80,6 +80,7 @@ async def test_find_contacts_by_phone_follows_pagination(amo):
 
     assert [c["id"] for c in contacts] == [111, 222]        # обе страницы склеены
     assert fake.requests[0][1]["query"] == "9601861067"     # ищем по телефону
+    assert fake.requests[0][1]["with"] == "leads"           # сразу со списком сделок клиента
     assert fake.requests[1][1]["page"] == "2"               # вторая страница запрошена
 
 
@@ -106,7 +107,7 @@ async def test_rate_limit_is_retried_then_succeeds(amo):
     fake.stub("/api/v4/leads", (429, {"title": "Too Many Requests"}),
               {"_embedded": {"leads": [{"id": 7}]}})
 
-    leads = await client.get_contact_leads(111)
+    leads = await client.get_leads_by_ids([7])
 
     assert [lead["id"] for lead in leads] == [7]
     assert len(fake.requests) == 2          # первая попытка отбита, вторая прошла
@@ -118,7 +119,7 @@ async def test_persistent_server_error_gives_up_after_max_attempts(amo):
               (500, {"title": "Server error"}), (500, {"title": "Server error"}))
 
     with pytest.raises(AmoError):
-        await client.get_contact_leads(111)
+        await client.get_leads_by_ids([7])
 
     assert len(fake.requests) == 3          # ровно max_attempts попыток
 
@@ -128,7 +129,75 @@ async def test_rate_limit_error_type_after_all_attempts(amo):
     fake.stub("/api/v4/leads", (429, {}), (429, {}), (429, {}))
 
     with pytest.raises(AmoRateLimitError):
-        await client.get_contact_leads(111)
+        await client.get_leads_by_ids([7])
+
+
+async def test_leads_are_fetched_by_id_never_by_contact_filter(amo):
+    """Амо МОЛЧА игнорирует filter[contacts][id] и отдаёт все сделки подряд.
+
+    Проверено на боевом аккаунте 2026-08-25: запрос сделок контакта вернул
+    250 чужих сделок и ни одной его собственной. Поэтому список сделок клиента
+    берём из самого контакта (with=leads), а сами сделки — пакетом по id.
+    """
+    client, fake = amo
+    fake.stub("/api/v4/contacts/111",
+              {"id": 111, "_embedded": {"leads": [{"id": 501}, {"id": 502}]}})
+    fake.stub("/api/v4/leads", {"_embedded": {"leads": [{"id": 501}, {"id": 502}]}})
+
+    leads = await client.get_contact_leads(111)
+
+    assert [lead["id"] for lead in leads] == [501, 502]
+    paths = [path for path, _ in fake.requests]
+    assert paths == ["/api/v4/contacts/111", "/api/v4/leads"]
+    all_params = " ".join(str(query) for _, query in fake.requests)
+    assert "filter[contacts]" not in all_params      # сломанный фильтр не используем
+
+
+async def test_get_leads_by_ids_splits_into_batches(amo):
+    client, fake = amo
+    fake.stub("/api/v4/leads", {"_embedded": {"leads": [{"id": 1}]}})
+
+    await client.get_leads_by_ids(list(range(1, 121)))     # 120 сделок
+
+    # по 50 за запрос → три пакета; иначе URL распухает и амо режет ответ
+    assert len(fake.requests) == 3
+
+
+async def test_get_leads_by_ids_deduplicates_and_ignores_empty(amo):
+    client, fake = amo
+    fake.stub("/api/v4/leads", {"_embedded": {"leads": [{"id": 5}]}})
+
+    assert await client.get_leads_by_ids([]) == []
+    assert not fake.requests                            # пустой список — без похода в сеть
+
+    leads = await client.get_leads_by_ids([5, 5, 5])
+    assert [lead["id"] for lead in leads] == [5]        # дубли id не удваивают запросы
+    assert len(fake.requests) == 1
+
+
+async def test_find_leads_by_phone_uses_two_requests(amo):
+    """Полный путь «телефон → сделки клиента»: поиск контактов + пакет сделок."""
+    client, fake = amo
+    fake.stub("/api/v4/contacts", {
+        "_embedded": {"contacts": [
+            {"id": 111, "_embedded": {"leads": [{"id": 501}]}},
+            {"id": 222, "_embedded": {"leads": [{"id": 502}]}},   # дубль контакта клиента
+        ]}
+    })
+    fake.stub("/api/v4/leads", {"_embedded": {"leads": [{"id": 501}, {"id": 502}]}})
+
+    leads = await client.find_leads_by_phone("9601861067")
+
+    assert [lead["id"] for lead in leads] == [501, 502]
+    assert len(fake.requests) == 2       # сделки обоих контактов берём одним пакетом
+
+
+async def test_find_leads_by_phone_without_contacts(amo):
+    client, fake = amo
+    fake.stub("/api/v4/contacts", 204)
+
+    assert await client.find_leads_by_phone("9999999999") == []
+    assert len(fake.requests) == 1       # нет контакта — за сделками не идём
 
 
 async def test_get_lead_and_missing_lead(amo):

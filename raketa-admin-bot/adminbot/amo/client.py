@@ -8,16 +8,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence, Union
 
 import aiohttp
 
+from adminbot.amo.fields import contact_lead_ids
+
 log = logging.getLogger(__name__)
+
+# Параметры запроса: словарь либо список пар (для повторяющихся ключей filter[id][]).
+Params = Union[Mapping[str, Any], Sequence[tuple[str, Any]]]
 
 # Сколько записей просим за раз (потолок амо для большинства сущностей — 250).
 PAGE_LIMIT = 250
 # Сколько страниц готовы пролистать, прежде чем решить, что что-то не так.
 MAX_PAGES = 20
+# Сколько сделок запрашиваем одним пакетом: длинный URL амо обрезает.
+LEADS_BATCH = 50
+
+
+def _as_pairs(params: Optional[Params]) -> list[tuple[str, Any]]:
+    """Привести параметры к списку пар: filter[id][] повторяется много раз."""
+    if params is None:
+        return []
+    if isinstance(params, Mapping):
+        return list(params.items())
+    return list(params)
 
 
 class AmoError(RuntimeError):
@@ -90,7 +106,7 @@ class AmoClient:
         method: str,
         path: str,
         *,
-        params: Optional[Mapping[str, Any]] = None,
+        params: Optional[Params] = None,
         json_body: Any = None,
     ) -> Optional[dict]:
         """Запрос с ретраями. None — если амо ответила «пусто» (204) или 404.
@@ -107,7 +123,8 @@ class AmoClient:
             try:
                 async with session.request(
                     method, url, headers=headers,
-                    params=dict(params or {}), json=json_body,
+                    params=[(name, str(value)) for name, value in _as_pairs(params)],
+                    json=json_body,
                     timeout=aiohttp.ClientTimeout(total=self.timeout_sec),
                 ) as resp:
                     if resp.status in (204, 404):
@@ -143,20 +160,21 @@ class AmoClient:
             raise last_error
         raise AmoError(0, f"нет связи с amoCRM: {last_error}")
 
-    async def get(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> Optional[dict]:
+    async def get(self, path: str, *, params: Optional[Params] = None) -> Optional[dict]:
         return await self.request("GET", path, params=params)
 
     async def get_all(
-        self, path: str, key: str, *, params: Optional[Mapping[str, Any]] = None
+        self, path: str, key: str, *, params: Optional[Params] = None
     ) -> list[dict]:
         """Собрать все страницы списка. Амо кладёт записи в _embedded[key]."""
         items: list[dict] = []
         page = 1
-        query = dict(params or {})
-        query.setdefault("limit", PAGE_LIMIT)
+        base = _as_pairs(params)
+        if not any(name == "limit" for name, _ in base):
+            base.append(("limit", PAGE_LIMIT))
 
         while page <= MAX_PAGES:
-            query["page"] = page
+            query = base + [("page", page)]
             payload = await self.get(path, params=query)
             if not payload:                       # 204 «ничего не найдено»
                 break
@@ -173,18 +191,54 @@ class AmoClient:
     # --- чтение ---
 
     async def find_contacts_by_phone(self, phone10: str) -> list[dict]:
-        """Контакты по телефону. Амо ищет подстрокой через параметр query."""
+        """Контакты по телефону, сразу со списком их сделок (with=leads).
+
+        Амо ищет подстрокой через параметр query. Список сделок приходит здесь же —
+        это единственный надёжный способ узнать, какие сделки принадлежат клиенту
+        (см. get_contact_leads о сломанном фильтре).
+        """
         log.debug("amoCRM: ищу контакты по телефону %s", _mask(phone10))
-        contacts = await self.get_all("/api/v4/contacts", "contacts", params={"query": phone10})
+        contacts = await self.get_all(
+            "/api/v4/contacts", "contacts", params={"query": phone10, "with": "leads"}
+        )
         log.debug("amoCRM: по телефону %s найдено контактов: %s", _mask(phone10), len(contacts))
         return contacts
 
+    async def get_leads_by_ids(self, lead_ids: Iterable[int]) -> list[dict]:
+        """Сделки по списку id, пакетами. Порядок id сохраняется, дубли отбрасываются."""
+        unique: list[int] = []
+        seen: set[int] = set()
+        for lead_id in lead_ids:
+            value = int(lead_id)
+            if value not in seen:
+                seen.add(value)
+                unique.append(value)
+        if not unique:
+            return []
+
+        leads: list[dict] = []
+        for start in range(0, len(unique), LEADS_BATCH):
+            chunk = unique[start:start + LEADS_BATCH]
+            params: list[tuple[str, Any]] = [("filter[id][]", value) for value in chunk]
+            leads.extend(await self.get_all("/api/v4/leads", "leads", params=params))
+        return leads
+
     async def get_contact_leads(self, contact_id: int) -> list[dict]:
-        """Все сделки контакта — кандидаты для матчера."""
-        return await self.get_all(
-            "/api/v4/leads", "leads",
-            params={"filter[contacts][id]": contact_id, "with": "contacts"},
-        )
+        """Все сделки контакта — кандидаты для матчера.
+
+        ВНИМАНИЕ: НЕ использовать `/api/v4/leads?filter[contacts][id]=…` — амо молча
+        игнорирует этот фильтр и отдаёт все сделки аккаунта подряд (проверено на
+        боевом аккаунте 2026-08-25: 250 чужих сделок, ни одной своей). Правильный
+        путь — спросить у самого контакта, какие сделки к нему привязаны.
+        """
+        contact = await self.get(f"/api/v4/contacts/{contact_id}", params={"with": "leads"})
+        return await self.get_leads_by_ids(contact_lead_ids(contact))
+
+    async def find_leads_by_phone(self, phone10: str) -> list[dict]:
+        """Все сделки клиента по телефону — вход для матчера. Обычно 2 запроса."""
+        contacts = await self.find_contacts_by_phone(phone10)
+        lead_ids = [lead_id for contact in contacts for lead_id in contact_lead_ids(contact)]
+        return await self.get_leads_by_ids(lead_ids)
 
     async def get_lead(self, lead_id: int) -> Optional[dict]:
         """Сделка целиком. None — если сделки нет (удалена)."""

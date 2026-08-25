@@ -48,6 +48,10 @@ DEFAULT_OUT = Path(__file__).resolve().parent.parent / "docs" / "plans" / "histo
 # заказа» заполнено лишь у 78% сделок, а вот момент закрытия есть всегда.
 CLOSED_WINDOW_DAYS = 3
 
+# Потолок здравого смысла: рекорд по разведке — 53 сделки у постоянного B2B-клиента.
+# Больше сотни означает, что амо отдала чужие сделки, а не сделки клиента.
+MAX_LEADS_PER_CLIENT = 150
+
 VERDICT_AUTO = "auto"           # решено автоматически и совпало с фактом
 VERDICT_PENDING = "pending"     # робот сработал бы, заказ ещё не проведён руками
 VERDICT_QUESTION = "question"   # честный вопрос владельцу
@@ -185,13 +189,16 @@ async def collect_candidates(client: AmoClient, phone10: str, cache: dict) -> li
     if phone10 in cache:
         return cache[phone10]
 
-    leads: dict[int, dict] = {}
-    for contact in await client.find_contacts_by_phone(phone10):
-        for lead in await client.get_contact_leads(int(contact["id"])):
-            leads[int(lead["id"])] = lead
-    result = list(leads.values())
-    cache[phone10] = result
-    return result
+    leads = await client.find_leads_by_phone(phone10)
+    # Страховка от аварии 2026-08-25: если из амо вдруг снова поедет вся база
+    # вместо сделок клиента, лучше остановиться, чем скормить матчеру чужое.
+    if len(leads) > MAX_LEADS_PER_CLIENT:
+        raise RuntimeError(
+            f"по телефону …{phone10[-4:]} пришло {len(leads)} сделок — "
+            f"это не похоже на одного клиента, проверьте запрос к амо"
+        )
+    cache[phone10] = leads
+    return leads
 
 
 async def run_exam(orders: list[Order], client: AmoClient, pause: float) -> list[ExamRow]:

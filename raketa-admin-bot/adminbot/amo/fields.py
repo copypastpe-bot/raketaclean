@@ -63,6 +63,25 @@ def contact_phones(contact: Optional[Mapping[str, Any]]) -> list[str]:
     return phones
 
 
+def contact_lead_ids(contact: Optional[Mapping[str, Any]]) -> list[int]:
+    """id сделок, привязанных к контакту (нужен параметр with=leads).
+
+    Это единственный надёжный источник связи «клиент → его сделки»: фильтр
+    `/api/v4/leads?filter[contacts][id]=…` амо молча игнорирует.
+    """
+    if not contact:
+        return []
+    embedded = contact.get("_embedded") or {}
+    ids_: list[int] = []
+    for lead in embedded.get("leads") or []:
+        if isinstance(lead, Mapping) and lead.get("id") is not None:
+            try:
+                ids_.append(int(lead["id"]))
+            except (TypeError, ValueError):
+                continue
+    return ids_
+
+
 def lead_contact_ids(lead: Optional[Mapping[str, Any]]) -> list[int]:
     """id контактов, привязанных к сделке (нужен параметр with=contacts)."""
     if not lead:
