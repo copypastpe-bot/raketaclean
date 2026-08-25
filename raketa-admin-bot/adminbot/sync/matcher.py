@@ -34,6 +34,10 @@ from adminbot.amo import ids
 # разрешает 19% случаев с несколькими кандидатами.
 DATE_WINDOW_DAYS = 2
 
+# Сколько дней между заявленной датой заказа и закрытием сделки считаем нормой.
+# Больше месяца (или отрицательный разрыв) — поле заполнено неверно, ему не верим.
+ORDER_DATE_TRUST_DAYS = 30
+
 # Запасной признак для проведённых сделок: когда сделку реально закрыли.
 # Поле «Дата и время заказа» заполняют не всегда и не всегда верно (заказ №421:
 # в сделке стояло 14.06 при заказе 01.06), а момент закрытия есть у каждой сделки.
@@ -130,6 +134,23 @@ def _is_fresh(order_date: date, lead: LeadInfo) -> bool:
         return True                        # даты создания нет — не наказываем
     age = (order_date - lead.created_date).days
     return -FUTURE_CREATION_DAYS <= age <= STALE_LEAD_DAYS
+
+
+def _order_date_is_credible(lead: LeadInfo) -> bool:
+    """Можно ли верить полю «Дата и время заказа» в проведённой сделке.
+
+    Поле заполняют руками, поэтому оно бывает и пустым, и неверным. Проверяем его
+    собственной историей сделки: работа делается, потом сделка закрывается, и между
+    этими событиями проходит не больше месяца (медиана — 1 день, 95% — 9 дней).
+
+    Закрыта раньше заявленной даты заказа — поле неверно (заказ №421: в сделке
+    стояло 14.06, а закрыли её 03.06). Разрыв в годы — поле осталось от старой
+    сделки. В обоих случаях полю не верим и смотрим на дату закрытия.
+    """
+    if lead.order_date is None or lead.closed_date is None:
+        return False
+    gap = (lead.closed_date - lead.order_date).days
+    return 0 <= gap <= ORDER_DATE_TRUST_DAYS
 
 
 def _is_foreign(lead: LeadInfo, master_ids: Sequence[int], order_amount: Optional[Decimal]) -> bool:
@@ -229,11 +250,26 @@ def _pick_completed(order_date: date, realization: list[LeadInfo],
     if by_order_date:
         return Decision(kind="already_done", lead_id=min(by_order_date)[1])
 
-    by_closed = [(gap, lead.lead_id) for lead in completed
+    # Дата закрытия — признак слабый: владелец разбирает CRM пачками, и в один
+    # день закрываются сделки за разные дни. Поэтому ею пользуемся только там,
+    # где поле «Дата и время заказа» ничего осмысленного не говорит.
+    mute = [lead for lead in completed if not _order_date_is_credible(lead)]
+    by_closed = [(gap, lead.lead_id) for lead in mute
                  if (gap := _gap(order_date, lead.closed_date)) is not None
                  and gap <= CLOSED_WINDOW_DAYS]
     if by_closed:
         return Decision(kind="already_done", lead_id=min(by_closed)[1])
+
+    # Поле осмысленно и говорит про другой день, а закрыли сделку только что.
+    # Скорее всего это соседняя работа того же клиента (заказ №587: сделка заказа
+    # №566 от 15.08 была закрыта 25.08, в день нового заказа). Привязать заказ
+    # к ней — значит оставить его вообще без сделки, поэтому спрашиваем владельца.
+    conflicting = [lead for lead in completed
+                   if _order_date_is_credible(lead)
+                   and (gap := _gap(order_date, lead.closed_date)) is not None
+                   and gap <= CLOSED_WINDOW_DAYS]
+    if conflicting:
+        return _ask(conflicting, kind="ask_owner_stale")
 
     # Третий признак — самый слабый, поэтому требует данных: сделки без даты
     # создания через него не опознаём, чтобы не привязать заказ к чужой сделке.

@@ -556,10 +556,13 @@ async def main() -> int:
     amo_env = dotenv_values(args.amo_env)
 
     dsn = bot_env.get("DB_DSN")
-    token = amo_env.get("AMOCRM_API_TOKEN")
-    base_url = (amo_env.get("AMOCRM_API_BASE") or "").rstrip("/")
-    if not base_url and amo_env.get("AMOCRM_ACCOUNT_DOMAIN"):
-        base_url = f"https://{amo_env['AMOCRM_ACCOUNT_DOMAIN'].strip()}"
+    token = amo_env.get("AMOCRM_API_TOKEN") or bot_env.get("AMOCRM_API_TOKEN")
+    # Адрес аккаунта — не секрет, он один и тот же у всех интеграций. Токен записи
+    # лежит отдельным файлом, где адреса может не быть: берём его у рабочего бота.
+    base_url = (amo_env.get("AMOCRM_API_BASE") or bot_env.get("AMOCRM_API_BASE") or "").rstrip("/")
+    if not base_url:
+        domain = (amo_env.get("AMOCRM_ACCOUNT_DOMAIN") or bot_env.get("AMOCRM_ACCOUNT_DOMAIN") or "")
+        base_url = f"https://{domain.strip()}" if domain.strip() else ""
 
     missing = [name for name, value in
                (("DB_DSN", dsn), ("AMOCRM_API_TOKEN", token), ("AMOCRM_API_BASE", base_url)) if not value]

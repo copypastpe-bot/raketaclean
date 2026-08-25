@@ -419,3 +419,42 @@ def test_carpet_deal_does_not_block_new_deal():
     """Ковровая сделка — параллельный процесс с партнёром: не кандидат и не помеха."""
     d = match(order_date=ORDER_DAY, candidates=[L(1, CARPETS, 42638827)])
     assert d.kind == "create_new"          # не ask_owner_stale и не use_realization
+
+
+# --- дата закрытия против заявленной даты заказа (заказ №587, найдено 2026-08-25) ---
+
+def test_deal_of_an_earlier_order_closed_today_is_not_this_order():
+    """Настоящий случай: заказ №587 (25.08, 5 400 ₽) и сделка заказа №566.
+
+    Владелец разбирает CRM пачками, поэтому сделка от 15.08 была закрыта 25.08 —
+    в день нового заказа. По дате закрытия она подходит, но в её поле «Дата и
+    время заказа» стоит 15.08: это работа другого дня. Молча привязывать заказ
+    к ней нельзя — иначе заказ №587 останется вообще без сделки.
+    """
+    order_day = date(2026, 8, 25)
+    lead = L(31511203, REAL, SUCCESS, order_date=date(2026, 8, 15),
+             closed_date=order_day, created_date=date(2026, 8, 15),
+             specialists=(POLOZOV,), price=Decimal("9050"))
+
+    d = match(order_date=order_day, candidates=[lead],
+              master_specialist_ids=(POLOZOV,), order_amount=Decimal("5400"))
+
+    assert d.kind != "already_done"
+    assert d.kind == "ask_owner_stale" and d.options == (31511203,)
+
+
+def test_closing_date_still_works_when_order_date_is_empty():
+    """Поле даты заказа заполняют не всегда: тогда дата закрытия — законный признак."""
+    lead = L(1, REAL, SUCCESS, order_date=None, closed_date=ORDER_DAY,
+             created_date=ORDER_DAY - timedelta(days=1))
+
+    d = match(order_date=ORDER_DAY, candidates=[lead])
+
+    assert d == Decision(kind="already_done", lead_id=1)
+
+
+def test_closing_date_works_when_order_date_agrees():
+    """Дата заказа в сделке совпадает — обычное «вы уже провели сами»."""
+    lead = L(1, REAL, SUCCESS, order_date=ORDER_DAY, closed_date=ORDER_DAY)
+
+    assert match(order_date=ORDER_DAY, candidates=[lead]).kind == "already_done"

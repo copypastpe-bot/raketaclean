@@ -149,6 +149,7 @@ FIELD_NAMES = {
     ids.FIELD_PAYMENT_TYPE: "вариант оплаты",
     ids.FIELD_CLIENT_TYPE: "тип клиента",
     ids.FIELD_PAYMENT_DATE: "дата оплаты",
+    ids.FIELD_SOURCE: "источник сделки",
 }
 DATE_FIELDS = (ids.FIELD_ORDER_DATETIME, ids.FIELD_PAYMENT_DATE)
 STAGE_NAMES = {
@@ -253,7 +254,8 @@ async def main() -> int:
         specialist_enums = await client.get_lead_field_enums(ids.FIELD_SPECIALIST)
         specialists = SpecialistIndex.from_enums(specialist_enums)
         # Расшифровка значений списков — чтобы план читался человеком, а не машиной.
-        for field_id in (ids.FIELD_SERVICE, ids.FIELD_PAYMENT_TYPE, ids.FIELD_CLIENT_TYPE):
+        for field_id in (ids.FIELD_SERVICE, ids.FIELD_PAYMENT_TYPE, ids.FIELD_CLIENT_TYPE,
+                         ids.FIELD_SOURCE):
             for enum in await client.get_lead_field_enums(field_id):
                 ENUM_NAMES[enum["id"]] = enum["value"]
         for enum in specialist_enums:
