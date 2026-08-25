@@ -22,20 +22,28 @@ def done(*names):
 
 def test_path_a_runs_in_order():
     assert next_step("A", {}) == "fill_realization"
-    assert next_step("A", done("fill_realization")) == "move_realization_done"
-    assert next_step("A", done("fill_realization", "move_realization_done")) == "close_autotasks"
+    assert next_step("A", done("fill_realization")) == "fix_contact_name"
+    assert next_step("A", done("fill_realization", "fix_contact_name")) == "close_autotasks"
+
+
+def test_stage_is_changed_after_tasks_are_closed():
+    """Переход в финал порождает новые задачи сейлзбота — их трогать нельзя."""
+    order = steps_for("A")
+    assert order.index("close_autotasks") < order.index("move_realization_done")
 
 
 def test_path_a_finishes_without_feedback_task_when_client_did_not_rate():
-    checklist = done("fill_realization", "move_realization_done", "close_autotasks")
-    assert next_step("A", checklist) is None
+    checklist = done("fill_realization", "fix_contact_name", "close_autotasks")
+    assert next_step("A", checklist) == "move_realization_done"
+    assert next_step("A", done(*steps_for("A"))) is None
 
 
 def test_feedback_task_closed_only_when_client_rated():
     """Решение владельца №9: нет оценки — задачу «Получить ОС» оставляем ему."""
-    checklist = done("fill_realization", "move_realization_done", "close_autotasks")
+    checklist = done("fill_realization", "fix_contact_name", "close_autotasks")
     assert next_step("A", checklist, RATED) == "close_feedback_task"
     assert next_step("A", done(*steps_for("A", RATED)), RATED) is None
+    assert "close_feedback_task" not in steps_for("A")
 
 
 # --- путь Б: есть только лид первичной воронки ---
@@ -71,7 +79,8 @@ def test_path_c_creates_contact_and_lead_then_follows_path_b():
 def test_path_c_full_sequence():
     assert steps_for("C") == (
         "ensure_contact", "create_primary_lead", "move_primary_success", "wait_salesbot",
-        "fill_realization", "move_realization_done", "close_autotasks",
+        "fill_realization", "fix_contact_name", "close_autotasks",
+        "move_realization_done", "note_robot_done",
     )
 
 
@@ -94,19 +103,19 @@ def test_finished_checklist_asks_for_nothing():
 def test_repeated_call_returns_the_same_step():
     """Повторный тик до записи результата не сдвигает чек-лист."""
     checklist = done("fill_realization")
-    assert next_step("A", checklist) == next_step("A", checklist) == "move_realization_done"
+    assert next_step("A", checklist) == next_step("A", checklist) == "fix_contact_name"
 
 
 def test_unknown_steps_in_checklist_do_not_break_it():
     """Старая запись из прошлой версии робота не должна ломать разбор."""
     checklist = done("fill_realization", "какой_то_старый_шаг")
-    assert next_step("A", checklist) == "move_realization_done"
+    assert next_step("A", checklist) == "fix_contact_name"
 
 
 def test_gap_in_the_middle_is_filled():
     """Шаг пропущен (например, упали на нём) — вернёмся именно к нему."""
     checklist = done("fill_realization", "close_autotasks")
-    assert next_step("A", checklist) == "move_realization_done"
+    assert next_step("A", checklist) == "fix_contact_name"
 
 
 def test_unknown_path_is_an_error():

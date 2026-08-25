@@ -365,6 +365,13 @@ class AmoClient:
         intent = Intent(action="create_contact", entity="contact", entity_id=None, payload=[entity])
         return await self._perform(intent, "POST", "/api/v4/contacts", result_key="contacts")
 
+    async def update_contact(self, contact_id: int, *, name: str) -> Intent:
+        """Переименовать контакт — например, заменить «Входящий 79…» на имя клиента."""
+        body = {"name": name}
+        intent = Intent(action="update_contact", entity="contact", entity_id=contact_id,
+                        payload=body)
+        return await self._perform(intent, "PATCH", f"/api/v4/contacts/{contact_id}")
+
     async def complete_task(self, task_id: int, result_text: str = ROBOT_TASK_RESULT) -> Intent:
         """Закрыть автозадачу. В тексте результата видно, что это сделал робот."""
         body = {"is_completed": True, "result": {"text": result_text}}

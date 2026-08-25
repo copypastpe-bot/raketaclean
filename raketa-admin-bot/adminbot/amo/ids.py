@@ -47,6 +47,23 @@ SERVICE_ENUM_CLEANING = 772345      # «Уборка» — Ольга
 FIELD_SPECIALIST = 39243            # Специалист (multiselect): мастер, выполнявший заказ
 FIELD_ORDER_DATETIME = 18701        # Дата и время заказа (unix-время)
 FIELD_ADDRESS = 18639               # Адрес
+FIELD_PAYMENT_DATE = 18643          # Дата оплаты (тип date)
+FIELD_PAYMENT_TYPE = 464605         # Вариант оплаты (select)
+FIELD_CLIENT_TYPE = 1453545         # Тип клиента (select)
+FIELD_COMMENT = 18693               # Комментарий к заказу — заполнится на этапе календаря
+FIELD_DISTRICT = 1453415            # Район города — тоже из календаря
+
+# «Вариант оплаты»: как способы оплаты бота ложатся на список амо
+# (маппинг подтверждён владельцем 2026-08-25).
+PAYMENT_ENUM_CASH = 235849          # Наличка
+PAYMENT_ENUM_CARD = 235851          # Перевод на карту
+PAYMENT_ENUM_ACQUIRING = 235853     # Эквайринг
+PAYMENT_ENUM_ONLINE_CASH = 235855   # Онлайн-касса
+PAYMENT_ENUM_WIRE = 235857          # Безнал
+
+# «Тип клиента»
+CLIENT_TYPE_COMPANY = 947089        # Юр лицо
+CLIENT_TYPE_PERSON = 947091         # Физ лицо
 
 # --- Автозадачи ---
 # Закрываем при проведении сделки (решение владельца №6).

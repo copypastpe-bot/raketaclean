@@ -32,6 +32,8 @@ SELECT
     o.created_at,
     o.amount_total,
     o.rating_score,
+    o.payment_method,
+    o.awaiting_wire_payment,
     c.full_name AS client_full_name,
     COALESCE(NULLIF(TRIM(c.address), ''), NULLIF(TRIM(c.last_order_addr), '')) AS address,
     COALESCE((
@@ -77,6 +79,8 @@ def _order_from_row(row: asyncpg.Record) -> Order:
         amount_total=Decimal(row["amount_total"] or 0),
         masters=[(str(name), phone) for name, phone in (row["masters"] or [])],
         rating_score=row["rating_score"],
+        payment_method=row["payment_method"],
+        awaiting_wire_payment=bool(row["awaiting_wire_payment"]),
         client_name=(row["client_full_name"] or row["customer_name"]),
         address=row["address"],
     )

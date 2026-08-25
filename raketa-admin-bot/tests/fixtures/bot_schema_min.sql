@@ -37,6 +37,7 @@ CREATE TABLE public.orders (
     amount_upsell   numeric(12,2) DEFAULT 0,
     upsale_amount   numeric(12,2) NOT NULL DEFAULT 0,
     payment_method  text,
+    awaiting_wire_payment boolean NOT NULL DEFAULT false,
     rating_score    smallint,
     created_at      timestamptz NOT NULL DEFAULT now()
 );

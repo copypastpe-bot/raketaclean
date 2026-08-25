@@ -87,6 +87,21 @@ class FakeAmo:
         return Intent(action="create_lead", entity="lead", entity_id=new_id,
                       payload=fields, performed=not self.dry_run)
 
+    async def get_contact(self, contact_id: int) -> Optional[dict]:
+        self._maybe_fail("get_contact")
+        self.calls.append(("get_contact", contact_id))
+        return next((c for c in self.contacts if c["id"] == contact_id), None)
+
+    async def update_contact(self, contact_id: int, *, name: str) -> Intent:
+        self._maybe_fail("update_contact")
+        self.calls.append(("update_contact", (contact_id, name)))
+        if not self.dry_run:
+            for contact in self.contacts:
+                if contact["id"] == contact_id:
+                    contact["name"] = name
+        return Intent(action="update_contact", entity="contact", entity_id=contact_id,
+                      payload={"name": name}, performed=not self.dry_run)
+
     async def create_contact(self, *, name: str, phone: str) -> Intent:
         self._maybe_fail("create_contact")
         self.calls.append(("create_contact", (name, phone)))

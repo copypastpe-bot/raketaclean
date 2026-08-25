@@ -85,6 +85,12 @@ def datetime_field(field_id: int, moment: datetime) -> dict:
     return {"field_id": field_id, "values": [{"value": int(moment.timestamp())}]}
 
 
+def date_field(field_id: int, day: date) -> dict:
+    """Поле типа «дата»: амо хранит начало дня по Москве как unix-время."""
+    moment = datetime(day.year, day.month, day.day, tzinfo=MOSCOW_TZ)
+    return {"field_id": field_id, "values": [{"value": int(moment.timestamp())}]}
+
+
 def enum_ids(entity: Optional[Mapping[str, Any]], field_id: int) -> tuple[int, ...]:
     """Выбранные значения multiselect-поля (id вариантов из списка).
 

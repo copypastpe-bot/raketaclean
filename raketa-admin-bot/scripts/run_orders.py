@@ -42,7 +42,7 @@ DEFAULT_AMO_ENV = Path.home() / ".amo_write.env"
 
 ORDERS_SQL = """
 SELECT o.id, o.phone, o.phone_digits, o.customer_name, o.created_at,
-       o.amount_total, o.rating_score,
+       o.amount_total, o.rating_score, o.payment_method, o.awaiting_wire_payment,
        c.full_name AS client_full_name,
        COALESCE(NULLIF(TRIM(c.address), ''), NULLIF(TRIM(c.last_order_addr), '')) AS address,
        COALESCE((
@@ -99,6 +99,8 @@ async def load_orders(dsn: str, order_id: Optional[int], since: Optional[date]) 
             amount_total=row["amount_total"] or 0,
             masters=[(str(name), phone) for name, phone in (row["masters"] or [])],
             rating_score=row["rating_score"],
+            payment_method=row["payment_method"],
+            awaiting_wire_payment=bool(row["awaiting_wire_payment"]),
             client_name=row["client_full_name"] or row["customer_name"],
             address=row["address"],
         )

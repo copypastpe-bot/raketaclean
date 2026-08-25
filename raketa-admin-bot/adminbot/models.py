@@ -26,6 +26,10 @@ class Order:
     rating_score: Optional[int] = None   # оценка клиента: есть → задачу «Получить ОС» закрываем
     client_name: Optional[str] = None
     address: Optional[str] = None
+    payment_method: Optional[str] = None   # «Наличные» | «Карта Дима» | «Карта Женя» | «р/с»
+    # Оплата по счёту ещё не поступила. Тогда сделку не проводим до конца, а оставляем
+    # на «Заказ выполнен»: сейлзбот поставит задачу получить оплату (решение владельца).
+    awaiting_wire_payment: bool = False
 
     @property
     def order_date(self):
