@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass, field
 from datetime import date
 
+from adminbot.tg.session import parse_ip_pool
+
 # Обязательные переменные окружения; порядок важен — сообщение об ошибке
 # называет первую недостающую.
 REQUIRED_ENV = (
@@ -127,6 +129,10 @@ class Settings:
     # Мастер заказа → вид работ для поля «Услуга»
     service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
+    # Прямые адреса Telegram: на российском сервере имя api.telegram.org
+    # не разрешается, хотя сами адреса доступны. Пусто — обычный путь.
+    telegram_api_ips: tuple[str, ...] = ()
+
     @classmethod
     def from_env(cls) -> "Settings":
         """Собрать настройки из переменных окружения.
@@ -160,4 +166,5 @@ class Settings:
             poll_interval_sec=_int("AMO_SYNC_POLL_INTERVAL_SEC", 60),
             service_by_master=_service_by_master("SERVICE_BY_MASTER",
                                                  DEFAULT_SERVICE_BY_MASTER),
+            telegram_api_ips=tuple(parse_ip_pool(os.environ.get("TELEGRAM_API_IPS"))),
         )

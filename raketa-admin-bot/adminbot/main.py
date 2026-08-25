@@ -36,6 +36,7 @@ from adminbot.sync.store import MemoryLinkStore, PgLinkStore
 from adminbot.sync.watcher import PgOrderSource, Watcher
 from adminbot.tg.bot import OwnerAnswers, OwnerCommands, build_router
 from adminbot.tg.cards import question_card, summary_text
+from adminbot.tg.session import build_session
 
 log = logging.getLogger("adminbot")
 
@@ -124,7 +125,9 @@ async def build_app(settings: Settings) -> App:
                     salesbot_wait_sec=settings.salesbot_wait_sec,
                     service_by_master=services)
 
-    bot = Bot(token=settings.tg_token)
+    # На российском сервере имя api.telegram.org не разрешается: если заданы
+    # прямые адреса, ходим по ним (тот же приём, что у рабочего бота компании).
+    bot = Bot(token=settings.tg_token, session=build_session(settings.telegram_api_ips))
     source = PgOrderSource(bot_pool, own_pool, settings.backlog_from)
     watcher = Watcher(
         engine=engine,
