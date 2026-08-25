@@ -34,6 +34,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -67,10 +68,12 @@ VERDICT_QUESTION = "question"         # вопрос: какую сделку б
 VERDICT_QUESTION_STALE = "question_stale"   # вопрос: только старые хвосты, что делать
 VERDICT_WRONG = "wrong"               # уверенно, но мимо — этого быть не должно
 VERDICT_NO_PHONE = "no_phone"         # телефон заказа не распознан
+VERDICT_AMBIGUOUS = "ambiguous"       # сам факт неоднозначен — сверять не с чем
 
 # Названия признаков, которыми опознан «факт»
 SOURCE_ORDER_DATE = "по полю «Дата и время заказа»"
 SOURCE_CLOSED = "по дате закрытия сделки"
+SOURCE_AMBIGUOUS = "факт неоднозначен"
 WEAK_SOURCES = (SOURCE_CLOSED,)
 
 
@@ -205,14 +208,35 @@ def to_lead_info_as_of(lead: dict, moment: datetime) -> Optional[LeadInfo]:
     )
 
 
-def find_fact_lead(order_date: date, leads: list[dict]) -> tuple[Optional[int], str]:
+def _resolve_tie(tied: list[dict], order_amount: Optional[Decimal], source: str
+                 ) -> tuple[Optional[int], str]:
+    """Несколько сделок одинаково близки к заказу — кого считать фактом.
+
+    Разводим по сумме сделки: это единственный независимый признак — матчер
+    суммой не пользуется вовсе. Так у заказа №520 химчистка на 3300 ₽ отделяется
+    от уборки на 20500 ₽ по тому же адресу в тот же день.
+    """
+    if len(tied) == 1:
+        return int(tied[0]["id"]), source
+
+    if order_amount is not None:
+        exact = [lead for lead in tied
+                 if lead.get("price") is not None and Decimal(str(lead["price"])) == order_amount]
+        if len(exact) == 1:
+            return int(exact[0]["id"]), f"{source} и сумме чека"
+
+    return None, SOURCE_AMBIGUOUS
+
+
+def find_fact_lead(order_date: date, leads: list[dict],
+                   order_amount: Optional[Decimal] = None) -> tuple[Optional[int], str]:
     """Какая сделка РЕАЛЬНО проведена по этому заказу (факт для сверки).
 
     Сначала по полю «Дата и время заказа» (±2 дня), затем по моменту закрытия
     сделки (±3 дня) — для сделок, где поле даты не заполняли.
 
-    Дату создания сделки здесь СОЗНАТЕЛЬНО не используем: этим признаком
-    пользуется сам матчер, и проверка перестала бы быть независимой.
+    Дату создания сделки и «Специалиста» здесь СОЗНАТЕЛЬНО не используем: этими
+    признаками пользуется сам матчер, и проверка перестала бы быть независимой.
     """
     completed = [
         lead for lead in leads
@@ -222,23 +246,22 @@ def find_fact_lead(order_date: date, leads: list[dict]) -> tuple[Optional[int], 
     if not completed:
         return None, ""
 
-    dated = [
-        (abs((order_date_msk(lead) - order_date).days), int(lead["id"]))
-        for lead in completed if order_date_msk(lead) is not None
-        and abs((order_date_msk(lead) - order_date).days) <= DATE_WINDOW_DAYS
-    ]
-    if dated:
-        return min(dated)[1], SOURCE_ORDER_DATE
-
-    by_closed = [
-        (abs((_closed_date(lead) - order_date).days), int(lead["id"]))
-        for lead in completed if _closed_date(lead) is not None
-        and abs((_closed_date(lead) - order_date).days) <= CLOSED_WINDOW_DAYS
-    ]
-    if by_closed:
-        return min(by_closed)[1], SOURCE_CLOSED
+    for source, gap_of in ((SOURCE_ORDER_DATE, lambda lead: _day_gap(order_date_msk(lead), order_date)),
+                           (SOURCE_CLOSED, lambda lead: _day_gap(_closed_date(lead), order_date))):
+        window = DATE_WINDOW_DAYS if source == SOURCE_ORDER_DATE else CLOSED_WINDOW_DAYS
+        near = [(gap, lead) for lead in completed
+                if (gap := gap_of(lead)) is not None and gap <= window]
+        if not near:
+            continue
+        best_gap = min(gap for gap, _ in near)
+        tied = [lead for gap, lead in near if gap == best_gap]
+        return _resolve_tie(tied, order_amount, source)
 
     return None, ""
+
+
+def _day_gap(value: Optional[date], order_date: date) -> Optional[int]:
+    return None if value is None else abs((value - order_date).days)
 
 
 def classify(order: Order, decision: Decision, fact_lead_id: Optional[int],
@@ -250,6 +273,11 @@ def classify(order: Order, decision: Decision, fact_lead_id: Optional[int],
     переводят в «Передано в работу». Значит, «пошёл через первичную» и «создал
     новую» — это не ошибка, а ровно тот путь, которым эта сделка и появляется.
     """
+    if fact_source == SOURCE_AMBIGUOUS:
+        return (VERDICT_AMBIGUOUS,
+                f"решение {decision.kind} #{decision.lead_id}: у клиента несколько "
+                f"одинаково подходящих проведённых сделок, сверять не с чем")
+
     existed = {lead.lead_id for lead in candidates}
     fact_not_yet = fact_lead_id is not None and fact_lead_id not in existed
 
@@ -329,7 +357,7 @@ async def run_exam(orders: list[Order], client: AmoClient, pause: float,
         master_ids = specialists.resolve_many(order.masters)
         decision = match(order_date=order.order_date, candidates=candidates,
                          master_specialist_ids=master_ids)
-        fact_lead_id, fact_source = find_fact_lead(order.order_date, raw_leads)
+        fact_lead_id, fact_source = find_fact_lead(order.order_date, raw_leads, order.amount_total)
         verdict, note = classify(order, decision, fact_lead_id, candidates, fact_source)
         rows.append(ExamRow(order, decision, fact_lead_id, verdict, note, candidates))
 
@@ -382,6 +410,7 @@ def build_report(rows: list[ExamRow], days: int, as_of_order: bool) -> str:
         f"| Сработал бы, заказ ещё не проведён руками | {counts[VERDICT_PENDING]} | {pct(counts[VERDICT_PENDING])} |",
         f"| Вопрос: какую сделку брать | {counts[VERDICT_QUESTION]} | {pct(counts[VERDICT_QUESTION])} |",
         f"| Вопрос: только старые хвосты | {counts[VERDICT_QUESTION_STALE]} | {pct(counts[VERDICT_QUESTION_STALE])} |",
+        f"| Сверять не с чем (факт неоднозначен) | {counts[VERDICT_AMBIGUOUS]} | {pct(counts[VERDICT_AMBIGUOUS])} |",
         f"| **Уверенно, но неверно** | **{counts[VERDICT_WRONG]}** | {pct(counts[VERDICT_WRONG])} |",
         f"| Телефон не распознан | {counts[VERDICT_NO_PHONE]} | {pct(counts[VERDICT_NO_PHONE])} |",
         "",
@@ -396,6 +425,11 @@ def build_report(rows: list[ExamRow], days: int, as_of_order: bool) -> str:
     lines += _listing([r for r in rows if r.verdict == VERDICT_WEAK],
                       "Подтверждено слабым признаком — проверить глазами",
                       "Сделка опознана по дате закрытия, а не по «Дате и времени заказа».")
+    lines += _listing([r for r in rows if r.verdict == VERDICT_AMBIGUOUS],
+                      "Сверять не с чем — проверить глазами",
+                      "У клиента несколько одинаково подходящих проведённых сделок, "
+                      "и сумма чека их не разводит. Решение робота может быть верным, "
+                      "но подтвердить его данными нельзя.")
     lines += _listing([r for r in rows if r.verdict == VERDICT_QUESTION],
                       "Вопросы: какую сделку брать")
     lines += _listing([r for r in rows if r.verdict == VERDICT_QUESTION_STALE],

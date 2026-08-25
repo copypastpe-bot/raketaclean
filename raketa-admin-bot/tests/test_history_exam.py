@@ -6,7 +6,7 @@ from decimal import Decimal
 from adminbot.models import Order
 from adminbot.sync.matcher import Decision, LeadInfo
 from scripts.history_exam import (
-    VERDICT_AUTO, VERDICT_PENDING, VERDICT_WRONG,
+    SOURCE_AMBIGUOUS, VERDICT_AMBIGUOUS, VERDICT_AUTO, VERDICT_PENDING, VERDICT_WRONG,
     classify, find_fact_lead, to_lead_info, to_lead_info_as_of,
 )
 
@@ -61,6 +61,33 @@ def test_distant_completed_deal_is_not_the_fact():
 def test_closest_completed_deal_wins():
     leads = [lead(6, closed_at=TS_2025_08_12), lead(7, closed_at=TS_2025_08_12 + 2 * 86400)]
     assert find_fact_lead(date(2025, 8, 12), leads)[0] == 6
+
+
+def test_tie_is_resolved_by_order_amount():
+    """Заказ №520: уборка и химчистка по одному адресу в один день.
+
+    Обе сделки проведены и одинаково близки по дате — разводим по сумме чека.
+    Сумму матчер не смотрит, поэтому проверка остаётся независимой.
+    """
+    cleaning = lead(31442847, order_ts=TS_2025_08_12)
+    cleaning["price"] = 20500
+    chemistry = lead(31450633, order_ts=TS_2025_08_12)
+    chemistry["price"] = 3300
+
+    found, source = find_fact_lead(date(2025, 8, 12), [cleaning, chemistry], Decimal("3300"))
+    assert found == 31450633 and "сумме чека" in source
+
+
+def test_tie_without_matching_amount_is_ambiguous():
+    """Сумма не развела — честно признаём, что сверять не с чем."""
+    first, second = lead(1, order_ts=TS_2025_08_12), lead(2, order_ts=TS_2025_08_12)
+    first["price"] = second["price"] = 5000
+
+    found, source = find_fact_lead(date(2025, 8, 12), [first, second], Decimal("3300"))
+    assert found is None and source == SOURCE_AMBIGUOUS
+
+    verdict, _ = classify(order(), Decision(kind="use_realization", lead_id=1), None, [], source)
+    assert verdict == VERDICT_AMBIGUOUS       # не ошибка и не зачёт
 
 
 # --- оценка решения матчера ---
