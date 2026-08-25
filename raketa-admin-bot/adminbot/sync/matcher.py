@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Iterable, Optional, Sequence
+from typing import Collection, Iterable, Optional, Sequence
 
 from adminbot.amo import ids
 
@@ -219,12 +219,21 @@ def _pick_completed(order_date: date, realization: list[LeadInfo],
 
 
 def match(*, order_date: date, candidates: Iterable[LeadInfo],
-          master_specialist_ids: Sequence[int] = ()) -> Decision:
-    """Решить, что делать с заказом бота, по списку сделок его телефона."""
+          master_specialist_ids: Sequence[int] = (),
+          taken_lead_ids: Collection[int] = ()) -> Decision:
+    """Решить, что делать с заказом бота, по списку сделок его телефона.
+
+    taken_lead_ids — сделки, уже закреплённые за другими заказами этого клиента.
+    Одна сделка не может закрывать два заказа: у клиента бывает несколько работ
+    подряд (например, пять заказов за май), и каждой полагается своя сделка.
+    """
 
     # 1. Ковровые и архивные воронки — не наш случай. Заказ, заведённый в боте,
     #    ковровым быть не может: ковры приходят только через Excel партнёра.
-    leads = [lead for lead in candidates if lead.pipeline_id not in ids.PIPELINES_IGNORED]
+    #    Занятые сделки тоже прочь — они уже принадлежат другому заказу.
+    taken = set(taken_lead_ids)
+    leads = [lead for lead in candidates
+             if lead.pipeline_id not in ids.PIPELINES_IGNORED and lead.lead_id not in taken]
 
     realization = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_REALIZATION]
     primary = [lead for lead in leads if lead.pipeline_id == ids.PIPELINE_PRIMARY]

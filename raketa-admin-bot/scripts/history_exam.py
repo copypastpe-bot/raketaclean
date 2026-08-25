@@ -233,7 +233,8 @@ def _resolve_tie(tied: list[dict], order_amount: Optional[Decimal], source: str
 
 
 def find_fact_lead(order_date: date, leads: list[dict],
-                   order_amount: Optional[Decimal] = None) -> tuple[Optional[int], str]:
+                   order_amount: Optional[Decimal] = None,
+                   taken: Optional[set] = None) -> tuple[Optional[int], str]:
     """Какая сделка РЕАЛЬНО проведена по этому заказу (факт для сверки).
 
     Сначала по полю «Дата и время заказа» (±2 дня), затем по моменту закрытия
@@ -242,10 +243,14 @@ def find_fact_lead(order_date: date, leads: list[dict],
     Дату создания сделки и «Специалиста» здесь СОЗНАТЕЛЬНО не используем: этими
     признаками пользуется сам матчер, и проверка перестала бы быть независимой.
     """
+    # Сделка, уже признанная фактом для другого заказа этого клиента, повторно
+    # не используется: у клиента с пятью заказами за месяц каждой работе — своя сделка.
+    used = taken or set()
     completed = [
         lead for lead in leads
         if int(lead.get("pipeline_id") or 0) == ids.PIPELINE_REALIZATION
         and int(lead.get("status_id") or 0) == ids.STATUS_SUCCESS
+        and int(lead["id"]) not in used
     ]
     if not completed:
         return None, ""
@@ -342,6 +347,10 @@ async def run_exam(orders: list[Order], client: AmoClient, pause: float,
                    specialists: SpecialistIndex, as_of_order: bool) -> list[ExamRow]:
     cache: dict[str, list[dict]] = {}
     rows: list[ExamRow] = []
+    # Сделки, уже закреплённые за более ранними заказами того же клиента.
+    # Заказы идут по возрастанию даты, поэтому каждый берёт свою сделку.
+    taken_by_robot: dict[str, set] = {}
+    taken_by_fact: dict[str, set] = {}
 
     for index, order in enumerate(orders, 1):
         if not order.phone10:
@@ -359,11 +368,20 @@ async def run_exam(orders: list[Order], client: AmoClient, pause: float,
             candidates = [to_lead_info(lead) for lead in raw_leads]
 
         master_ids = specialists.resolve_many(order.masters)
+        robot_taken = taken_by_robot.setdefault(order.phone10, set())
+        fact_taken = taken_by_fact.setdefault(order.phone10, set())
+
         decision = match(order_date=order.order_date, candidates=candidates,
-                         master_specialist_ids=master_ids)
-        fact_lead_id, fact_source = find_fact_lead(order.order_date, raw_leads, order.amount_total)
+                         master_specialist_ids=master_ids, taken_lead_ids=robot_taken)
+        fact_lead_id, fact_source = find_fact_lead(
+            order.order_date, raw_leads, order.amount_total, fact_taken)
         verdict, note = classify(order, decision, fact_lead_id, candidates, fact_source)
         rows.append(ExamRow(order, decision, fact_lead_id, verdict, note, candidates))
+
+        if decision.lead_id is not None:
+            robot_taken.add(decision.lead_id)
+        if fact_lead_id is not None:
+            fact_taken.add(fact_lead_id)
 
         if index % 25 == 0:
             print(f"  обработано {index}/{len(orders)}…", flush=True)

@@ -297,6 +297,43 @@ def test_deal_created_after_order_is_still_a_candidate():
     assert d == Decision(kind="use_realization", lead_id=1)
 
 
+# --- одна сделка не закрывает два заказа ---
+
+def test_deal_taken_by_another_order_is_not_offered_again():
+    """Заказы №339 и №346: один клиент, два заказа подряд, две сделки.
+
+    Второй заказ не должен хватать сделку, закреплённую за первым.
+    """
+    candidates = [
+        L(31157731, REAL, CREATED, order_date=ORDER_DAY),
+        L(31166307, REAL, CREATED, order_date=ORDER_DAY),
+    ]
+    first = match(order_date=ORDER_DAY, candidates=candidates)
+    assert first.kind == "ask_owner"          # без подсказок выбор неоднозначен
+
+    second = match(order_date=ORDER_DAY, candidates=candidates,
+                   taken_lead_ids={31157731})
+    assert second == Decision(kind="use_realization", lead_id=31166307)
+
+
+def test_all_deals_taken_means_create_new():
+    """Заказов у клиента больше, чем сделок, — недостающую заводим."""
+    d = match(order_date=ORDER_DAY,
+              candidates=[L(1, REAL, CREATED, order_date=ORDER_DAY)],
+              taken_lead_ids={1})
+    assert d.kind == "create_new"
+
+
+def test_taken_deal_does_not_block_already_done():
+    """Проведённая сделка тоже закрепляется за своим заказом."""
+    candidates = [
+        L(1, REAL, SUCCESS, order_date=ORDER_DAY, closed_date=ORDER_DAY),
+        L(2, REAL, SUCCESS, order_date=ORDER_DAY, closed_date=ORDER_DAY),
+    ]
+    assert match(order_date=ORDER_DAY, candidates=candidates,
+                 taken_lead_ids={1}) == Decision(kind="already_done", lead_id=2)
+
+
 # --- ковры ---
 
 def test_carpet_deal_does_not_block_new_deal():
