@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import asyncpg
 
@@ -58,7 +58,8 @@ SELECT
     ), '[]'::jsonb) AS masters
 FROM public.orders o
 LEFT JOIN public.clients c ON c.id = o.client_id
-WHERE o.created_at >= ($1::date AT TIME ZONE 'Europe/Moscow')
+WHERE ($1::date IS NULL OR o.created_at >= ($1::date AT TIME ZONE 'Europe/Moscow'))
+  AND ($2::bigint[] IS NULL OR o.id = ANY($2::bigint[]))
 ORDER BY o.created_at, o.id
 """
 
@@ -94,7 +95,16 @@ def _order_from_row(row: asyncpg.Record) -> Order:
 async def fetch_orders_since(bot_pool: asyncpg.Pool, since: date) -> list[Order]:
     """Все заказы бота начиная с даты `since` (по московскому времени)."""
     async with bot_pool.acquire() as conn:
-        rows = await conn.fetch(_SELECT_ORDERS, since)
+        rows = await conn.fetch(_SELECT_ORDERS, since, None)
+    return [_order_from_row(row) for row in rows]
+
+
+async def fetch_orders_by_ids(bot_pool: asyncpg.Pool, order_ids: Sequence[int]) -> list[Order]:
+    """Заказы по номерам — наблюдателю, чтобы вернуться к незавершённым."""
+    if not order_ids:
+        return []
+    async with bot_pool.acquire() as conn:
+        rows = await conn.fetch(_SELECT_ORDERS, None, list(order_ids))
     return [_order_from_row(row) for row in rows]
 
 
@@ -244,6 +254,34 @@ async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
     for row in rows:
         taken.update(value for value in (row["primary_lead_id"], row["real_lead_id"]) if value)
     return taken
+
+
+async def fetch_link_ids_by_status(
+    own_pool: asyncpg.Pool, statuses: Sequence[str]
+) -> list[int]:
+    """Номера заказов, работа по которым ещё не закончена."""
+    if not statuses:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT order_id FROM adminbot.amo_links WHERE status = ANY($1::text[]) ORDER BY order_id",
+            list(statuses),
+        )
+    return [row["order_id"] for row in rows]
+
+
+async def fetch_links_for_orders(
+    own_pool: asyncpg.Pool, order_ids: Sequence[int]
+) -> list[AmoLink]:
+    """Всё, что робот записал по этим заказам, — сырьё для вечерней сводки."""
+    if not order_ids:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM adminbot.amo_links WHERE order_id = ANY($1::bigint[]) ORDER BY order_id",
+            list(order_ids),
+        )
+    return [_link_from_row(row) for row in rows]
 
 
 async def count_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]:

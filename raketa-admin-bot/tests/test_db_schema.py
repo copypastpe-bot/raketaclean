@@ -133,6 +133,60 @@ async def test_actions_journal(pool):
     assert actions[0]["payload"] == {"price": 5950}
 
 
+async def test_fetch_orders_by_ids_returns_only_requested(pool):
+    """Наблюдателю нужно вернуться к конкретным заказам, а не перебирать весь хвост."""
+    orders = await db.fetch_orders_by_ids(pool, [596, 500])
+
+    assert [o.order_id for o in orders] == [500, 596]      # порядок — по времени заказа
+    assert await db.fetch_orders_by_ids(pool, []) == []
+
+
+async def test_active_links_and_summary_rows(pool):
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link(pool, 596, status="waiting_salesbot", path="B", primary_lead_id=41400001)
+    await db.create_link(pool, order_id=597, phone10="9159496642")
+    await db.update_link(pool, 597, status="done", path="A", real_lead_id=41400002)
+
+    active = await db.fetch_link_ids_by_status(pool, ("waiting_salesbot", "error", "new"))
+    assert active == [596]                                  # завершённый заказ в работу не берём
+
+    links = await db.fetch_links_for_orders(pool, [596, 597, 500])
+    assert [link.order_id for link in links] == [596, 597]  # у 500 привязки нет
+    assert links[1].path == "A" and links[1].real_lead_id == 41400002
+
+
+async def test_watcher_source_takes_new_and_unfinished_orders(pool):
+    """Источник работы наблюдателя: новые заказы плюс недоделанные."""
+    from adminbot.sync.watcher import PgOrderSource
+
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link(pool, 596, status="error", last_error="AmoError: 502")
+    await db.create_link(pool, order_id=597, phone10="9159496642")
+    await db.update_link(pool, 597, status="done", path="A", real_lead_id=41400002)
+
+    source = PgOrderSource(pool, pool, NOW.date() - timedelta(days=60))
+    orders = await source.pending()
+
+    assert [o.order_id for o in orders] == [500, 596]       # 500 — новый, 596 — с ошибкой
+    assert orders[1].client_name == "Ирина"                 # заказ приходит целиком, а не одним id
+
+
+async def test_summary_source_sees_orders_robot_never_touched(pool):
+    """Вечерняя сверка ловит именно пропуски: заказ есть, а привязки нет."""
+    from adminbot.sync.reconcile import PgSummarySource, build_summary
+
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link(pool, 596, status="done", path="A", real_lead_id=41400002)
+
+    snapshot = await PgSummarySource(pool, pool, NOW.date() - timedelta(days=3)).collect()
+    summary = build_summary(snapshot, now=NOW)
+
+    assert [row.order_id for row in summary.processed] == [596]
+    assert summary.missed == (597,)
+    assert summary.total_orders == 2
+    assert summary.is_quiet is False
+
+
 async def test_history_exam_loads_orders_from_bot_db(pool):
     """Скрипт экзамена ходит в БД сам, мимо слоя db.py — проверяем и этот путь."""
     from scripts.history_exam import load_orders
