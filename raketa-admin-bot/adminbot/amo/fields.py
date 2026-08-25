@@ -63,6 +63,28 @@ def contact_phones(contact: Optional[Mapping[str, Any]]) -> list[str]:
     return phones
 
 
+# --- сборка значений полей для записи ---
+
+def text_field(field_id: int, value: Any) -> dict:
+    """Текстовое поле сделки: адрес, комментарий."""
+    return {"field_id": field_id, "values": [{"value": value}]}
+
+
+def enum_field(field_id: int, enum_id: int) -> dict:
+    """Значение из списка: «Услуга», «Специалист»."""
+    return {"field_id": field_id, "values": [{"enum_id": enum_id}]}
+
+
+def datetime_field(field_id: int, moment: datetime) -> dict:
+    """Дата и время: амо хранит их как unix-время.
+
+    Время без часового пояса считаем московским — аккаунт живёт в Москве.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=MOSCOW_TZ)
+    return {"field_id": field_id, "values": [{"value": int(moment.timestamp())}]}
+
+
 def enum_ids(entity: Optional[Mapping[str, Any]], field_id: int) -> tuple[int, ...]:
     """Выбранные значения multiselect-поля (id вариантов из списка).
 

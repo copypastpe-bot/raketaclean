@@ -1,5 +1,8 @@
 """Тесты клиента amoCRM на поддельном сервере — живая CRM не участвует."""
 
+from decimal import Decimal
+from typing import Any, NamedTuple
+
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -20,11 +23,20 @@ CONTACT_PAGE_2 = {
 }
 
 
+class Recorded(NamedTuple):
+    """Запрос, который клиент отправил в поддельную амо."""
+
+    path: str
+    query: dict
+    method: str = "GET"
+    body: Any = None
+
+
 class FakeAmo:
     """Поддельная amoCRM: отдаёт заготовленные ответы и помнит запросы."""
 
     def __init__(self):
-        self.requests: list[tuple[str, dict]] = []
+        self.requests: list[Recorded] = []
         self.responses: dict[str, list] = {}
 
     def stub(self, path: str, *responses):
@@ -36,7 +48,15 @@ class FakeAmo:
         return queue.pop(0) if len(queue) > 1 else (queue[0] if queue else 404)
 
     async def handle(self, request: web.Request):
-        self.requests.append((request.path, dict(request.query)))
+        body = None
+        if request.can_read_body:
+            try:
+                body = await request.json()
+            except Exception:
+                body = await request.text()
+        self.requests.append(
+            Recorded(request.path, dict(request.query), request.method, body)
+        )
         item = self._next(request.path)
         if isinstance(item, int):
             return web.Response(status=item)
@@ -147,9 +167,9 @@ async def test_leads_are_fetched_by_id_never_by_contact_filter(amo):
     leads = await client.get_contact_leads(111)
 
     assert [lead["id"] for lead in leads] == [501, 502]
-    paths = [path for path, _ in fake.requests]
+    paths = [record.path for record in fake.requests]
     assert paths == ["/api/v4/contacts/111", "/api/v4/leads"]
-    all_params = " ".join(str(query) for _, query in fake.requests)
+    all_params = " ".join(str(record.query) for record in fake.requests)
     assert "filter[contacts]" not in all_params      # сломанный фильтр не используем
 
 
@@ -217,7 +237,7 @@ async def test_get_lead_tasks_filters_by_lead(amo):
     tasks = await client.get_lead_tasks(500)
 
     assert [t["id"] for t in tasks] == [1]
-    _, query = fake.requests[0]
+    query = fake.requests[0].query
     assert query["filter[entity_type]"] == "leads"
     assert query["filter[entity_id]"] == "500"
     assert query["filter[is_completed]"] == "0"   # закрытые задачи нас не интересуют

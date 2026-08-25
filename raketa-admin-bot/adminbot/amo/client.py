@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence, Union
 
 import aiohttp
@@ -15,6 +17,25 @@ import aiohttp
 from adminbot.amo.fields import contact_lead_ids
 
 log = logging.getLogger(__name__)
+
+# Текст в результате закрытой автозадачи: в истории амо видно, кто её закрыл.
+ROBOT_TASK_RESULT = "Закрыто роботом amo_sync"
+
+
+@dataclass(frozen=True)
+class Intent:
+    """Что робот собирается сделать (или уже сделал) в amoCRM.
+
+    В режиме репетиции возвращается неисполненным: `performed=False`, запрос
+    не отправлен, но payload — ровно тот, что ушёл бы в бою. Этого достаточно
+    и для предпросмотра владельцу, и для записи в журнал `adminbot.amo_actions`.
+    """
+
+    action: str                       # update_lead | move_lead | create_lead | …
+    entity: str                       # lead | contact | task
+    entity_id: Optional[int]          # None у создания, пока сущность не создана
+    payload: Any                      # тело запроса как есть
+    performed: bool = False
 
 # Параметры запроса: словарь либо список пар (для повторяющихся ключей filter[id][]).
 Params = Union[Mapping[str, Any], Sequence[tuple[str, Any]]]
@@ -257,6 +278,105 @@ class AmoClient:
 
     async def get_contact(self, contact_id: int) -> Optional[dict]:
         return await self.get(f"/api/v4/contacts/{contact_id}")
+
+    # --- запись ---
+    #
+    # Каждый метод сначала описывает НАМЕРЕНИЕ, а потом (если не репетиция) исполняет его.
+    # В режиме репетиции в сеть не уходит ничего, а вызывающий слой всё равно получает
+    # полное описание запроса — то самое, что ушло бы в бою. Так предпросмотр показывает
+    # ровно то, что произойдёт, а журнал `adminbot.amo_actions` пишется одинаково
+    # и в репетиции, и в бою.
+
+    async def _perform(self, intent: Intent, method: str, path: str,
+                       result_key: Optional[str] = None) -> Intent:
+        if self.dry_run:
+            log.info("amoCRM (репетиция): %s %s", intent.action, intent.entity_id or "")
+            return intent
+
+        payload = await self.request(method, path, json_body=intent.payload)
+        entity_id = intent.entity_id
+        if result_key and payload:
+            created = ((payload.get("_embedded") or {}).get(result_key)) or []
+            if created and isinstance(created[0], Mapping) and created[0].get("id") is not None:
+                entity_id = int(created[0]["id"])
+        return replace(intent, entity_id=entity_id, performed=True)
+
+    async def update_lead(
+        self,
+        lead_id: int,
+        *,
+        price: Optional[Decimal] = None,
+        custom_fields: Optional[Sequence[dict]] = None,
+        name: Optional[str] = None,
+    ) -> Optional[Intent]:
+        """Заполнить сделку: бюджет, кастомные поля, название.
+
+        None — если менять нечего: пустой запрос в амо не отправляем.
+        """
+        body: dict[str, Any] = {}
+        if price is not None:
+            body["price"] = int(price)          # амо хранит бюджет целым числом
+        if name is not None:
+            body["name"] = name
+        if custom_fields:
+            body["custom_fields_values"] = list(custom_fields)
+        if not body:
+            return None
+
+        intent = Intent(action="update_lead", entity="lead", entity_id=lead_id, payload=body)
+        return await self._perform(intent, "PATCH", f"/api/v4/leads/{lead_id}")
+
+    async def move_lead(self, lead_id: int, pipeline_id: int, status_id: int) -> Intent:
+        """Перевести сделку на другой этап (в том числе в другую воронку)."""
+        body = {"pipeline_id": pipeline_id, "status_id": status_id}
+        intent = Intent(action="move_lead", entity="lead", entity_id=lead_id, payload=body)
+        return await self._perform(intent, "PATCH", f"/api/v4/leads/{lead_id}")
+
+    async def create_lead(
+        self,
+        *,
+        name: str,
+        pipeline_id: int,
+        status_id: int,
+        price: Optional[Decimal] = None,
+        contact_id: Optional[int] = None,
+        custom_fields: Optional[Sequence[dict]] = None,
+    ) -> Intent:
+        """Завести сделку. Контакт привязывается сразу, отдельным запросом не надо."""
+        entity: dict[str, Any] = {"name": name, "pipeline_id": pipeline_id, "status_id": status_id}
+        if price is not None:
+            entity["price"] = int(price)
+        if custom_fields:
+            entity["custom_fields_values"] = list(custom_fields)
+        if contact_id is not None:
+            entity["_embedded"] = {"contacts": [{"id": contact_id}]}
+
+        intent = Intent(action="create_lead", entity="lead", entity_id=None, payload=[entity])
+        return await self._perform(intent, "POST", "/api/v4/leads", result_key="leads")
+
+    async def create_contact(self, *, name: str, phone: str) -> Intent:
+        """Завести контакт с телефоном в стандартном поле амо."""
+        entity = {
+            "name": name,
+            "custom_fields_values": [
+                {"field_code": "PHONE", "values": [{"value": phone, "enum_code": "WORK"}]}
+            ],
+        }
+        intent = Intent(action="create_contact", entity="contact", entity_id=None, payload=[entity])
+        return await self._perform(intent, "POST", "/api/v4/contacts", result_key="contacts")
+
+    async def complete_task(self, task_id: int, result_text: str = ROBOT_TASK_RESULT) -> Intent:
+        """Закрыть автозадачу. В тексте результата видно, что это сделал робот."""
+        body = {"is_completed": True, "result": {"text": result_text}}
+        intent = Intent(action="complete_task", entity="task", entity_id=task_id, payload=body)
+        return await self._perform(intent, "PATCH", f"/api/v4/tasks/{task_id}")
+
+    async def add_note(self, lead_id: int, text: str) -> Intent:
+        """Написать комментарий к сделке — например, пометить лид-дубль."""
+        entity = {"note_type": "common", "params": {"text": text}}
+        intent = Intent(action="add_note", entity="lead", entity_id=lead_id, payload=[entity])
+        return await self._perform(intent, "POST", f"/api/v4/leads/{lead_id}/notes",
+                                   result_key="notes")
 
     async def get_lead_field_enums(self, field_id: int) -> list[dict]:
         """Варианты списочного поля сделки (например, все «Специалисты»).
