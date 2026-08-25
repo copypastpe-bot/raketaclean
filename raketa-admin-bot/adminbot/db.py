@@ -293,6 +293,23 @@ async def count_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]:
     return {row["status"]: row["n"] for row in rows}
 
 
+async def get_setting(own_pool: asyncpg.Pool, key: str) -> Optional[str]:
+    """Настройка, которую владелец меняет из Telegram (например, пауза)."""
+    async with own_pool.acquire() as conn:
+        return await conn.fetchval("SELECT value FROM adminbot.settings WHERE key = $1", key)
+
+
+async def set_setting(own_pool: asyncpg.Pool, key: str, value: str) -> None:
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.settings (key, value) VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+            """,
+            key, value,
+        )
+
+
 async def apply_migration(pool: asyncpg.Pool, sql_path: str) -> None:
     """Применить SQL-файл миграции (используется в тестах и при развёртывании)."""
     with open(sql_path, "r", encoding="utf-8") as fh:

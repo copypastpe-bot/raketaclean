@@ -21,7 +21,7 @@ TEST_DB_DSN = os.environ.get("TEST_DB_DSN")
 pytestmark = pytest.mark.skipif(not TEST_DB_DSN, reason="TEST_DB_DSN не задан — нужен Postgres")
 
 ROOT = Path(__file__).resolve().parent.parent
-MIGRATION = ROOT / "migrations" / "001_adminbot_schema.sql"
+MIGRATIONS = sorted((ROOT / "migrations").glob("*.sql"))
 BOT_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "bot_schema_min.sql"
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
@@ -33,7 +33,8 @@ async def pool():
     pool = await db.create_pool(TEST_DB_DSN, min_size=1, max_size=2)
     async with pool.acquire() as conn:
         await conn.execute("DROP SCHEMA IF EXISTS adminbot CASCADE")
-        await conn.execute(MIGRATION.read_text())
+        for migration in MIGRATIONS:
+            await conn.execute(migration.read_text())
         await conn.execute(BOT_FIXTURE.read_text())
         await conn.execute(
             """
@@ -185,6 +186,30 @@ async def test_summary_source_sees_orders_robot_never_touched(pool):
     assert summary.missed == (597,)
     assert summary.total_orders == 2
     assert summary.is_quiet is False
+
+
+async def test_pause_survives_a_restart(pool):
+    """Пауза владельца лежит в базе, а не в памяти сервиса."""
+    from adminbot.control import PgControlPanel
+
+    panel = PgControlPanel(pool)
+    assert await panel.is_paused() is False
+
+    await panel.set_paused(True)
+    assert await PgControlPanel(pool).is_paused() is True     # «перезапуск»: новый объект
+
+    await panel.set_paused(False)
+    assert await PgControlPanel(pool).is_paused() is False
+
+
+async def test_queue_counts_for_status_command(pool):
+    from adminbot.control import PgControlPanel
+
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.create_link(pool, order_id=597, phone10="9159496642")
+    await db.update_link(pool, 597, status="done", path="A", real_lead_id=1)
+
+    assert await PgControlPanel(pool).queue_counts() == {"new": 1, "done": 1}
 
 
 async def test_history_exam_loads_orders_from_bot_db(pool):

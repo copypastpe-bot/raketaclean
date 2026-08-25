@@ -18,12 +18,13 @@ import asyncio
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
 import asyncpg
 
 from adminbot import db
+from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.models import AmoLink, Order
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class Watcher:
         poll_interval_sec: int = 60,
         on_question: Optional[Callable[[Order, AmoLink], Awaitable[Optional[int]]]] = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
         self.engine = engine
         self.source = source
@@ -72,11 +74,16 @@ class Watcher:
         self.poll_interval_sec = poll_interval_sec
         self.on_question = on_question
         self.sleep = sleep
+        self.now = now
+        # Последний проход — чтобы владелец мог спросить /status и увидеть,
+        # что робот действительно смотрит в базу, а не молча стоит.
+        self.last_tick_at: Optional[datetime] = None
+        self.last_report: Optional[TickReport] = None
 
     async def tick(self) -> TickReport:
         """Один проход: взять заказы и продвинуть каждый настолько, насколько можно."""
         if not await self._enabled():
-            return TickReport(paused=True)
+            return self._remember(TickReport(paused=True))
 
         orders = await self.source.pending()
         statuses: Counter[str] = Counter()
@@ -97,8 +104,9 @@ class Watcher:
             if await self._maybe_ask(order, link):
                 questions.append(order.order_id)
 
-        return TickReport(scanned=len(orders), by_status=dict(statuses),
-                          questions=tuple(questions), failures=tuple(failures))
+        return self._remember(TickReport(
+            scanned=len(orders), by_status=dict(statuses),
+            questions=tuple(questions), failures=tuple(failures)))
 
     async def run_forever(self, stop: Optional[asyncio.Event] = None) -> None:
         """Вечный цикл. Останавливается по событию `stop` (используется при выключении)."""
@@ -111,6 +119,11 @@ class Watcher:
             await self.sleep(self.poll_interval_sec)
 
     # --- внутреннее ---
+
+    def _remember(self, report: TickReport) -> TickReport:
+        self.last_tick_at = self.now()
+        self.last_report = report
+        return report
 
     async def _enabled(self) -> bool:
         if self.is_enabled is None:
