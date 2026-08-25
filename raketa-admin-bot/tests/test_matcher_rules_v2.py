@@ -58,8 +58,12 @@ def test_specialist_ignored_when_master_unknown():
     assert d.kind == "ask_owner" and set(d.options) == {1, 2}
 
 
-def test_deal_without_specialist_beats_another_masters_deal():
-    """Нашего мастера нет ни в одной сделке: чужая отпадает, сделка без мастера остаётся."""
+def test_no_specialist_match_means_the_hint_is_useless():
+    """Нашего мастера нет ни в одной сделке — признак не сужает выбор, спрашиваем.
+
+    Отбросить сделку по чужому мастеру нельзя: поле показывает планируемого
+    мастера, а не поехавшего (см. заказы №418 и №445).
+    """
     d = match(
         order_date=ORDER_DAY,
         candidates=[
@@ -68,33 +72,25 @@ def test_deal_without_specialist_beats_another_masters_deal():
         ],
         master_specialist_ids=(POLOZOV,),
     )
-    assert d == Decision(kind="use_realization", lead_id=2)
+    assert d.kind == "ask_owner" and set(d.options) == {1, 2}
 
 
-def test_deal_of_another_master_is_not_ours():
-    """Заказ №548: заказ выполнил Козлов, а открытая сделка — Полозова.
+def test_specialist_is_who_was_planned_not_who_went():
+    """Заказы №418 и №445: в сделке один мастер, выполнил другой — сделка верная.
 
-    Чужой мастер в сделке — довод ПРОТИВ неё, а не отсутствие сведений.
+    Поле «Специалист» заполняют при планировании и не переписывают при замене.
+    Поэтому чужой мастер НЕ отбрасывает сделку.
     """
     d = match(
         order_date=ORDER_DAY,
-        candidates=[L(31448601, REAL, CREATED, order_date=ORDER_DAY, specialists=[POLOZOV])],
-        master_specialist_ids=(KOZLOV,),
+        candidates=[L(31271495, REAL, CREATED, order_date=ORDER_DAY, specialists=[KOZLOV])],
+        master_specialist_ids=(POLOZOV,),
     )
-    assert d.kind == "create_new"
+    assert d == Decision(kind="use_realization", lead_id=31271495)
 
 
-def test_deal_without_specialist_stays_candidate():
-    """Поле «Специалист» заполнено не всегда — пустое не отбрасываем."""
-    d = match(
-        order_date=ORDER_DAY,
-        candidates=[L(1, REAL, CREATED, order_date=ORDER_DAY, specialists=[])],
-        master_specialist_ids=(KOZLOV,),
-    )
-    assert d == Decision(kind="use_realization", lead_id=1)
-
-
-def test_conflicting_specialist_dropped_but_own_kept():
+def test_matching_specialist_still_wins_when_there_is_a_choice():
+    """Совпадение по мастеру — сильный довод: из нескольких берём сделку нашего."""
     d = match(
         order_date=ORDER_DAY,
         candidates=[
@@ -107,14 +103,18 @@ def test_conflicting_specialist_dropped_but_own_kept():
     assert d == Decision(kind="use_realization", lead_id=3)
 
 
-def test_completed_deal_of_another_master_is_not_ours():
+def test_leftover_deal_of_another_master_is_caught_by_age():
+    """Заказ №548: сделка Полозова с прошлого раза, 16 дней — это хвост.
+
+    Отсеивается не по мастеру (поле ненадёжно), а по возрасту сделки.
+    """
     d = match(
         order_date=ORDER_DAY,
-        candidates=[L(1, REAL, SUCCESS, closed_date=ORDER_DAY + timedelta(days=1),
-                      created_date=ORDER_DAY - timedelta(days=1), specialists=[POLOZOV])],
+        candidates=[L(31448601, REAL, CREATED,
+                      created_date=ORDER_DAY - timedelta(days=16), specialists=[POLOZOV])],
         master_specialist_ids=(KOZLOV,),
     )
-    assert d.kind == "create_new"
+    assert d.kind == "ask_owner_stale" and d.options == (31448601,)
 
 
 # --- сделка, закрытая до выполнения заказа, не может быть нашей (заказ №570) ---
@@ -218,16 +218,16 @@ def test_completed_deal_beats_stale_tails():
     assert d == Decision(kind="already_done", lead_id=31442723)
 
 
-def test_stale_boundary_is_thirty_days():
-    """Граница из истории: за 90 дней ни одна верная сделка не была старше 22 дней."""
-    assert STALE_LEAD_DAYS == 30
+def test_stale_boundary_is_two_weeks():
+    """Граница из истории: 98,6% верных сделок заведены не раньше чем за 14 дней."""
+    assert STALE_LEAD_DAYS == 14
 
     edge = match(order_date=ORDER_DAY, candidates=[
-        L(1, REAL, CREATED, created_date=ORDER_DAY - timedelta(days=30))])
-    assert edge.kind == "use_realization"        # ровно 30 дней — ещё живая
+        L(1, REAL, CREATED, created_date=ORDER_DAY - timedelta(days=14))])
+    assert edge.kind == "use_realization"        # ровно две недели — ещё живая
 
     over = match(order_date=ORDER_DAY, candidates=[
-        L(2, REAL, CREATED, created_date=ORDER_DAY - timedelta(days=31))])
+        L(2, REAL, CREATED, created_date=ORDER_DAY - timedelta(days=15))])
     assert over.kind == "ask_owner_stale"
 
 
@@ -262,7 +262,7 @@ def test_creation_date_alone_does_not_break_a_tie():
     d = match(
         order_date=ORDER_DAY,
         candidates=[
-            L(1, REAL, CREATED, created_date=ORDER_DAY - timedelta(days=15), specialists=[KOZLOV]),
+            L(1, REAL, CREATED, created_date=ORDER_DAY - timedelta(days=10), specialists=[KOZLOV]),
             L(2, REAL, CREATED, created_date=ORDER_DAY - timedelta(days=1), specialists=[KOZLOV]),
         ],
         master_specialist_ids=(KOZLOV,),
