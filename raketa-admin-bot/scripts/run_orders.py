@@ -133,10 +133,67 @@ def describe(order: Order, link, actions: list[dict]) -> str:
             name = ACTION_NAMES.get(row["action"], row["action"])
             target = f" #{row['amo_id']}" if row["amo_id"] else ""
             mark = "" if row["dry_run"] else " ← ВЫПОЛНЕНО"
-            lines.append(f"  • {name}{target}{mark}: {_short(row['payload'])}")
+            lines.append(f"  • {name}{target}{mark}: {_pretty(row['action'], row['payload'])}")
     else:
         lines.append("действий не требуется")
     return "\n".join(lines)
+
+
+FIELD_NAMES = {
+    ids.FIELD_ORDER_DATETIME: "дата и время заказа",
+    ids.FIELD_ADDRESS: "адрес",
+    ids.FIELD_SERVICE: "услуга",
+    ids.FIELD_SPECIALIST: "специалист",
+    ids.FIELD_PAYMENT_TYPE: "вариант оплаты",
+    ids.FIELD_CLIENT_TYPE: "тип клиента",
+    ids.FIELD_PAYMENT_DATE: "дата оплаты",
+}
+DATE_FIELDS = (ids.FIELD_ORDER_DATETIME, ids.FIELD_PAYMENT_DATE)
+STAGE_NAMES = {
+    ids.STATUS_SUCCESS: "успех (проведено и оплачено)",
+    ids.REAL_STAGE_DONE: "«Заказ выполнен» (ждём оплату по счёту)",
+    ids.PRIM_STAGE_NEW_LEAD: "«Новый лид»",
+}
+
+# Расшифровка значений списков подтягивается из амо один раз за запуск.
+ENUM_NAMES: dict[int, str] = {}
+
+
+def _pretty(action: str, payload) -> str:
+    """Показать действие по-человечески, а не куском JSON."""
+    if action == "move_lead" and isinstance(payload, dict):
+        status = payload.get("status_id")
+        pipeline = "первичная" if payload.get("pipeline_id") == ids.PIPELINE_PRIMARY else "реализация"
+        return f"воронка {pipeline} → {STAGE_NAMES.get(status, status)}"
+
+    if action in ("add_note", "update_contact"):
+        if isinstance(payload, list) and payload:
+            payload = payload[0]
+        text = (payload or {}).get("params", {}).get("text") or (payload or {}).get("name") or ""
+        return str(text).replace("\n", " / ")
+
+    body = payload[0] if isinstance(payload, list) and payload else payload
+    if not isinstance(body, dict):
+        return _short(payload)
+
+    parts = []
+    if body.get("price") is not None:
+        parts.append(f"бюджет {body['price']} ₽")
+    if body.get("name"):
+        parts.append(f"название «{body['name']}»")
+    for field in body.get("custom_fields_values") or []:
+        name = FIELD_NAMES.get(field.get("field_id"), f"поле {field.get('field_id')}")
+        values = []
+        for item in field.get("values") or []:
+            if "enum_id" in item:
+                values.append(ENUM_NAMES.get(item["enum_id"], f"вариант {item['enum_id']}"))
+            elif field.get("field_id") in DATE_FIELDS:
+                values.append(datetime.fromtimestamp(int(item["value"]),
+                                                     tz=MOSCOW_TZ).strftime("%d.%m.%Y %H:%M"))
+            else:
+                values.append(str(item.get("value")))
+        parts.append(f"{name}: {', '.join(values)}")
+    return "; ".join(parts) if parts else _short(payload)
 
 
 def _short(payload) -> str:
@@ -191,8 +248,14 @@ async def main() -> int:
     client = AmoClient(base_url=base_url, token=token, dry_run=not args.live)
     store = MemoryLinkStore()
     try:
-        specialists = SpecialistIndex.from_enums(
-            await client.get_lead_field_enums(ids.FIELD_SPECIALIST))
+        specialist_enums = await client.get_lead_field_enums(ids.FIELD_SPECIALIST)
+        specialists = SpecialistIndex.from_enums(specialist_enums)
+        # Расшифровка значений списков — чтобы план читался человеком, а не машиной.
+        for field_id in (ids.FIELD_SERVICE, ids.FIELD_PAYMENT_TYPE, ids.FIELD_CLIENT_TYPE):
+            for enum in await client.get_lead_field_enums(field_id):
+                ENUM_NAMES[enum["id"]] = enum["value"]
+        for enum in specialist_enums:
+            ENUM_NAMES[enum["id"]] = enum["value"]
         engine = Engine(amo=client, store=store, specialists=specialists, dry_run=not args.live)
 
         for order in orders:
