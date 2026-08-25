@@ -133,6 +133,18 @@ async def test_actions_journal(pool):
     assert actions[0]["payload"] == {"price": 5950}
 
 
+async def test_history_exam_loads_orders_from_bot_db(pool):
+    """Скрипт экзамена ходит в БД сам, мимо слоя db.py — проверяем и этот путь."""
+    from scripts.history_exam import load_orders
+
+    orders = await load_orders(TEST_DB_DSN, days=3)
+
+    assert [o.order_id for o in orders] == [597, 596]
+    by_id = {o.order_id: o for o in orders}
+    assert by_id[596].masters == [("Никита Иванов", "+79101251720"), ("Оля Петрова", None)]
+    assert by_id[596].phone10 == "9601861067"
+
+
 async def test_no_writes_to_public_schema(pool):
     """Хард-правило проекта: в схему бота не пишем. Проверяем правами БД."""
     async with pool.acquire() as conn:

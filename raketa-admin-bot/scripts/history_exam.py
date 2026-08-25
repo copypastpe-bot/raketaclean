@@ -118,8 +118,9 @@ async def _init_json(conn: asyncpg.Connection) -> None:
 
 
 async def load_orders(dsn: str, days: int) -> list[Order]:
-    conn = await asyncpg.connect(dsn, init=_init_json)
+    conn = await asyncpg.connect(dsn)
     try:
+        await _init_json(conn)          # у одиночного подключения кодек ставится вручную
         rows = await conn.fetch(ORDERS_SQL, days)
     finally:
         await conn.close()
