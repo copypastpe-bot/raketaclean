@@ -1,0 +1,27 @@
+# Секреты и окружение
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Данные с ПД (телефоны, ФИО, адреса) — никогда в git
+data/
+*.local.*
+
+# ОС/редакторы
+.DS_Store
+.idea/
+.vscode/
+
+# Локальные логи и служебное
+*.log
+.bot.pid
