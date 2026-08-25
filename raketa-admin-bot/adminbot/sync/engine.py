@@ -83,6 +83,11 @@ class Engine:
         self.dry_run = dry_run
         self.salesbot_wait_sec = salesbot_wait_sec
         self.now = now
+        # Черновые заметки в пределах одного заказа: лиды-дубли и найденный контакт.
+        # У каждого движка свои — в сервисе их работает несколько сразу (наблюдатель,
+        # репетиция предпросмотра, боевой прогон хвоста), и путать их расчёты нельзя.
+        self._duplicates: dict[int, tuple[int, ...]] = {}
+        self._contacts: dict[int, int] = {}
 
     # --- основной ход ---
 
@@ -153,9 +158,6 @@ class Engine:
         link = await self.store.update(order.order_id, **fields)
         self._duplicates[order.order_id] = tuple(decision.duplicates)
         return link
-
-    # Лиды-дубли живут только в пределах тика: в хранилище им места не нужно.
-    _duplicates: dict[int, tuple[int, ...]] = {}
 
     # --- исполнение чек-листа ---
 
@@ -284,9 +286,6 @@ class Engine:
         if intent and intent.entity_id:
             self._contacts[order.order_id] = intent.entity_id
         return StepResult()
-
-    # id контакта нужен только внутри тика — в хранилище ему места не нужно.
-    _contacts: dict[int, int] = {}
 
     async def _step_create_primary_lead(self, order: Order, link: AmoLink) -> StepResult:
         intent = await self._write(

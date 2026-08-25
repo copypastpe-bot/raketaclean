@@ -319,3 +319,22 @@ async def test_order_without_phone_waits_for_owner():
 
     assert link.status == "waiting_owner"
     assert not amo.calls                          # в амо даже не ходили
+
+
+# --- независимость движков друг от друга ---
+
+async def test_engines_do_not_share_scratch_state():
+    """Каждый движок считает сам за себя.
+
+    В сервисе их несколько сразу: наблюдатель, репетиция предпросмотра и боевой
+    прогон хвоста. Если бы черновые заметки (лиды-дубли, найденный контакт) были
+    общими, боевой движок дописывал бы в CRM по чужому расчёту.
+    """
+    first = make_engine(FakeAmo(), FakeStore())
+    second = make_engine(FakeAmo(), FakeStore())
+
+    first._duplicates[596] = (41400001,)
+    first._contacts[596] = 55
+
+    assert second._duplicates == {}
+    assert second._contacts == {}
