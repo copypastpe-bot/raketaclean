@@ -28,7 +28,7 @@ from adminbot.amo.client import AmoClient
 from adminbot.config import Settings
 from adminbot.control import PgControlPanel, sync_allowed
 from adminbot.sync.backlog import BacklogRunner
-from adminbot.sync.engine import Engine
+from adminbot.sync.engine import Engine, service_enums
 from adminbot.sync.reconcile import PgSummarySource, Reconciler
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import MemoryLinkStore, PgLinkStore
@@ -117,9 +117,11 @@ async def build_app(settings: Settings) -> App:
     # и молча пропустит её. Поэтому репетиция живёт в памяти процесса: отметки
     # не попадают в базу, но в пределах запуска робот помнит, о чём уже спросил.
     store = MemoryLinkStore() if settings.amo_sync_dry_run else PgLinkStore(own_pool)
+    services = service_enums(settings.service_by_master)
     engine = Engine(amo=amo, store=store, specialists=specialists,
                     dry_run=settings.amo_sync_dry_run,
-                    salesbot_wait_sec=settings.salesbot_wait_sec)
+                    salesbot_wait_sec=settings.salesbot_wait_sec,
+                    service_by_master=services)
 
     bot = Bot(token=settings.tg_token)
     source = PgOrderSource(bot_pool, own_pool, settings.backlog_from)
@@ -144,10 +146,11 @@ async def build_app(settings: Settings) -> App:
         fetch_orders=source.pending,
         rehearsal_engine=lambda scratch: Engine(
             amo=rehearsal_amo, store=scratch, specialists=specialists, dry_run=True,
-            salesbot_wait_sec=settings.salesbot_wait_sec),
+            salesbot_wait_sec=settings.salesbot_wait_sec, service_by_master=services),
         live_engine=Engine(amo=live_amo, store=PgLinkStore(own_pool),
                            specialists=specialists, dry_run=False,
-                           salesbot_wait_sec=settings.salesbot_wait_sec),
+                           salesbot_wait_sec=settings.salesbot_wait_sec,
+                           service_by_master=services),
     )
 
     dispatcher = Dispatcher()

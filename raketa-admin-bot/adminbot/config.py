@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 # Обязательные переменные окружения; порядок важен — сообщение об ошибке
@@ -25,6 +25,18 @@ _TRUE_VALUES = {"1", "true"}
 
 # Хвост непроведённых заказов разбираем с этой даты (решение владельца №5).
 DEFAULT_BACKLOG_FROM = date(2026, 8, 21)
+
+# Какую «Услугу» ставить в сделке, если поле пустое (решение владельца №7).
+# Ключ — часть имени мастера, значение — вид работ. Новый мастер добавляется
+# строкой в настройках, без правки кода.
+SERVICE_KINDS = ("furniture", "cleaning")
+DEFAULT_SERVICE_BY_MASTER: dict[str, str] = {
+    "никита": "furniture",
+    "дмитрий": "furniture",
+    "дима": "furniture",
+    "ольга": "cleaning",
+    "оля": "cleaning",
+}
 
 
 def _require(name: str) -> str:
@@ -61,6 +73,31 @@ def _date(name: str, default: date) -> date:
         raise RuntimeError(f"Переменная {name} должна быть датой ГГГГ-ММ-ДД, получено: {raw!r}") from exc
 
 
+def _service_by_master(name: str, default: dict[str, str]) -> dict[str, str]:
+    """Разобрать строку «Никита:furniture, Оля:cleaning».
+
+    Опечатку в названии услуги ловим при запуске: в сделке клиента она обойдётся
+    дороже, чем упавший старт сервиса.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return dict(default)
+
+    mapping: dict[str, str] = {}
+    for pair in raw.split(","):
+        if not pair.strip():
+            continue
+        master, _, service = pair.partition(":")
+        service = service.strip().lower()
+        if service not in SERVICE_KINDS:
+            raise RuntimeError(
+                f"Переменная {name}: неизвестная услуга {service!r} у мастера "
+                f"{master.strip()!r}. Допустимо: {', '.join(SERVICE_KINDS)}"
+            )
+        mapping[master.strip().lower()] = service
+    return mapping
+
+
 @dataclass(frozen=True)
 class Settings:
     """Настройки сервиса. Неизменяемы после чтения окружения."""
@@ -86,6 +123,9 @@ class Settings:
     reconcile_hour_msk: int = 21
     salesbot_wait_sec: int = 600     # сколько ждём автосделку сейлзбота (дизайн §5.3)
     poll_interval_sec: int = 60
+
+    # Мастер заказа → вид работ для поля «Услуга»
+    service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -118,4 +158,6 @@ class Settings:
             reconcile_hour_msk=_int("AMO_SYNC_RECONCILE_HOUR_MSK", 21),
             salesbot_wait_sec=_int("AMO_SYNC_SALESBOT_WAIT_SEC", 600),
             poll_interval_sec=_int("AMO_SYNC_POLL_INTERVAL_SEC", 60),
+            service_by_master=_service_by_master("SERVICE_BY_MASTER",
+                                                 DEFAULT_SERVICE_BY_MASTER),
         )

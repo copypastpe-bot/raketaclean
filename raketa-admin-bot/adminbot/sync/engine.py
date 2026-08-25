@@ -23,6 +23,7 @@ from adminbot.amo.fields import (
     MOSCOW_TZ, date_field, datetime_field, enum_field, field_value, lead_contact_ids,
     order_date_msk, specialist_ids, text_field,
 )
+from adminbot.config import DEFAULT_SERVICE_BY_MASTER
 from adminbot.models import AmoLink, Order
 from adminbot.phone import mask, normalize_phone
 from adminbot.sync.checklist import StepContext, next_step
@@ -35,15 +36,24 @@ log = logging.getLogger(__name__)
 # Сколько ждём автосделку сейлзбота, прежде чем спросить владельца (дизайн §5.3).
 DEFAULT_SALESBOT_WAIT_SEC = 600
 
-# Какую «Услугу» ставит робот, если поле пустое (решение владельца №7).
-# Ключ — часть имени мастера в нижнем регистре.
-SERVICE_BY_MASTER: dict[str, int] = {
-    "никита": ids.SERVICE_ENUM_FURNITURE,
-    "дмитрий": ids.SERVICE_ENUM_FURNITURE,
-    "дима": ids.SERVICE_ENUM_FURNITURE,
-    "ольга": ids.SERVICE_ENUM_CLEANING,
-    "оля": ids.SERVICE_ENUM_CLEANING,
+# Виды работ → значения списка «Услуга» в амо (проверены по справочнику 2026-08-25).
+SERVICE_ENUM_BY_KIND: dict[str, int] = {
+    "furniture": ids.SERVICE_ENUM_FURNITURE,     # «Чистка мебели»
+    "cleaning": ids.SERVICE_ENUM_CLEANING,       # «Уборка»
 }
+
+
+def service_enums(by_master: dict[str, str]) -> dict[str, int]:
+    """Настройка «мастер → вид работ» превращается в «мастер → значение списка амо»."""
+    return {master.lower(): SERVICE_ENUM_BY_KIND[kind]
+            for master, kind in by_master.items() if kind in SERVICE_ENUM_BY_KIND}
+
+
+# Какую «Услугу» ставит робот, если поле пустое (решение владельца №7).
+# Ключ — часть имени мастера в нижнем регистре. Значение по умолчанию берётся
+# из настроек сервиса (SERVICE_BY_MASTER), здесь — запасной вариант для тестов
+# и разовых прогонов.
+SERVICE_BY_MASTER: dict[str, int] = service_enums(DEFAULT_SERVICE_BY_MASTER)
 
 # Решения матчера, требующие вмешательства владельца.
 _ASK_KINDS = ("ask_owner", "ask_owner_stale", "ask_owner_unrelated")
@@ -75,11 +85,14 @@ class Engine:
         specialists: SpecialistIndex,
         dry_run: bool = True,
         salesbot_wait_sec: int = DEFAULT_SALESBOT_WAIT_SEC,
+        service_by_master: Optional[dict[str, int]] = None,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
         self.amo = amo
         self.store = store
         self.specialists = specialists
+        self.service_by_master = (SERVICE_BY_MASTER if service_by_master is None
+                                  else service_by_master)
         self.dry_run = dry_run
         self.salesbot_wait_sec = salesbot_wait_sec
         self.now = now
@@ -378,7 +391,7 @@ class Engine:
 
     def _service_enum(self, order: Order) -> Optional[int]:
         for name, _phone in order.masters:
-            for key, enum_id in SERVICE_BY_MASTER.items():
+            for key, enum_id in self.service_by_master.items():
                 if key in (name or "").lower():
                     return enum_id
         return None                       # мастер неизвестен — поле не выдумываем

@@ -252,3 +252,36 @@ async def test_tasks_are_closed_before_the_stage_changes():
 
     order_of_calls = [name for name, _ in amo.calls]
     assert order_of_calls.index("complete_task") < order_of_calls.index("move_lead")
+
+
+# --- «Услуга» настраивается, а не зашита в код ---
+
+async def test_service_comes_from_the_configured_master_map():
+    """Новый мастер добавляется настройкой: в коде для этого править нечего."""
+    from adminbot.sync.engine import Engine, service_enums
+    from tests.test_engine import SPECIALISTS
+
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo)
+    engine = Engine(amo=amo, store=store, specialists=SPECIALISTS, dry_run=False,
+                    service_by_master=service_enums({"пётр": "cleaning"}))
+
+    await engine.process_order(make_order(master=("Пётр Новиков", "79001234567")))
+
+    service = fields_of(amo)[ids.FIELD_SERVICE]
+    assert service["values"][0]["enum_id"] == ids.SERVICE_ENUM_CLEANING
+
+
+async def test_unknown_master_leaves_service_empty():
+    """Мастера нет в настройке — поле не выдумываем."""
+    from adminbot.sync.engine import Engine
+    from tests.test_engine import SPECIALISTS
+
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo)
+
+    await Engine(amo=amo, store=store, specialists=SPECIALISTS, dry_run=False,
+                 service_by_master={}).process_order(
+        make_order(master=("Кто-то Незнакомый", None)))
+
+    assert ids.FIELD_SERVICE not in fields_of(amo)
