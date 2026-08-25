@@ -112,6 +112,7 @@ SELECT o.id, o.phone, o.phone_digits, o.customer_name, o.created_at,
 FROM public.orders o
 LEFT JOIN public.clients c ON c.id = o.client_id
 WHERE o.created_at >= now() - ($1::int || ' days')::interval
+  AND o.created_at <  now() - ($2::int || ' days')::interval
 ORDER BY o.created_at, o.id
 """
 
@@ -120,11 +121,14 @@ async def _init_json(conn: asyncpg.Connection) -> None:
     await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
 
-async def load_orders(dsn: str, days: int) -> list[Order]:
+async def load_orders(dsn: str, days: int, skip_recent_days: int = 0) -> list[Order]:
+    """Заказы за период. skip_recent_days отсекает свежий хвост — так получается
+    выборка, на которой правила НЕ настраивались (проверка на «незнакомых» данных).
+    """
     conn = await asyncpg.connect(dsn)
     try:
         await _init_json(conn)          # у одиночного подключения кодек ставится вручную
-        rows = await conn.fetch(ORDERS_SQL, days)
+        rows = await conn.fetch(ORDERS_SQL, days, skip_recent_days)
     finally:
         await conn.close()
     return [
@@ -383,7 +387,8 @@ def _listing(rows: list[ExamRow], title: str, note: str = "") -> list[str]:
     return lines
 
 
-def build_report(rows: list[ExamRow], days: int, as_of_order: bool) -> str:
+def build_report(rows: list[ExamRow], days: int, as_of_order: bool,
+                 skip_recent_days: int = 0) -> str:
     counts = Counter(row.verdict for row in rows)
     total = len(rows) or 1
     auto = counts[VERDICT_AUTO] + counts[VERDICT_WEAK] + counts[VERDICT_PENDING]
@@ -401,6 +406,8 @@ def build_report(rows: list[ExamRow], days: int, as_of_order: bool) -> str:
         f"Дата прогона: {datetime.now(MOSCOW_TZ).date().isoformat()}. "
         f"Период: {days} дней. Заказов: {len(rows)}. Режим: только чтение, {mode}.",
         "",
+        *([f"**Проверка на незнакомых данных:** взяты заказы старше {skip_recent_days} дней — "
+           f"на них правила не настраивались.", ""] if skip_recent_days else []),
         "## Итог",
         "",
         "| Исход | Кол-во | Доля |",
@@ -464,6 +471,9 @@ def build_report(rows: list[ExamRow], days: int, as_of_order: bool) -> str:
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Экзамен матчера на истории (только чтение)")
     parser.add_argument("--days", type=int, default=90)
+    parser.add_argument("--skip-recent-days", type=int, default=0,
+                        help="отсечь свежий хвост: проверка на данных, "
+                             "на которых правила не настраивались")
     parser.add_argument("--mode", choices=("as-of-order", "now"), default="as-of-order",
                         help="as-of-order: CRM на момент заказа; now: сегодняшнее состояние")
     parser.add_argument("--bot-env", type=Path, default=DEFAULT_BOT_ENV)
@@ -491,8 +501,10 @@ async def main() -> int:
         return 2
 
     as_of_order = args.mode == "as-of-order"
-    print(f"Беру заказы бота за {args.days} дней…", flush=True)
-    orders = await load_orders(dsn, args.days)
+    period = (f"за {args.days} дней" if not args.skip_recent_days
+              else f"с {args.days}-го по {args.skip_recent_days}-й день назад")
+    print(f"Беру заказы бота {period}…", flush=True)
+    orders = await load_orders(dsn, args.days, args.skip_recent_days)
     if args.limit:
         orders = orders[: args.limit]
     print(f"Заказов: {len(orders)}. Иду в amoCRM (только чтение)…", flush=True)
@@ -507,7 +519,7 @@ async def main() -> int:
     finally:
         await client.close()
 
-    report = build_report(rows, args.days, as_of_order)
+    report = build_report(rows, args.days, as_of_order, args.skip_recent_days)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(report, encoding="utf-8")
 
