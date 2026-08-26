@@ -49,6 +49,9 @@ from adminbot.tg.session import build_session
 
 log = logging.getLogger("adminbot")
 
+# Сколько ждать перед новой попыткой опроса, если Telegram не отвечает.
+TELEGRAM_RETRY_SEC = 30
+
 
 @dataclass
 class App:
@@ -82,13 +85,32 @@ class App:
             background.append(asyncio.create_task(
                 self.carpet_watcher.run_forever(self.stop), name="carpets"))
         try:
-            await self.dispatcher.start_polling(self.bot, handle_signals=False,
-                                                close_bot_session=False)
+            await self._poll_until_stopped()
         finally:
             self.stop.set()
             for task in background:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)
+
+    async def _poll_until_stopped(self) -> None:
+        """Опрашивать Telegram, переживая обрывы связи.
+
+        Telegram из России доступен нестабильно: хватает нескольких секунд без
+        ответа, чтобы aiogram упал с таймаутом. Раньше это роняло весь процесс —
+        вместе с работой по CRM, которая от Telegram вообще не зависит. Теперь
+        обрыв связи стоит паузы и новой попытки, а сделки продолжают оформляться.
+        """
+        from aiogram.exceptions import TelegramNetworkError
+
+        while not self.stop.is_set():
+            try:
+                await self.dispatcher.start_polling(self.bot, handle_signals=False,
+                                                    close_bot_session=False)
+                return                                 # штатная остановка
+            except TelegramNetworkError as exc:
+                log.warning("Telegram не отвечает (%s). Повторю через %s секунд; "
+                            "работа с CRM продолжается", exc, TELEGRAM_RETRY_SEC)
+                await asyncio.sleep(TELEGRAM_RETRY_SEC)
 
     async def _stop_polling_on_signal(self) -> None:
         """Systemd прислал стоп — снимаем бота с опроса, дальше сработает finally."""
