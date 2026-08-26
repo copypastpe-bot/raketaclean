@@ -182,6 +182,44 @@ def test_service_words_map_to_amo_values():
         assert parsed.services == expected, summary
 
 
+def test_district_shorthands_from_the_real_calendar():
+    """Экзамен на 462 записях нашёл сокращения, которых не было в разведке.
+
+    Расшифрованы по адресу записи: «Дзерж» — Дзержинск, «Автоз»/«Авто» — Сазанова
+    и Строкина, «Ниже» — Академика Блохиной, «Бог» — Каменки. Приставки, которые
+    в список районов амо не ложатся (Печёры, Афонино, Кусаковка, Цветы), остаются
+    непонятными намеренно: район в CRM важнее скорости догадки.
+    """
+    cases = {
+        "Дзерж! Диван, Ирина": "дзержинский",
+        "Автоз! Диван Екатерина": "автозаводский",
+        "Авто! Диван Мария": "автозаводский",
+        "Ниже! Уборка + Мебель Влад": "нижегородский",
+        "Бог! Диван Марина": "богородский",
+    }
+    for summary, district in cases.items():
+        parsed = parse_event({"id": summary, "summary": summary,
+                              "description": "89601861067",
+                              "start": {"dateTime": "2026-08-24T10:00:00+03:00"}})
+        assert parsed.district == district, summary
+        assert parsed.unknown_district is None, summary
+
+    unclear = parse_event({"id": "x", "summary": "Афон! Диван, Артур",
+                           "description": "89601861067",
+                           "start": {"dateTime": "2026-08-24T10:00:00+03:00"}})
+    assert unclear.district is None
+    assert unclear.unknown_district == "афон"
+
+
+def test_plural_furniture_is_recognised():
+    """«2 дивана» — две записи из боевого календаря разбирались как «услуга не понята»."""
+    parsed = parse_event({"id": "pl", "summary": "Мос! 2 дивана, Ирина",
+                          "description": "89601861067 Ирина",
+                          "start": {"dateTime": "2026-08-24T10:00:00+03:00"}})
+
+    assert parsed.services == ("furniture",)
+
+
 def test_rug_in_description_means_cleaning_at_home():
     """«Ковёр» в тексте — это чистка ковра на дому, а не ковры партнёра (решение 11)."""
     parsed = parse_event({"id": "rug", "summary": "Сов! Диван, Ирина",
