@@ -33,6 +33,7 @@ class FakeImap:
         self.unseen = unseen if unseen is not None else list(letters)
         self.selected = None
         self.marked: list[bytes] = []
+        self.fetched: list[bytes] = []
         self.logged_out = False
         self.fail_on_select = False
 
@@ -47,7 +48,11 @@ class FakeImap:
         return "OK", [b" ".join(self.unseen)]
 
     def fetch(self, uid, parts):
-        return "OK", [(b"1 (RFC822 {%d}" % len(self.letters[uid]), self.letters[uid]), b")"]
+        # Настоящий сервер на «(RFC822)» пометил бы письмо прочитанным. Двойник
+        # этого не делает, поэтому проверяем сам запрос — иначе ошибка не видна.
+        assert "PEEK" in parts, "письмо нужно читать через BODY.PEEK, иначе оно «съедается»"
+        self.fetched.append(uid)
+        return "OK", [(b"1 (BODY[] {%d}" % len(self.letters[uid]), self.letters[uid]), b")"]
 
     def store(self, uid, command, flags):
         assert command == "+FLAGS" and flags == "\\Seen"
@@ -79,7 +84,7 @@ async def test_takes_only_unread_letters_with_xlsx():
     assert [letter.uid for letter in letters] == ["1"]
     assert letters[0].attachments["Договоры (10).xlsx"] == b"PK\x03\x04data"
     assert letters[0].subject == "отчёт с 10.08 по 16.08"
-    assert fake.selected == ("robot_amo", False)
+    assert fake.selected == ("robot_amo", True)   # чтение не меняет состояние ящика
 
 
 async def test_letter_with_several_reports_keeps_them_all():

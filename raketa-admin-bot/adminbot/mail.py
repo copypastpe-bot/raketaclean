@@ -97,7 +97,9 @@ class MailBox:
     def _fetch_new(self) -> list[Letter]:
         box = self._connect()
         try:
-            self._select(box, readonly=False)
+            # Папку открываем только на чтение: даже случайная команда не должна
+            # изменить состояние ящика владельца.
+            self._select(box, readonly=True)
             ok, data = box.search(None, "UNSEEN")
             if ok != "OK":
                 raise MailError(f"Почта не отдала список писем: {data}")
@@ -125,7 +127,11 @@ class MailBox:
             raise MailError(f"Не открыть папку {self.folder}: {data}")
 
     def _read_letter(self, box: Any, uid: bytes) -> Optional[Letter]:
-        ok, raw = box.fetch(uid, "(RFC822)")
+        # BODY.PEEK, а не RFC822: обычное чтение письма ставит ему флаг «прочитано»,
+        # и письмо пропало бы из работы ещё до того, как строки разобраны.
+        # Поймано на боевой почте 2026-08-26: проверка «что там лежит» съела
+        # непрочитанность обоих отчётов партнёра.
+        ok, raw = box.fetch(uid, "(BODY.PEEK[])")
         if ok != "OK" or not raw or not isinstance(raw[0], tuple):
             log.warning("Письмо %s прочитать не удалось", uid)
             return None
