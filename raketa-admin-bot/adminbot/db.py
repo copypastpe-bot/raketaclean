@@ -13,7 +13,7 @@ from typing import Any, Optional, Sequence
 
 import asyncpg
 
-from adminbot.models import AmoLink, Order
+from adminbot.models import AmoLink, CarpetLink, Order
 from adminbot.phone import last10
 
 # Колонки adminbot.amo_links, которые разрешено менять через update_link.
@@ -296,6 +296,168 @@ async def count_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]:
             "SELECT status, count(*) AS n FROM adminbot.amo_links GROUP BY status"
         )
     return {row["status"]: row["n"] for row in rows}
+
+
+# --- ковры от партнёра ---
+
+# Колонки adminbot.carpet_links, которые разрешено менять.
+_UPDATABLE_CARPET_FIELDS = frozenset(
+    {"phone10", "status", "path", "lead_id", "primary_lead_id", "question",
+     "question_msg_id", "last_error", "source_file"}
+)
+
+
+def _carpet_from_row(row: Optional[asyncpg.Record]) -> Optional[CarpetLink]:
+    if row is None:
+        return None
+    checklist = row["checklist"]
+    if isinstance(checklist, str):
+        checklist = json.loads(checklist)
+    question = row["question"]
+    if isinstance(question, str):
+        question = json.loads(question)
+    return CarpetLink(
+        partner_id=row["partner_id"],
+        phone10=row["phone10"],
+        status=row["status"],
+        path=row["path"],
+        lead_id=row["lead_id"],
+        primary_lead_id=row["primary_lead_id"],
+        checklist=checklist or {},
+        question=question,
+        question_msg_id=row["question_msg_id"],
+        last_error=row["last_error"],
+        source_file=row["source_file"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def create_carpet_link(own_pool: asyncpg.Pool, partner_id: int,
+                             phone10: Optional[str],
+                             source_file: Optional[str] = None) -> CarpetLink:
+    """Взять строку отчёта в работу. Повторный вызов ничего не портит."""
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO adminbot.carpet_links (partner_id, phone10, source_file)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (partner_id) DO UPDATE SET updated_at = now()
+            RETURNING *
+            """,
+            partner_id, phone10 or "", source_file,
+        )
+    return _carpet_from_row(row)
+
+
+async def get_carpet_link(own_pool: asyncpg.Pool, partner_id: int) -> Optional[CarpetLink]:
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM adminbot.carpet_links WHERE partner_id = $1", partner_id)
+    return _carpet_from_row(row)
+
+
+async def update_carpet_link(own_pool: asyncpg.Pool, partner_id: int,
+                             **fields: Any) -> Optional[CarpetLink]:
+    unknown = set(fields) - _UPDATABLE_CARPET_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля ковровой привязки: {sorted(unknown)}")
+    if not fields:
+        return await get_carpet_link(own_pool, partner_id)
+
+    names = list(fields)
+    assignments = ", ".join(f"{name} = ${i + 2}" for i, name in enumerate(names))
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE adminbot.carpet_links SET {assignments}, updated_at = now() "
+            f"WHERE partner_id = $1 RETURNING *",
+            partner_id, *[fields[name] for name in names],
+        )
+    return _carpet_from_row(row)
+
+
+async def mark_carpet_step(own_pool: asyncpg.Pool, partner_id: int, step: str) -> None:
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE adminbot.carpet_links
+            SET checklist = checklist || jsonb_build_object($2::text, to_jsonb(now())),
+                updated_at = now()
+            WHERE partner_id = $1
+            """,
+            partner_id, step,
+        )
+
+
+async def log_carpet_action(
+    own_pool: asyncpg.Pool, *, partner_id: int, action: str, dry_run: bool,
+    amo_entity: Optional[str] = None, amo_id: Optional[int] = None,
+    payload: Optional[dict] = None,
+) -> None:
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.carpet_actions
+                (partner_id, action, amo_entity, amo_id, dry_run, payload)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            partner_id, action, amo_entity, amo_id, dry_run, payload,
+        )
+
+
+async def fetch_carpet_taken_leads(own_pool: asyncpg.Pool, phone10: str,
+                                   exclude_partner_id: int) -> set[int]:
+    """Ковровые сделки, уже закреплённые за другими заказами того же клиента."""
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT lead_id FROM adminbot.carpet_links
+            WHERE phone10 = $1 AND partner_id <> $2 AND lead_id IS NOT NULL
+            """,
+            phone10, exclude_partner_id,
+        )
+    return {row["lead_id"] for row in rows}
+
+
+async def fetch_carpet_links_by_status(own_pool: asyncpg.Pool,
+                                       statuses: Sequence[str]) -> list[CarpetLink]:
+    """Заказы партнёра, работа по которым ещё не закончена."""
+    if not statuses:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM adminbot.carpet_links WHERE status = ANY($1::text[]) "
+            "ORDER BY partner_id",
+            list(statuses),
+        )
+    return [_carpet_from_row(row) for row in rows]
+
+
+async def count_carpet_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]:
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT status, count(*) AS n FROM adminbot.carpet_links GROUP BY status")
+    return {row["status"]: row["n"] for row in rows}
+
+
+async def remember_letter(own_pool: asyncpg.Pool, uid: str, subject: Optional[str],
+                          files: Sequence[str], rows_total: int) -> None:
+    """Записать, что письмо разобрано: страховка на случай сбоя пометки в почте."""
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.carpet_letters (uid, subject, files, rows_total)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (uid) DO UPDATE SET processed_at = now()
+            """,
+            uid, subject, list(files), rows_total,
+        )
+
+
+async def letter_was_processed(own_pool: asyncpg.Pool, uid: str) -> bool:
+    async with own_pool.acquire() as conn:
+        return bool(await conn.fetchval(
+            "SELECT 1 FROM adminbot.carpet_letters WHERE uid = $1", uid))
 
 
 async def get_setting(own_pool: asyncpg.Pool, key: str) -> Optional[str]:

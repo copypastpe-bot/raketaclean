@@ -213,10 +213,15 @@ async def test_queue_counts_for_status_command(pool):
 
 
 async def test_history_exam_loads_orders_from_bot_db(pool):
-    """Скрипт экзамена ходит в БД сам, мимо слоя db.py — проверяем и этот путь."""
+    """Скрипт экзамена ходит в БД сам, мимо слоя db.py — проверяем и этот путь.
+
+    Окно считаем от даты фикстуры, а не «последние три дня»: скрипт отмеряет дни
+    от текущего момента, и с наступлением новых суток тест иначе разваливается.
+    """
     from scripts.history_exam import load_orders
 
-    orders = await load_orders(TEST_DB_DSN, days=3)
+    days_since_fixture = (datetime.now(timezone.utc).date() - NOW.date()).days
+    orders = await load_orders(TEST_DB_DSN, days=days_since_fixture + 2)
 
     assert [o.order_id for o in orders] == [597, 596]
     by_id = {o.order_id: o for o in orders}
@@ -245,3 +250,65 @@ async def test_no_writes_to_public_schema(pool):
             await conn.execute("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM adminbot_ro_test")
             await conn.execute("REVOKE ALL ON SCHEMA public FROM adminbot_ro_test")
             await conn.execute("DROP ROLE IF EXISTS adminbot_ro_test")
+
+
+# --- ковры от партнёра ---
+
+async def test_carpet_link_lifecycle(pool):
+    """Ключ — номер заказа партнёра: месячный свод не должен обработаться повторно."""
+    link = await db.create_carpet_link(pool, 44426, "9601945325", "Договоры (11).xlsx")
+    assert link.status == "new" and link.source_file == "Договоры (11).xlsx"
+
+    await db.update_carpet_link(pool, 44426, status="in_progress", lead_id=31516051)
+    await db.mark_carpet_step(pool, 44426, "fill_carpet_lead")
+    await db.mark_carpet_step(pool, 44426, "move_carpet_delivered")
+
+    link = await db.get_carpet_link(pool, 44426)
+    assert link.lead_id == 31516051
+    assert set(link.checklist) == {"fill_carpet_lead", "move_carpet_delivered"}
+
+    # тот же заказ приходит второй раз — строка одна, отметки на месте
+    again = await db.create_carpet_link(pool, 44426, "9601945325")
+    assert again.lead_id == 31516051 and len(again.checklist) == 2
+
+
+async def test_carpet_question_survives_restart(pool):
+    await db.create_carpet_link(pool, 44345, "9108970195")
+    question = {"reason": "какая сделка про этот заказ",
+                "options": [{"lead_id": 1, "date": "2026-08-12"}]}
+
+    await db.update_carpet_link(pool, 44345, status="waiting_owner", question=question)
+
+    link = await db.get_carpet_link(pool, 44345)
+    assert link.question["options"][0]["lead_id"] == 1
+
+
+async def test_carpet_taken_leads_are_not_reused(pool):
+    """У клиента два заказа подряд — каждой работе своя сделка."""
+    await db.create_carpet_link(pool, 44426, "9601945325")
+    await db.update_carpet_link(pool, 44426, lead_id=31516051)
+    await db.create_carpet_link(pool, 44427, "9601945325")
+
+    taken = await db.fetch_carpet_taken_leads(pool, "9601945325", exclude_partner_id=44427)
+    assert taken == {31516051}
+
+
+async def test_unfinished_carpet_rows_are_found(pool):
+    await db.create_carpet_link(pool, 1, "9601945325")
+    await db.create_carpet_link(pool, 2, "9601945325")
+    await db.update_carpet_link(pool, 2, status="done")
+
+    active = await db.fetch_carpet_links_by_status(pool, ("new", "waiting_salesbot"))
+    assert [link.partner_id for link in active] == [1]
+    assert await db.count_carpet_links_by_status(pool) == {"new": 1, "done": 1}
+
+
+async def test_processed_letter_is_remembered(pool):
+    """Страховка на случай, если пометка в почтовом ящике не поставилась."""
+    assert await db.letter_was_processed(pool, "17") is False
+
+    await db.remember_letter(pool, "17", "отчёт с 17.08 по 23.08",
+                             ["Договоры (11).xlsx"], rows_total=4)
+
+    assert await db.letter_was_processed(pool, "17") is True
+    await db.remember_letter(pool, "17", "тот же", ["Договоры (11).xlsx"], 4)   # без дублей
