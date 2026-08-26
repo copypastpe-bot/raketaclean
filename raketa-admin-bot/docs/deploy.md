@@ -126,16 +126,16 @@ CREATE SCHEMA IF NOT EXISTS adminbot AUTHORIZATION adminbot;
 GRANT CREATE ON DATABASE clients_db TO adminbot;
 ```
 
-Затем миграции — все три подряд, порядок важен:
+Затем миграции — по порядку, он важен. Скрипт обновления применяет их сам
+(`for sql in migrations/*.sql`), вручную это нужно только при первой установке:
 
 ```bash
 export ADMINBOT_DB_DSN='postgresql://adminbot:ПАРОЛЬ@127.0.0.1:5432/clients_db'
 cd /opt/raketa-admin-bot/app
-psql "$ADMINBOT_DB_DSN" -f migrations/001_adminbot_schema.sql
-psql "$ADMINBOT_DB_DSN" -f migrations/002_settings.sql
-psql "$ADMINBOT_DB_DSN" -f migrations/003_question.sql
+for sql in migrations/*.sql; do psql "$ADMINBOT_DB_DSN" -v ON_ERROR_STOP=1 -f "$sql"; done
 psql "$ADMINBOT_DB_DSN" -tAc "select tablename from pg_tables where schemaname='adminbot'"
-# ожидаемо: amo_links, amo_actions, settings
+# ожидаемо: amo_links, amo_actions, settings, carpet_links, carpet_actions,
+#           carpet_letters, gcal_events, gcal_actions, gcal_cursor
 ```
 
 Проверка, что правило «в чужие таблицы не пишем» держится не на честном слове:
@@ -164,6 +164,9 @@ AMO_BASE_URL=https://raketacleancrm.amocrm.ru
 AMO_TOKEN=<токен интеграции «Робот amo_sync», см. ~/.amo_write.env>
 AMO_SYNC_ENABLED=0      # первый запуск — с выключенной функцией
 AMO_SYNC_DRY_RUN=1      # и в режиме репетиции
+CARPETS_ENABLED=0       # ковры от партнёра — свой выключатель
+GCAL_ENABLED=0          # календарь — тоже свой
+GCAL_DRY_RUN=1
 ```
 
 Файл `.env` в git не попадает и не должен: в нём токены и пароль.
@@ -209,6 +212,18 @@ admin ALL=(root) NOPASSWD: /usr/bin/systemctl restart raketa-admin-bot.service, 
 
 Кнопка «Поехали» проводит хвост по-настоящему даже в режиме репетиции — это
 осознанное разрешение владельца, а не сбой.
+
+Календарь (этап 2) включается отдельно и тем же порядком. Доступ к нему настраивается
+один раз по инструкции `docs/gcal_access.md`, после чего:
+
+```text
+шаг 1: sudo raketa-admin-bot-update --gcal-check       проверка доступа, в CRM не пишем
+шаг 2: sudo raketa-admin-bot-update --gcal-on --gcal-rehearsal   день-два репетиции
+шаг 3: sudo raketa-admin-bot-update --gcal-live        боевой режим
+```
+
+Записи, лежавшие в календаре до включения, робот в работу не берёт — он их только
+запоминает. Это решение владельца: будущие заказы постоянных клиентов он ведёт сам.
 
 ## 9. Обновление кода
 

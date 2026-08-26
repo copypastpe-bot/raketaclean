@@ -9,6 +9,9 @@
 #   sudo raketa-admin-bot-update --report      что робот записал (ничего не меняет)
 #   sudo raketa-admin-bot-update --carpets-on --carpets-rehearsal   ковры: репетиция
 #   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
+#   sudo raketa-admin-bot-update --gcal-on --gcal-rehearsal         календарь: репетиция
+#   sudo raketa-admin-bot-update --gcal-live                        календарь: боевой режим
+#   sudo raketa-admin-bot-update --gcal-check                       проверить доступ к календарю
 #
 # Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
 # меняются только два выключателя, и каждый раз печатается итоговое состояние.
@@ -21,6 +24,9 @@ REPORT=""
 BACKLOG_FROM=""
 CARPETS=""
 CARPETS_DRY=""
+GCAL=""
+GCAL_DRY=""
+GCAL_CHECK=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
@@ -33,6 +39,11 @@ for arg in "$@"; do
         --carpets-off)       CARPETS=0 ;;
         --carpets-live)      CARPETS_DRY=0 ;;
         --carpets-rehearsal) CARPETS_DRY=1 ;;
+        --gcal-on)        GCAL=1 ;;
+        --gcal-off)       GCAL=0 ;;
+        --gcal-live)      GCAL_DRY=0 ;;
+        --gcal-rehearsal) GCAL_DRY=1 ;;
+        --gcal-check)     GCAL_CHECK=1 ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -55,6 +66,13 @@ if [ -n "$REPORT" ]; then
                left(coalesce(last_error, ''), 30) AS ошибка,
                to_char(updated_at AT TIME ZONE 'Europe/Moscow', 'DD.MM HH24:MI') AS обновлено
         FROM adminbot.carpet_links ORDER BY partner_id"
+    echo "=== Записи календаря ==="
+    sudo -u adminbot psql "$DSN" -P pager=off -c "
+        SELECT event_id AS запись, kind AS вид, status AS состояние,
+               order_date AS \"дата заказа\", real_lead_id AS сделка,
+               left(coalesce(skip_reason, last_error, ''), 35) AS примечание,
+               to_char(updated_at AT TIME ZONE 'Europe/Moscow', 'DD.MM HH24:MI') AS обновлено
+        FROM adminbot.gcal_events ORDER BY updated_at DESC LIMIT 25"
     echo "=== Последние действия в amoCRM ==="
     sudo -u adminbot psql "$DSN" -P pager=off -c "
         SELECT order_id AS заказ, action AS действие, amo_id AS объект,
@@ -120,12 +138,23 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$BACKLOG_FROM" ] && set_flag AMO_SYNC_BACKLOG_FROM "$BACKLOG_FROM"
 [ -n "$CARPETS" ] && set_flag CARPETS_ENABLED "$CARPETS"
 [ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
+[ -n "$GCAL" ] && set_flag GCAL_ENABLED "$GCAL"
+[ -n "$GCAL_DRY" ] && set_flag GCAL_DRY_RUN "$GCAL_DRY"
 
 # Доступы к почте робота лежат отдельным файлом у admin. Переносим их в настройки
 # службы один раз: сама служба читает только свой .env.
 if ! grep -q "^MAIL_USER=" "$ENV_FILE" && [ -f /home/admin/.mail_robot.env ]; then
     grep -E "^MAIL_[A-Z_]+=" /home/admin/.mail_robot.env >> "$ENV_FILE"
     echo "доступы к почте перенесены в настройки службы"
+fi
+
+# Ключ служебного аккаунта Google владелец кладёт себе в /home/admin/.gcal.json.
+# Служба работает от другого пользователя, поэтому ключ переносим ей один раз.
+GCAL_KEY=$HOME_DIR/.gcal.json
+if [ ! -f "$GCAL_KEY" ] && [ -f /home/admin/.gcal.json ]; then
+    install -o adminbot -g adminbot -m 0600 /home/admin/.gcal.json "$GCAL_KEY"
+    set_flag GCAL_SERVICE_ACCOUNT_FILE "$GCAL_KEY"
+    echo "ключ служебного аккаунта Google перенесён в настройки службы"
 fi
 
 now_enabled=$(grep '^AMO_SYNC_ENABLED=' "$ENV_FILE" | cut -d= -f2-)
@@ -136,6 +165,17 @@ echo "хвост с: $(grep "^AMO_SYNC_BACKLOG_FROM=" "$ENV_FILE" | cut -d= -f2-
 now_carpets=$(grep "^CARPETS_ENABLED=" "$ENV_FILE" | cut -d= -f2-)
 now_carpets_dry=$(grep "^CARPETS_DRY_RUN=" "$ENV_FILE" | cut -d= -f2-)
 echo "ковры:   $([ "$now_carpets" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_carpets_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
+now_gcal=$(grep "^GCAL_ENABLED=" "$ENV_FILE" | cut -d= -f2-)
+now_gcal_dry=$(grep "^GCAL_DRY_RUN=" "$ENV_FILE" | cut -d= -f2-)
+echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
+
+# Проверка доступа к календарю: читает три ближайшие записи и ничего не меняет.
+if [ -n "$GCAL_CHECK" ]; then
+    say "Проверка доступа к календарю"
+    cd "$APP_DIR"
+    sudo -u adminbot env $(grep -E "^GCAL_" "$ENV_FILE" | xargs) \
+        "$HOME_DIR/.venv/bin/python" -m scripts.check_calendar || true
+fi
 
 say "6. Перезапуск"
 systemctl restart raketa-admin-bot.service
