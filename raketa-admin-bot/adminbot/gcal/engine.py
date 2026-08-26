@@ -71,7 +71,12 @@ PATH_C: tuple[str, ...] = (
     "ensure_contact", "create_primary_lead", "move_primary_success",
     "wait_salesbot") + PATH_A
 
-PATHS: dict[str, tuple[str, ...]] = {"A": PATH_A, "B": PATH_B, "C": PATH_C}
+# Путь теплохода: заводим только сделку на юрлицо, и то по кнопке владельца.
+# Ни телефона, ни цены в записи нет, передавать такое в работу нечему.
+PATH_BOAT: tuple[str, ...] = ("create_boat_lead",)
+
+PATHS: dict[str, tuple[str, ...]] = {"A": PATH_A, "B": PATH_B, "C": PATH_C,
+                                     "BOAT": PATH_BOAT}
 
 _PATH_BY_KIND = {"use_realization": "A", "use_primary": "B", "create_new": "C"}
 _ASK_KINDS = ("ask_owner", "ask_owner_stale")
@@ -124,6 +129,12 @@ class CalendarEngine:
             link = await self.store.create(
                 event.event_id, kind=event.kind.value, phone10=event.phone10)
 
+        # Владелец нажал «Закрыть сделку»: закрываем её здесь, а не из Telegram —
+        # так решение не потеряется, даже если робота перезапустят сразу после
+        # нажатия, и все обращения к амо идут одним путём.
+        if link.status == "closing":
+            return await self._close_deal(link)
+
         if event.kind is EventKind.CANCELLED:
             return await self._handle_cancelled(link)
 
@@ -133,7 +144,8 @@ class CalendarEngine:
         if event.kind in SILENT_KINDS:
             return await self._skip(event, link)
 
-        if event.kind is EventKind.BOAT:
+        if event.kind is EventKind.BOAT and link.path != "BOAT":
+            # Сам теплоход робот не заводит: ни телефона, ни цены в записи нет.
             return await self._ask_owner(link, "теплоход — завести сделку?",
                                          payload=_boat_option(event))
 
@@ -157,6 +169,26 @@ class CalendarEngine:
         reason = event.skip_reason or SILENT_KINDS[event.kind]
         return await self.store.update(event.event_id, kind=event.kind.value,
                                        status="skipped", skip_reason=reason)
+
+    async def _close_deal(self, link: CalendarLink) -> CalendarLink:
+        """Закрыть сделку как несостоявшуюся — по прямому подтверждению владельца."""
+        lead_id = link.real_lead_id or link.primary_lead_id
+        lead = await self._get_lead(lead_id)
+        pipeline_id = int((lead or {}).get("pipeline_id") or ids.PIPELINE_REALIZATION)
+
+        if lead is not None and int(lead.get("status_id") or 0) in ids.STATUSES_FINAL:
+            # Пока карточка висела, сделку закрыли руками — второй раз не трогаем.
+            return await self.store.update(link.event_id, status="cancelled",
+                                           skip_reason="сделка уже закрыта")
+
+        await self.store.log(link.event_id, "move_lead", dry_run=self.dry_run,
+                             entity="lead", amo_id=lead_id,
+                             payload={"status_id": ids.STATUS_CLOSED})
+        await self.amo.move_lead(lead_id, pipeline_id, ids.STATUS_CLOSED)
+        await self.amo.add_note(lead_id, "🤖 Заказ отменён: запись удалена из календаря. "
+                                         "Закрыто по подтверждению владельца.")
+        return await self.store.update(link.event_id, status="cancelled",
+                                       skip_reason="сделка закрыта по вашему подтверждению")
 
     async def _handle_cancelled(self, link: CalendarLink) -> CalendarLink:
         """Запись удалена = заказ отменён.
@@ -196,8 +228,14 @@ class CalendarEngine:
         scratch.duplicates = tuple(decision.duplicates)
 
         if decision.kind in _ASK_KINDS:
-            return await self._ask_owner(link, decision.kind,
-                                         payload={"options": list(decision.options)})
+            # Варианты кладём рядом с записью вместе с воронкой: карточку владельцу
+            # может отправить уже другой проход, а по ответу надо знать, лид это
+            # первичной воронки или готовая сделка реализации.
+            options = [{"lead_id": info.lead_id, "pipeline_id": info.pipeline_id,
+                        "date": info.order_date.isoformat() if info.order_date else None,
+                        "name": info.name}
+                       for info in candidates if info.lead_id in decision.options]
+            return await self._ask_owner(link, decision.kind, payload={"options": options})
 
         fields: dict[str, Any] = {"path": _PATH_BY_KIND[decision.kind],
                                   "status": "in_progress"}
@@ -290,6 +328,37 @@ class CalendarEngine:
                 status_id=ids.PRIM_STAGE_NEW_LEAD,
                 contact_id=scratch.contact_id,
                 custom_fields=self._lead_fields(event, existing=None, creating=True),
+            ))
+        if intent and intent.entity_id:
+            await self.store.update(event.event_id, primary_lead_id=intent.entity_id)
+        return StepResult()
+
+    async def _step_create_boat_lead(self, event: ParsedEvent,
+                                     link: CalendarLink) -> StepResult:
+        """Сделка по рейсу теплохода: юрлицо, дата, название судна.
+
+        Телефона и цены в записи нет, поэтому контакт не заводим и в работу
+        не передаём — остальное владелец заполняет сам (решение 7).
+        """
+        when = event.order_date.strftime("%d.%m") if event.order_date else ""
+        fields = [
+            enums_field(ids.FIELD_CLIENT_TYPE, [ids.CLIENT_TYPE_COMPANY]),
+            enums_field(ids.FIELD_DISTRICT, [ids.DISTRICT_ENUMS["юридическое лицо"]]),
+        ]
+        if event.order_date:
+            moment = event.start_at or datetime.combine(
+                event.order_date, time(hour=9), tzinfo=MOSCOW_TZ)
+            fields.append(datetime_field(ids.FIELD_ORDER_DATETIME, moment))
+        if event.summary:
+            fields.append(text_field(ids.FIELD_COMMENT, f"Из календаря: «{event.summary}»"))
+
+        intent = await self._write(
+            "create_lead", event, None,
+            self.amo.create_lead(
+                name=f"Теплоход «{event.client_name or 'без названия'}» {when}".strip(),
+                pipeline_id=ids.PIPELINE_PRIMARY,
+                status_id=ids.PRIM_STAGE_NEW_LEAD,
+                custom_fields=fields,
             ))
         if intent and intent.entity_id:
             await self.store.update(event.event_id, primary_lead_id=intent.entity_id)

@@ -242,3 +242,59 @@ async def test_unknown_district_leaves_the_field_empty(amo):
     await engine.process(an_order(district=None))
 
     assert ids.FIELD_DISTRICT not in sent_fields(amo)
+
+
+# --- то, что владелец подтвердил кнопкой ---
+
+async def test_confirmed_cancellation_closes_the_deal(amo):
+    """Владелец нажал «Закрыть сделку» — закрывает её обычный проход, не Telegram."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="closing", real_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert amo.calls_of("move_lead") == [
+        (41400001, ids.PIPELINE_REALIZATION, ids.STATUS_CLOSED)]
+    assert link.status == "cancelled"
+
+
+async def test_boat_deal_is_created_after_confirmation(amo):
+    """Теплоход: сделка на юрлицо, без телефона и суммы (решение 7)."""
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    boat = ParsedEvent(event_id="evt-boat", kind=EventKind.BOAT,
+                       order_date=date(2026, 9, 12), client_name="Толстой",
+                       summary="Толстой с 9:00")
+
+    asked = await engine.process(boat)
+    assert asked.status == "waiting_owner"             # сам не заводит
+
+    await store.update("evt-boat", status="new", path="BOAT", question=None)
+    link = await engine.process(boat)
+
+    created = amo.calls_of("create_lead")[0]
+    assert "Толстой" in created["name"]
+    assert created["pipeline_id"] == ids.PIPELINE_PRIMARY
+    fields = {field["field_id"]: field for field in created["custom_fields"]}
+    assert fields[ids.FIELD_CLIENT_TYPE]["values"] == [{"enum_id": ids.CLIENT_TYPE_COMPANY}]
+    assert fields[ids.FIELD_DISTRICT]["values"] == [
+        {"enum_id": ids.DISTRICT_ENUMS["юридическое лицо"]}]
+    assert "price" not in created                      # сумму ставит владелец
+    assert link.status == "done"
+
+
+async def test_deal_closed_by_owner_before_the_answer(amo):
+    """Пока карточка висела, сделку закрыли руками — второй раз не трогаем."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", real_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert link.status == "cancelled"
+    assert amo.calls_of("move_lead") == []

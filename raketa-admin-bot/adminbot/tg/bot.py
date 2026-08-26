@@ -21,7 +21,9 @@ from typing import Any, Optional
 from aiogram import F, Router
 from aiogram.filters import BaseFilter, Command
 
+from adminbot.amo import ids
 from adminbot.control import ControlPanel
+from adminbot.tg.calendar_cards import CHOICE_PREFIX as GCAL_PREFIX, parse_calendar_choice
 from adminbot.tg.cards import (
     CARPET_PREFIX, carpet_report_text, parse_carpet_choice,
     BACKLOG_GO, BACKLOG_HOLD, CHOICE_PREFIX, PATH_BY_PIPELINE, live_report_text,
@@ -213,6 +215,76 @@ class CarpetAnswers:
         log.info("Ковры, заказ партнёра №%s: владелец выбрал %s", partner_id, kind)
         await callback.answer()
         await callback.message.edit_text(f"Ковры, заказ №{partner_id}: {reply}")
+
+
+class CalendarAnswers:
+    """Нажатия на кнопках карточек календаря.
+
+    Запись находится по сообщению, на кнопку которого нажали: идентификатор
+    записи Google слишком длинный, чтобы возить его в кнопке (лимит Telegram —
+    64 байта на все данные).
+
+    Ответ владельца в amoCRM напрямую не идёт: он записывается рядом с записью,
+    а работу доделает обычный проход наблюдателя. Поэтому решение не потеряется,
+    даже если робота перезапустят сразу после нажатия.
+    """
+
+    # Что записать по каждому ответу и что сказать владельцу.
+    CHOICES: dict[str, tuple[dict, str]] = {
+        "close": ({"status": "closing"}, "закрою сделку как несостоявшуюся."),
+        "keep": ({"status": "cancelled",
+                  "skip_reason": "владелец оставил сделку как есть"},
+                 "оставляю сделку как есть."),
+        "boat_create": ({"status": "new", "path": "BOAT"}, "заведу сделку на юрлицо."),
+        "boat_skip": ({"status": "skipped", "skip_reason": "теплоход — пропущен владельцем"},
+                      "пропускаю."),
+        "new": ({"status": "new", "path": "C"}, "создам новую сделку с нуля."),
+        "manual": ({"status": "skipped", "skip_reason": "владелец разбирается сам"},
+                   "понял, оставляю вам."),
+        "retry": ({"status": "new"}, "проверю ещё раз."),
+    }
+
+    def __init__(self, *, owner_tg_id: int, store: Any) -> None:
+        self.owner_tg_id = owner_tg_id
+        self.store = store
+
+    async def on_choice(self, callback: Any) -> None:
+        user = getattr(callback, "from_user", None)
+        if not (user and user.id == self.owner_tg_id):
+            return
+
+        choice = parse_calendar_choice(getattr(callback, "data", None))
+        if choice is None:
+            await callback.answer()
+            return
+
+        message_id = getattr(getattr(callback, "message", None), "message_id", None)
+        link = await self.store.find_by_question_msg(message_id)
+        if link is None:
+            await callback.answer("Этой записи у меня уже нет.")
+            return
+
+        fields, reply = self._apply(choice, link)
+        await self.store.update(link.event_id, question=None, **fields)
+        log.info("Календарь, запись %s: владелец выбрал %s", link.event_id, choice)
+        await callback.answer()
+        await callback.message.edit_text(f"Запись календаря: {reply}")
+
+    def _apply(self, choice: str, link: Any) -> tuple[dict, str]:
+        if choice in self.CHOICES:
+            return dict(self.CHOICES[choice][0]), self.CHOICES[choice][1]
+
+        # Выбрана конкретная сделка. Путь зависит от воронки: готовую сделку
+        # реализации остаётся дозаполнить, а лид первичной нужно ещё передать
+        # в работу и дождаться автосделки.
+        lead_id = int(choice.removeprefix("lead_"))
+        pipeline_id = next((option.get("pipeline_id")
+                            for option in ((link.question or {}).get("options") or [])
+                            if option.get("lead_id") == lead_id), None)
+        path = "B" if pipeline_id == ids.PIPELINE_PRIMARY else "A"
+        fields = {"status": "new", "path": path,
+                  ("primary_lead_id" if path == "B" else "real_lead_id"): lead_id}
+        return fields, f"беру сделку #{lead_id}."
 
 
 class OwnerAnswers:

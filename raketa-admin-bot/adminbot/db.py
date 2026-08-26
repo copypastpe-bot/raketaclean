@@ -710,3 +710,19 @@ async def save_calendar_cursor(own_pool: asyncpg.Pool, sync_token: Optional[str]
             """,
             sync_token, sync_from,
         )
+
+
+async def find_calendar_link_by_question_msg(own_pool: asyncpg.Pool,
+                                             message_id: int) -> Optional[CalendarLink]:
+    """Запись, по которой владельцу отправлена именно эта карточка.
+
+    Нажатие приходит без идентификатора записи: он у Google длинный, а в кнопку
+    Telegram влезает 64 байта на всё. Зато известно сообщение, на котором нажали.
+    """
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM adminbot.gcal_events WHERE question_msg_id = $1 "
+            "ORDER BY updated_at DESC LIMIT 1",
+            message_id,
+        )
+    return _calendar_from_row(row)

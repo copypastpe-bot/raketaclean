@@ -24,7 +24,7 @@ from adminbot.models import CalendarLink
 # `waiting_owner` здесь тоже есть — движок по нему ничего не делает, но карточку
 # может понадобиться дослать, если Telegram в прошлый раз не ответил.
 ACTIVE_STATUSES: tuple[str, ...] = (
-    "new", "in_progress", "waiting_salesbot", "waiting_owner", "error",
+    "new", "in_progress", "waiting_salesbot", "waiting_owner", "closing", "error",
 )
 
 
@@ -47,6 +47,8 @@ class CalendarStore(Protocol):
     async def taken_leads(self, phone10: str, exclude_event_id: str) -> set[int]: ...
 
     async def pending(self) -> list[CalendarLink]: ...
+
+    async def find_by_question_msg(self, message_id: Optional[int]) -> Optional[CalendarLink]: ...
 
     async def cursor(self) -> tuple[Optional[str], Optional[date]]: ...
 
@@ -111,6 +113,13 @@ class MemoryCalendarStore:
     async def pending(self) -> list[CalendarLink]:
         return [link for link in self.links.values() if link.status in ACTIVE_STATUSES]
 
+    async def find_by_question_msg(self, message_id: Optional[int]) -> Optional[CalendarLink]:
+        """Запись, по которой владельцу отправлена именно эта карточка."""
+        if message_id is None:
+            return None
+        return next((link for link in self.links.values()
+                     if link.question_msg_id == int(message_id)), None)
+
     async def cursor(self) -> tuple[Optional[str], Optional[date]]:
         return self._cursor
 
@@ -153,6 +162,11 @@ class PgCalendarStore:
 
     async def pending(self) -> list[CalendarLink]:
         return await db.fetch_pending_calendar_links(self._pool, ACTIVE_STATUSES)
+
+    async def find_by_question_msg(self, message_id: Optional[int]) -> Optional[CalendarLink]:
+        if message_id is None:
+            return None
+        return await db.find_calendar_link_by_question_msg(self._pool, int(message_id))
 
     async def cursor(self) -> tuple[Optional[str], Optional[date]]:
         return await db.get_calendar_cursor(self._pool)
