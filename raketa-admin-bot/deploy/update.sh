@@ -5,6 +5,8 @@
 #   sudo raketa-admin-bot-update --disable     выключить функцию
 #   sudo raketa-admin-bot-update --live        боевой режим: писать в amoCRM
 #   sudo raketa-admin-bot-update --rehearsal   репетиция: решать, но не писать
+#   sudo raketa-admin-bot-update --backlog-from=2026-08-14   с какой даты разбирать заказы
+#   sudo raketa-admin-bot-update --report      что робот записал (ничего не меняет)
 #
 # Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
 # меняются только два выключателя, и каждый раз печатается итоговое состояние.
@@ -14,6 +16,7 @@ set -euo pipefail
 ENABLED=""
 DRY_RUN=""
 REPORT=""
+BACKLOG_FROM=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
@@ -21,6 +24,7 @@ for arg in "$@"; do
         --live)      DRY_RUN=0 ;;
         --rehearsal) DRY_RUN=1 ;;
         --report)    REPORT=1 ;;
+        --backlog-from=*) BACKLOG_FROM="${arg#*=}" ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -98,11 +102,13 @@ set_flag() {                                  # имя переменной, н�
 }
 [ -n "$ENABLED" ] && set_flag AMO_SYNC_ENABLED "$ENABLED"
 [ -n "$DRY_RUN" ] && set_flag AMO_SYNC_DRY_RUN "$DRY_RUN"
+[ -n "$BACKLOG_FROM" ] && set_flag AMO_SYNC_BACKLOG_FROM "$BACKLOG_FROM"
 
 now_enabled=$(grep '^AMO_SYNC_ENABLED=' "$ENV_FILE" | cut -d= -f2-)
 now_dry=$(grep '^AMO_SYNC_DRY_RUN=' "$ENV_FILE" | cut -d= -f2-)
 echo "функция: $([ "$now_enabled" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
 echo "режим:   $([ "$now_dry" = 1 ] && echo 'репетиция (в amoCRM не пишем)' || echo 'БОЕВОЙ (пишем в amoCRM)')"
+echo "хвост с: $(grep "^AMO_SYNC_BACKLOG_FROM=" "$ENV_FILE" | cut -d= -f2-)"
 
 say "6. Перезапуск"
 systemctl restart raketa-admin-bot.service

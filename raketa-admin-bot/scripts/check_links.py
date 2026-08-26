@@ -23,7 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import dotenv_values
 
+from adminbot.amo import ids
 from adminbot.amo.client import AmoClient
+from adminbot.amo.fields import order_date_msk
 from adminbot.phone import mask
 from scripts.history_exam import find_fact_lead
 from scripts.run_orders import DEFAULT_AMO_ENV, DEFAULT_BOT_ENV, load_orders
@@ -73,7 +75,9 @@ async def main() -> int:
                 taken.add(lead_id)
                 linked.append((order, lead_id, source))
             else:
-                missing.append((order, None, "сделки не нашлось"))
+                # Проведённой сделки нет. Показываем, что у клиента вообще есть:
+                # открытая сделка — это одно, пустая карточка — совсем другое.
+                missing.append((order, None, _describe_leads(leads)))
             await asyncio.sleep(args.pause)
     finally:
         await client.close()
@@ -92,6 +96,31 @@ SOURCE_NAMES = {
     "order_date": "по дате заказа",
     "closed": "по дате закрытия",
 }
+
+PIPELINE_NAMES = {
+    ids.PIPELINE_PRIMARY: "первичная",
+    ids.PIPELINE_REALIZATION: "реализация",
+    ids.PIPELINE_CARPETS: "ковры",
+    ids.PIPELINE_CARPETS_LEGACY: "ковры",
+}
+
+
+def _describe_leads(leads: list[dict]) -> str:
+    """Что вообще есть у клиента в CRM, если проведённой сделки не нашлось."""
+    if not leads:
+        return "у клиента нет ни одной сделки"
+
+    parts = []
+    for lead in leads[:4]:
+        pipeline = PIPELINE_NAMES.get(int(lead.get("pipeline_id") or 0), "другая воронка")
+        status_id = int(lead.get("status_id") or 0)
+        state = ("проведена" if status_id == ids.STATUS_SUCCESS
+                 else "закрыта" if status_id == ids.STATUS_CLOSED else "открыта")
+        when = order_date_msk(lead)
+        parts.append(f"#{lead['id']} {pipeline}/{state}"
+                     + (f" от {when:%d.%m}" if when else ""))
+    tail = f" и ещё {len(leads) - 4}" if len(leads) > 4 else ""
+    return "есть: " + ", ".join(parts) + tail
 
 
 def _print_table(title: str, rows: list[tuple]) -> None:
