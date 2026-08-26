@@ -30,24 +30,29 @@ ENV_FILE=$HOME_DIR/.env
 
 say() { printf '\n=== %s ===\n' "$1"; }
 
+say "1. Код"
+rsync -a --delete --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
+      --exclude '.pytest_cache' "$SRC_DIR/" "$APP_DIR/"
+chown -R adminbot:adminbot "$APP_DIR"
+echo "обновлено из $SRC_DIR"
+
 say "0. Право обновлять без пароля"
-# Кладём этот же скрипт в системный каталог (менять его сможет только root)
-# и разрешаем запускать именно его. Так обновления идут без пароля владельца,
-# а список разрешённого остаётся коротким и понятным.
+# Рабочая копия скрипта лежит в системном каталоге: менять её может только root,
+# а запускать разрешено пользователю admin. Ставим её из свежескопированного кода,
+# поэтому скрипт обновляет сам себя и правило не приходится трогать руками.
 INSTALLED=/usr/local/sbin/raketa-admin-bot-update
-install -o root -g root -m 0755 "${BASH_SOURCE[0]}" "$INSTALLED"
+if ! cmp -s "$APP_DIR/deploy/update.sh" "$INSTALLED"; then
+    install -o root -g root -m 0755 "$APP_DIR/deploy/update.sh" "$INSTALLED"
+    echo "скрипт обновлён"
+else
+    echo "скрипт уже свежий"
+fi
 cat > /etc/sudoers.d/raketa-admin-bot <<'SUDO'
 admin ALL=(root) NOPASSWD: /usr/local/sbin/raketa-admin-bot-update
 admin ALL=(root) NOPASSWD: /usr/bin/systemctl restart raketa-admin-bot.service, /usr/bin/systemctl start raketa-admin-bot.service, /usr/bin/systemctl stop raketa-admin-bot.service, /usr/bin/systemctl status raketa-admin-bot.service
 SUDO
 chmod 0440 /etc/sudoers.d/raketa-admin-bot
 visudo -c -q -f /etc/sudoers.d/raketa-admin-bot && echo "правило установлено и проверено"
-
-say "1. Код"
-rsync -a --delete --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
-      --exclude '.pytest_cache' "$SRC_DIR/" "$APP_DIR/"
-chown -R adminbot:adminbot "$APP_DIR"
-echo "обновлено из $SRC_DIR"
 
 say "2. Зависимости"
 sudo -u adminbot "$HOME_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
