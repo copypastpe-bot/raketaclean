@@ -55,7 +55,7 @@ async def test_preview_shows_the_plan_without_changing_anything():
     assert live_amo.calls == []                    # боевой клиент не вызывался
 
 
-async def test_preview_titles_are_readable_and_mask_the_phone():
+async def test_preview_titles_are_readable_and_show_the_phone():
     rehearsal_amo = FakeAmo(dry_run=True)
     open_realization_lead(rehearsal_amo, 41400001)
 
@@ -64,8 +64,8 @@ async def test_preview_titles_are_readable_and_mask_the_phone():
     assert "Заказ №582" in plan[0].title
     assert "Ирина" in plan[0].title
     assert "5 950" in plan[0].title
-    assert "…1067" in plan[0].title
-    assert "9601861067" not in plan[0].title
+    assert "+79601861067" in plan[0].title       # владельцу — номер целиком
+    assert "24.08.2026" in plan[0].title        # и дата заказа с годом
 
 
 async def test_go_processes_the_same_orders_for_real():

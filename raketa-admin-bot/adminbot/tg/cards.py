@@ -18,7 +18,7 @@ from typing import Any, Optional, Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adminbot.amo import ids
-from adminbot.phone import mask
+from adminbot.phone import for_owner, mask
 from adminbot.sync.backlog import PlannedOrder, money
 
 # Приставка callback-данных карточки-вопроса: amosync:{номер заказа}:{выбор}.
@@ -118,9 +118,9 @@ def _order_line(order: Any) -> str:
     parts = [f"Заказ №{order.order_id}"]
     if getattr(order, "client_name", None):
         parts.append(order.client_name)
-    parts.append(mask(order.phone10))
+    parts.append(for_owner(order.phone10))
     parts.append(f"чек {money(order.amount_total)} ₽")
-    parts.append(f"{order.created_at:%d.%m}")
+    parts.append(f"заказ {order.created_at:%d.%m.%Y %H:%M}")
     return " · ".join(parts)
 
 
@@ -131,25 +131,24 @@ def summary_text(summary: Any) -> str:
     lines = ["📊 Вечерняя сверка"]
 
     if summary.waiting_owner:
-        lines += ["", f"❓ Ждут вашего ответа: {len(summary.waiting_owner)} — "
-                      f"{_numbers(summary.waiting_owner)}"]
+        lines += ["", f"❓ Ждут вашего ответа: {len(summary.waiting_owner)}"]
+        lines += _rows_block(summary.waiting_owner, with_lead=False)
     if summary.stuck:
         lines += ["", f"⚠️ Зависли: {len(summary.stuck)}"]
-        lines += [f"   • №{row.order_id}: {row.detail}" for row in summary.stuck if row.detail]
+        lines += _rows_block(summary.stuck)
     if summary.missed:
-        lines += ["", f"🕳 Не разобрано: {len(summary.missed)} — "
-                      f"{', '.join('№' + str(order_id) for order_id in summary.missed)}"]
+        lines += ["", f"🕳 Не разобрано: {len(summary.missed)}"]
+        lines += _rows_block(summary.missed, with_lead=False)
 
     lines.append("")
     lines.append(f"✅ Проведено: {len(summary.processed)}")
-    if summary.processed:
-        lines.append(f"   {_pairs(summary.processed)}")
+    lines += _rows_block(summary.processed)
     if summary.created:
         lines.append(f"🆕 Создано новых сделок: {len(summary.created)}")
-        lines.append(f"   {_pairs(summary.created)}")
+        lines += _rows_block(summary.created)
     if summary.already_done:
-        lines.append(f"👤 Вы провели сами: {len(summary.already_done)} — "
-                     f"{_numbers(summary.already_done)}")
+        lines.append(f"👤 Вы провели сами: {len(summary.already_done)}")
+        lines += _rows_block(summary.already_done)
     if summary.in_flight:
         lines.append(f"⏳ В работе прямо сейчас: {len(summary.in_flight)}")
 
@@ -158,16 +157,29 @@ def summary_text(summary: Any) -> str:
     return "\n".join(lines)
 
 
-def _numbers(rows: Sequence[Any]) -> str:
-    return ", ".join(f"№{row.order_id}" for row in rows)
+def _rows_block(rows: Sequence[Any], *, with_lead: bool = True) -> list[str]:
+    """Строки сводки: заказ, телефон, дата и сделка.
 
-
-def _pairs(rows: Sequence[Any]) -> str:
-    """«№581 → #41400001»: по какому заказу какая сделка."""
-    return ", ".join(
-        f"№{row.order_id} → #{row.lead_id}" if row.lead_id else f"№{row.order_id}"
-        for row in rows
-    )
+    Телефон и дата здесь затем, чтобы владелец понимал, о ком речь, прямо
+    из сообщения — без похода в CRM.
+    """
+    lines = []
+    for row in rows:
+        parts = [f"№{row.order_id}"]
+        phone = getattr(row, "phone10", None)
+        if phone:
+            parts.append(for_owner(phone))
+        when = getattr(row, "order_date", None)
+        if when:
+            parts.append(f"{when:%d.%m.%Y}")
+        line = "   • " + " · ".join(parts)
+        if with_lead and getattr(row, "lead_id", None):
+            line += f" → #{row.lead_id}"
+        detail = getattr(row, "detail", None)
+        if detail:
+            line += f" ({detail})"
+        lines.append(line)
+    return lines
 
 
 # --- предпросмотр хвоста ---
@@ -272,15 +284,17 @@ def carpet_question_card(row: Any, question: Optional[dict]):
     head = [f"🧶 Ковры · заказ партнёра №{row.partner_id}"]
     if getattr(row, "client_name", None):
         head.append(row.client_name)
-    head.append(mask(row.phone10))
+    head.append(for_owner(row.phone10))
     if row.is_refusal:
         head.append("ОТКАЗ")
     else:
         head.append(f"{money(row.amount)} ₽")
     if getattr(row, "district", None):
         head.append(row.district)
+    if row.added_date:
+        head.append(f"заказ у партнёра {row.added_date:%d.%m.%Y}")
     if row.return_date:
-        head.append(f"сдано {row.return_date:%d.%m}")
+        head.append(f"сдано {row.return_date:%d.%m.%Y}")
 
     lines = [" · ".join(head), ""]
     if row.is_refusal and row.refusal_reason:

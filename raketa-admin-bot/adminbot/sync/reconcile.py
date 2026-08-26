@@ -35,22 +35,41 @@ _OWNER_PATH = "done"          # владелец провёл сделку са�
 
 
 @dataclass(frozen=True)
+class OrderBrief:
+    """Заказ в том виде, в каком он нужен сводке: номер, телефон, когда был."""
+
+    order_id: int
+    phone10: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """Срез состояния за период: что робот записал и какие заказы вообще есть."""
 
     links: tuple[AmoLink, ...]
-    order_ids: tuple[int, ...]
+    orders: tuple[OrderBrief, ...] = ()
+
+    @property
+    def order_ids(self) -> tuple[int, ...]:
+        return tuple(order.order_id for order in self.orders)
 
 
 @dataclass(frozen=True)
 class SummaryRow:
-    """Одна строка сводки — заказ и то, чем он закончился."""
+    """Одна строка сводки — заказ и то, чем он закончился.
+
+    Телефон и дата заказа здесь не для красоты: владелец читает сводку в телефоне
+    и должен видеть, о ком речь, не открывая CRM.
+    """
 
     order_id: int
     status: str
     path: Optional[str] = None
     lead_id: Optional[int] = None
     detail: Optional[str] = None      # текст ошибки или причина ожидания
+    phone10: Optional[str] = None
+    order_date: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -63,7 +82,7 @@ class DailySummary:
     waiting_owner: tuple[SummaryRow, ...] = ()  # ждут решения владельца
     stuck: tuple[SummaryRow, ...] = ()          # ошибки и зависшие дольше часа
     in_flight: tuple[int, ...] = ()             # в работе прямо сейчас — это норма
-    missed: tuple[int, ...] = ()                # заказы, до которых робот не добрался
+    missed: tuple[SummaryRow, ...] = ()         # заказы, до которых робот не добрался
     total_orders: int = 0
 
     @property
@@ -97,8 +116,9 @@ def build_summary(snapshot: Snapshot, *, now: datetime,
     stuck: list[SummaryRow] = []
     in_flight: list[int] = []
 
+    by_id = {order.order_id: order for order in snapshot.orders}
     for link in snapshot.links:
-        row = _row(link)
+        row = _row(link, by_id.get(link.order_id))
         if link.status == "done":
             if link.path == _OWNER_PATH:
                 already_done.append(row)
@@ -116,7 +136,8 @@ def build_summary(snapshot: Snapshot, *, now: datetime,
             in_flight.append(link.order_id)
 
     linked_ids = {link.order_id for link in snapshot.links}
-    missed = tuple(sorted(set(snapshot.order_ids) - linked_ids))
+    missed = tuple(_row_from_order(order) for order in snapshot.orders
+                   if order.order_id not in linked_ids)
 
     return DailySummary(
         processed=tuple(processed),
@@ -184,19 +205,31 @@ class PgSummarySource:
 
     async def collect(self) -> Snapshot:
         orders = await db.fetch_orders_since(self.bot_pool, self.backlog_from)
-        order_ids = [order.order_id for order in orders]
-        links = await db.fetch_links_for_orders(self.own_pool, order_ids)
-        return Snapshot(links=tuple(links), order_ids=tuple(order_ids))
+        links = await db.fetch_links_for_orders(
+            self.own_pool, [order.order_id for order in orders])
+        return Snapshot(
+            links=tuple(links),
+            orders=tuple(OrderBrief(order.order_id, order.phone10, order.created_at)
+                         for order in orders),
+        )
 
 
-def _row(link: AmoLink) -> SummaryRow:
+def _row(link: AmoLink, order: Optional[OrderBrief] = None) -> SummaryRow:
     return SummaryRow(
         order_id=link.order_id,
         status=link.status,
         path=link.path,
         lead_id=link.real_lead_id or link.primary_lead_id,
         detail=link.last_error or _WAIT_REASONS.get(link.status),
+        phone10=(order.phone10 if order else None) or link.phone10 or None,
+        order_date=order.created_at if order else None,
     )
+
+
+def _row_from_order(order: OrderBrief) -> SummaryRow:
+    """Заказ, до которого робот не добрался: привязки нет, данные есть."""
+    return SummaryRow(order_id=order.order_id, status="missed",
+                      phone10=order.phone10, order_date=order.created_at)
 
 
 _WAIT_REASONS = {

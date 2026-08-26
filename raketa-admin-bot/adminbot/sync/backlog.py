@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
 from adminbot.models import AmoLink, Order
-from adminbot.phone import mask
+from adminbot.phone import for_owner
 from adminbot.sync.store import LinkStore, MemoryLinkStore
 
 log = logging.getLogger(__name__)
@@ -90,13 +90,13 @@ def _planned(order: Order, link: Optional[AmoLink], actions: list[dict]) -> Plan
 
 
 def order_title(order: Order) -> str:
-    """Шапка заказа для владельца. Телефон — только последние 4 цифры (правило по ПД)."""
+    """Шапка заказа для владельца: с телефоном и датой, чтобы не искать в CRM."""
     parts = [f"Заказ №{order.order_id}"]
     if order.client_name:
         parts.append(order.client_name)
-    parts.append(mask(order.phone10))
+    parts.append(for_owner(order.phone10))
     parts.append(f"{money(order.amount_total)} ₽")
-    parts.append(f"{order.created_at:%d.%m}")
+    parts.append(f"заказ {order.created_at:%d.%m.%Y %H:%M}")
     return " · ".join(parts)
 
 

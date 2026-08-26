@@ -19,7 +19,7 @@ from dotenv import dotenv_values
 
 from adminbot.carpets.report import parse_report, rows_to_process
 from adminbot.mail import MailBox, MailSettings
-from adminbot.phone import mask
+from adminbot.phone import for_owner
 
 DEFAULT_MAIL_ENV = Path.home() / ".mail_robot.env"
 
@@ -64,7 +64,7 @@ async def main() -> int:
                 mark = "отказ" if row.is_refusal else f"{row.amount} ₽"
                 dates = (f"забор {row.pickup_date:%d.%m}, сдача {row.return_date:%d.%m}"
                          if row.pickup_date and row.return_date else row.refusal_reason or "")
-                print(f"       №{row.partner_id} · {mask(row.phone10)} · {mark} · "
+                print(f"       №{row.partner_id} · {for_owner(row.phone10)} · {mark} · "
                       f"{row.district or '?'} · {dates}")
         print()
     return 0

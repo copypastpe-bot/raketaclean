@@ -32,7 +32,7 @@ from adminbot.amo import ids
 from adminbot.amo.client import AmoClient
 from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.models import Order
-from adminbot.phone import last10, mask
+from adminbot.phone import for_owner, last10
 from adminbot.sync.engine import Engine
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import MemoryLinkStore
@@ -112,8 +112,8 @@ async def load_orders(dsn: str, order_id: Optional[int], since: Optional[date]) 
 
 def describe(order: Order, link, actions: list[dict]) -> str:
     lines = [
-        f"\n=== Заказ №{order.order_id} · {mask(order.phone10)} · "
-        f"{order.created_at:%d.%m %H:%M} · {order.amount_total}₽ · "
+        f"\n=== Заказ №{order.order_id} · {for_owner(order.phone10)} · "
+        f"{order.created_at:%d.%m.%Y %H:%M} · {order.amount_total}₽ · "
         f"{', '.join(order.master_names) or 'мастер неизвестен'} ==="
     ]
     path_names = {"A": "автосделка уже есть", "B": "через лид первичной воронки",

@@ -27,7 +27,7 @@ from adminbot.carpets.engine import CarpetEngine
 from adminbot.carpets.report import parse_report, rows_to_process
 from adminbot.carpets.store import MemoryCarpetStore
 from adminbot.mail import MailBox, MailSettings
-from adminbot.phone import mask
+from adminbot.phone import for_owner
 from scripts.run_orders import DEFAULT_AMO_ENV, DEFAULT_BOT_ENV
 
 DEFAULT_MAIL_ENV = Path.home() / ".mail_robot.env"
@@ -126,8 +126,9 @@ async def main() -> int:
 
 
 def describe(row, link, actions: list[dict]) -> str:
-    head = (f"  Заказ партнёра №{row.partner_id} · {mask(row.phone10)} · "
-            f"{row.amount} ₽ · {row.district or 'район не указан'}")
+    head = (f"  Заказ партнёра №{row.partner_id} · {for_owner(row.phone10)} · "
+            f"{row.amount} ₽ · {row.district or 'район не указан'}"
+            + (f" · заказ у партнёра {row.added_date:%d.%m.%Y}" if row.added_date else ""))
     if row.is_refusal:
         head += f" · ОТКАЗ: {row.refusal_reason or 'причина не указана'}"
     elif row.return_date:

@@ -26,7 +26,7 @@ from dotenv import dotenv_values
 from adminbot.amo import ids
 from adminbot.amo.client import AmoClient
 from adminbot.amo.fields import order_date_msk
-from adminbot.phone import mask
+from adminbot.phone import for_owner
 from scripts.history_exam import find_fact_lead
 from scripts.run_orders import DEFAULT_AMO_ENV, DEFAULT_BOT_ENV, load_orders
 
@@ -130,8 +130,8 @@ def _print_table(title: str, rows: list[tuple]) -> None:
     for order, lead_id, note in rows:
         masters = ", ".join(order.master_names) or "мастер неизвестен"
         target = f"#{lead_id} ({SOURCE_NAMES.get(note, note)})" if lead_id else note
-        print(f"  №{order.order_id} · {order.created_at:%d.%m} · {order.amount_total}₽ · "
-              f"{mask(order.phone10)} · {masters} → {target}")
+        print(f"  №{order.order_id} · {order.created_at:%d.%m.%Y} · {order.amount_total}₽ · "
+              f"{for_owner(order.phone10)} · {masters} → {target}")
     print()
 
 

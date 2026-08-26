@@ -45,7 +45,7 @@ def test_question_card_shows_order_and_choices():
     assert "Заказ №596" in text
     assert "Ирина" in text
     assert "5 950" in text                      # чек с разделителем разрядов
-    assert "24.08" in text
+    assert "24.08.2026" in text                 # дата заказа с годом
     assert "какая из них" in text.lower()       # причина вопроса словами
 
     labels = [button.text for button in buttons(keyboard)]
@@ -58,12 +58,14 @@ def test_question_card_shows_order_and_choices():
     assert "amosync:596:new" in data and "amosync:596:manual" in data
 
 
-def test_question_card_masks_the_phone():
-    """Персональные данные: в сообщение уходят только последние 4 цифры."""
+def test_question_card_shows_the_full_phone_to_the_owner():
+    """Бот личный: владельцу нужен номер целиком, чтобы позвонить не заходя в CRM.
+
+    В журналах сервера телефон по-прежнему маскируется — там читатель не один.
+    """
     text, _ = question_card(make_order(), {"reason": "ask_owner", "options": []})
 
-    assert "…1067" in text
-    assert "9601861067" not in text
+    assert "+79601861067" in text
 
 
 def test_question_card_for_stale_leads_offers_a_new_deal():
@@ -135,7 +137,7 @@ def test_summary_puts_owner_business_first():
         processed=(SummaryRow(581, "done", "A", 41400001),),
         waiting_owner=(SummaryRow(596, "waiting_owner"),),
         stuck=(SummaryRow(593, "error", "A", 41400005, "AmoError: 502"),),
-        missed=(598,),
+        missed=(SummaryRow(598, "missed", phone10="9601861067"),),
         total_orders=4,
     )
 
@@ -144,6 +146,7 @@ def test_summary_puts_owner_business_first():
     assert text.index("№596") < text.index("№581")     # вопросы выше отчёта об успехах
     assert "AmoError: 502" in text
     assert "№598" in text
+    assert "+79601861067" in text                      # телефон прямо в сводке
 
 
 def test_summary_of_a_quiet_day():
@@ -209,7 +212,7 @@ def test_carpet_question_card_shows_the_order_and_choices():
     assert "Ковры" in text
     assert "44426" in text                          # номер заказа партнёра
     assert "3 995" in text
-    assert "…5325" in text and "9601945325" not in text     # телефон замаскирован
+    assert "+79601945325" in text                   # владельцу — номер целиком
     assert "23.08" in text                          # когда сдали ковры
 
     data = [button.callback_data for row_ in keyboard.inline_keyboard for button in row_]

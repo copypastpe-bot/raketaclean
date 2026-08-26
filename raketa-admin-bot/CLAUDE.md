@@ -40,7 +40,8 @@ Read and update only these registered files:
 - NEVER write to the worker bot's tables (schema `public` of the shared DB): read-only. All own state lives in a dedicated schema.
 - All amoCRM writes go through the dedicated write-scoped integration, never through the worker bot's read-only token.
 - Every feature has its own kill switch; default off until owner enables.
-- PII (client phones, names, addresses) never goes into git or logs; mask phones to last 4 digits in messages and logs.
+- PII (client phones, names, addresses) never goes into git; mask phones to last 4 digits **in logs** (`adminbot.phone.mask`).
+- Messages to the owner show the **full phone and the order date** (`adminbot.phone.for_owner`): the bot is private, he is its only recipient, and he needs to reach the client without opening CRM. Owner's decision 2026-08-26 — do not "restore" masking there.
 
 ## Working Rules
 

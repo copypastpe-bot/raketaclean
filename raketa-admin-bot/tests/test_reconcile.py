@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.models import AmoLink
 from adminbot.sync.reconcile import (
-    DailySummary, Reconciler, Snapshot, build_summary, next_run_at,
+    DailySummary, OrderBrief, Reconciler, Snapshot, build_summary, next_run_at,
 )
 
 NOW = datetime(2026, 8, 25, 21, 0, tzinfo=MOSCOW_TZ)
@@ -55,7 +55,7 @@ def test_summary_splits_orders_by_outcome():
             link(598, "done", path="C", real=41400003),      # создали с нуля
             link(599, "done", path="done", real=41400004),   # владелец провёл сам, робот привязал
         ),
-        order_ids=(596, 597, 598, 599),
+        orders=(OrderBrief(596, '9601945325', NOW), OrderBrief(597, '9601945325', NOW), OrderBrief(598, '9601945325', NOW), OrderBrief(599, '9601945325', NOW)),
     )
 
     summary = build_summary(snapshot, now=NOW)
@@ -76,7 +76,7 @@ def test_summary_collects_questions_stuck_and_missed():
             link(603, "waiting_salesbot", path="B", primary=41400007, minutes_ago=5),
             link(604, "in_progress", path="A", real=41400008, minutes_ago=120),
         ),
-        order_ids=(600, 601, 602, 603, 604, 605),            # 605 привязки не имеет вовсе
+        orders=(OrderBrief(600, '9601945325', NOW), OrderBrief(601, '9601945325', NOW), OrderBrief(602, '9601945325', NOW), OrderBrief(603, '9601945325', NOW), OrderBrief(604, '9601945325', NOW), OrderBrief(605, '9601945325', NOW)),            # 605 привязки не имеет вовсе
     )
 
     summary = build_summary(snapshot, now=NOW, stale_after_sec=3600)
@@ -85,13 +85,14 @@ def test_summary_collects_questions_stuck_and_missed():
     # зависшие: ошибка, ожидание автосделки дольше часа и застрявшая работа
     assert [row.order_id for row in summary.stuck] == [601, 602, 604]
     assert summary.stuck[0].detail == "AmoError: 502"
-    assert summary.missed == (605,)
+    assert [row.order_id for row in summary.missed] == [605]
+    assert summary.missed[0].phone10        # телефон для владельца на месте
     assert summary.in_flight == (603,)                       # свежее ожидание — это норма
     assert summary.is_quiet is False
 
 
 def test_summary_of_an_empty_day():
-    summary = build_summary(Snapshot(links=(), order_ids=()), now=NOW)
+    summary = build_summary(Snapshot(links=(), orders=()), now=NOW)
 
     assert summary.total_orders == 0
     assert summary.is_quiet is True
@@ -121,7 +122,7 @@ async def test_run_once_scans_first_then_reports():
     order = 596
     watcher = FakeWatcher()
     source = FakeSource(Snapshot(links=(link(order, "done", path="A", real=1),),
-                                 order_ids=(order,)))
+                                 orders=(OrderBrief(order, '9601945325', NOW),)))
     sent = []
 
     async def on_summary(summary):
@@ -138,7 +139,7 @@ async def test_run_once_scans_first_then_reports():
 
 async def test_run_forever_waits_until_the_appointed_hour():
     watcher = FakeWatcher()
-    source = FakeSource(Snapshot(links=(), order_ids=()))
+    source = FakeSource(Snapshot(links=(), orders=()))
     stop = asyncio.Event()
     naps = []
     moment = datetime(2026, 8, 25, 18, 0, tzinfo=MOSCOW_TZ)          # за три часа до сверки
