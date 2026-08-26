@@ -36,7 +36,7 @@ rsync -a --delete --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
 chown -R adminbot:adminbot "$APP_DIR"
 echo "обновлено из $SRC_DIR"
 
-say "0. Право обновлять без пароля"
+say "2. Право обновлять без пароля"
 # Рабочая копия скрипта лежит в системном каталоге: менять её может только root,
 # а запускать разрешено пользователю admin. Ставим её из свежескопированного кода,
 # поэтому скрипт обновляет сам себя и правило не приходится трогать руками.
@@ -54,11 +54,11 @@ SUDO
 chmod 0440 /etc/sudoers.d/raketa-admin-bot
 visudo -c -q -f /etc/sudoers.d/raketa-admin-bot && echo "правило установлено и проверено"
 
-say "2. Зависимости"
+say "3. Зависимости"
 sudo -u adminbot "$HOME_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
 echo "проверены"
 
-say "3. Миграции"
+say "4. Миграции"
 DSN=$(grep '^ADMINBOT_DB_DSN=' "$ENV_FILE" | cut -d= -f2-)
 cd /tmp
 for sql in "$APP_DIR"/migrations/*.sql; do
@@ -66,7 +66,7 @@ for sql in "$APP_DIR"/migrations/*.sql; do
     echo "  $(basename "$sql")"
 done
 
-say "4. Выключатели"
+say "5. Выключатели"
 set_flag() {                                  # имя переменной, новое значение
     if grep -q "^$1=" "$ENV_FILE"; then
         sed -i "s/^$1=.*/$1=$2/" "$ENV_FILE"
@@ -82,10 +82,10 @@ now_dry=$(grep '^AMO_SYNC_DRY_RUN=' "$ENV_FILE" | cut -d= -f2-)
 echo "функция: $([ "$now_enabled" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
 echo "режим:   $([ "$now_dry" = 1 ] && echo 'репетиция (в amoCRM не пишем)' || echo 'БОЕВОЙ (пишем в amoCRM)')"
 
-say "5. Перезапуск"
+say "6. Перезапуск"
 systemctl restart raketa-admin-bot.service
 sleep 4
 systemctl is-active raketa-admin-bot.service
 
-say "6. Журнал"
+say "7. Журнал"
 journalctl -u raketa-admin-bot.service -n 15 --no-pager | tail -15
