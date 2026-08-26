@@ -1,11 +1,27 @@
 #!/usr/bin/env bash
 # Обновление админ-бота: код из рабочей копии → служба. Выполняется от root:
-#   sudo bash /tmp/adminbot_update.sh
+#   sudo bash /tmp/adminbot_update.sh          обновить код и перезапустить
+#   sudo raketa-admin-bot-update --enable      включить функцию amo_sync
+#   sudo raketa-admin-bot-update --disable     выключить функцию
+#   sudo raketa-admin-bot-update --live        боевой режим: писать в amoCRM
+#   sudo raketa-admin-bot-update --rehearsal   репетиция: решать, но не писать
 #
-# Настройки (/opt/raketa-admin-bot/.env) не трогаются: там токены и пароль базы.
-# Миграции применяются все подряд — они написаны так, что повтор безопасен.
+# Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
+# меняются только два выключателя, и каждый раз печатается итоговое состояние.
 
 set -euo pipefail
+
+ENABLED=""
+DRY_RUN=""
+for arg in "$@"; do
+    case "$arg" in
+        --enable)    ENABLED=1 ;;
+        --disable)   ENABLED=0 ;;
+        --live)      DRY_RUN=0 ;;
+        --rehearsal) DRY_RUN=1 ;;
+        *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
+    esac
+done
 
 HOME_DIR=/opt/raketa-admin-bot
 APP_DIR=$HOME_DIR/app
@@ -45,10 +61,26 @@ for sql in "$APP_DIR"/migrations/*.sql; do
     echo "  $(basename "$sql")"
 done
 
-say "4. Перезапуск"
+say "4. Выключатели"
+set_flag() {                                  # имя переменной, новое значение
+    if grep -q "^$1=" "$ENV_FILE"; then
+        sed -i "s/^$1=.*/$1=$2/" "$ENV_FILE"
+    else
+        echo "$1=$2" >> "$ENV_FILE"
+    fi
+}
+[ -n "$ENABLED" ] && set_flag AMO_SYNC_ENABLED "$ENABLED"
+[ -n "$DRY_RUN" ] && set_flag AMO_SYNC_DRY_RUN "$DRY_RUN"
+
+now_enabled=$(grep '^AMO_SYNC_ENABLED=' "$ENV_FILE" | cut -d= -f2-)
+now_dry=$(grep '^AMO_SYNC_DRY_RUN=' "$ENV_FILE" | cut -d= -f2-)
+echo "функция: $([ "$now_enabled" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
+echo "режим:   $([ "$now_dry" = 1 ] && echo 'репетиция (в amoCRM не пишем)' || echo 'БОЕВОЙ (пишем в amoCRM)')"
+
+say "5. Перезапуск"
 systemctl restart raketa-admin-bot.service
 sleep 4
 systemctl is-active raketa-admin-bot.service
 
-say "5. Журнал"
+say "6. Журнал"
 journalctl -u raketa-admin-bot.service -n 15 --no-pager | tail -15
