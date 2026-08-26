@@ -70,6 +70,36 @@ class CarpetLink:
 
 
 @dataclass(frozen=True)
+class CalendarLink:
+    """Строка adminbot.gcal_events: что робот знает о записи календаря.
+
+    Ключ — идентификатор записи в Google: он вечный и переживает правки, поэтому
+    повторный обмен по той же записи не заводит вторую сделку.
+    """
+
+    event_id: str
+    kind: str                         # order|block|boat|rewash|unsettled|skip
+    status: str                       # new|in_progress|waiting_salesbot|waiting_owner|
+                                      # done|skipped|cancelled|error
+    phone10: Optional[str] = None
+    order_date: Optional[Any] = None  # date; заказ ведём по московской дате
+    client_name: Optional[str] = None
+    district: Optional[str] = None    # None — приставка заголовка непонятна
+    services: tuple[str, ...] = ()
+    skip_reason: Optional[str] = None
+    path: Optional[str] = None        # A|B|C — как ведём запись
+    primary_lead_id: Optional[int] = None
+    real_lead_id: Optional[int] = None
+    order_id: Optional[int] = None    # заказ бота, если он уже пришёл
+    checklist: dict[str, Any] = field(default_factory=dict)
+    question: Optional[dict[str, Any]] = None
+    question_msg_id: Optional[int] = None
+    last_error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
 class AmoLink:
     """Строка adminbot.amo_links: что робот знает и уже сделал по заказу."""
 

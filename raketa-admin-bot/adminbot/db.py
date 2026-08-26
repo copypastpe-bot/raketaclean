@@ -13,7 +13,7 @@ from typing import Any, Optional, Sequence
 
 import asyncpg
 
-from adminbot.models import AmoLink, CarpetLink, Order
+from adminbot.models import AmoLink, CalendarLink, CarpetLink, Order
 from adminbot.phone import last10
 
 # Колонки adminbot.amo_links, которые разрешено менять через update_link.
@@ -508,3 +508,205 @@ async def apply_migration(pool: asyncpg.Pool, sql_path: str) -> None:
         sql = fh.read()
     async with pool.acquire() as conn:
         await conn.execute(sql)
+
+
+# --- календарь (этап 2) ---
+
+# Колонки adminbot.gcal_events, которые разрешено менять.
+_UPDATABLE_GCAL_FIELDS = frozenset(
+    {"kind", "status", "skip_reason", "path", "phone10", "client_name", "district",
+     "services", "order_date", "event_data", "primary_lead_id", "real_lead_id",
+     "order_id", "question", "question_msg_id", "last_error"}
+)
+
+
+def _calendar_from_row(row: Optional[asyncpg.Record]) -> Optional[CalendarLink]:
+    if row is None:
+        return None
+    checklist = row["checklist"]
+    if isinstance(checklist, str):
+        checklist = json.loads(checklist)
+    question = row["question"]
+    if isinstance(question, str):
+        question = json.loads(question)
+    return CalendarLink(
+        event_id=row["event_id"],
+        kind=row["kind"],
+        status=row["status"],
+        phone10=row["phone10"],
+        order_date=row["order_date"],
+        client_name=row["client_name"],
+        district=row["district"],
+        services=tuple(row["services"] or ()),
+        skip_reason=row["skip_reason"],
+        path=row["path"],
+        primary_lead_id=row["primary_lead_id"],
+        real_lead_id=row["real_lead_id"],
+        order_id=row["order_id"],
+        checklist=checklist or {},
+        question=question,
+        question_msg_id=row["question_msg_id"],
+        last_error=row["last_error"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def get_calendar_link(own_pool: asyncpg.Pool, event_id: str) -> Optional[CalendarLink]:
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM adminbot.gcal_events WHERE event_id = $1", event_id)
+    return _calendar_from_row(row)
+
+
+async def create_calendar_link(own_pool: asyncpg.Pool, event_id: str, *, kind: str,
+                               phone10: Optional[str] = None,
+                               **fields: Any) -> CalendarLink:
+    """Взять запись календаря в работу. Повторный обмен ничего не портит.
+
+    Разобранную запись сохраняем рядом (`event_data`): робот может ждать
+    автосделку сейлзбота дольше, чем живёт содержимое одного обмена, и продолжать
+    цепочку будет нечем.
+    """
+    unknown = set(fields) - _UPDATABLE_GCAL_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля записи календаря: {sorted(unknown)}")
+
+    columns = ["event_id", "kind", "phone10", *fields]
+    values = [event_id, kind, phone10, *[fields[name] for name in fields]]
+    placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"""
+            INSERT INTO adminbot.gcal_events ({", ".join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT (event_id) DO UPDATE SET updated_at = now()
+            RETURNING *
+            """,
+            *values,
+        )
+    return _calendar_from_row(row)
+
+
+async def update_calendar_link(own_pool: asyncpg.Pool, event_id: str,
+                               **fields: Any) -> Optional[CalendarLink]:
+    unknown = set(fields) - _UPDATABLE_GCAL_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля записи календаря: {sorted(unknown)}")
+    if not fields:
+        return await get_calendar_link(own_pool, event_id)
+
+    names = list(fields)
+    assignments = ", ".join(f"{name} = ${i + 2}" for i, name in enumerate(names))
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE adminbot.gcal_events SET {assignments}, updated_at = now() "
+            f"WHERE event_id = $1 RETURNING *",
+            event_id, *[_gcal_value(name, fields[name]) for name in names],
+        )
+    return _calendar_from_row(row)
+
+
+def _gcal_value(name: str, value: Any) -> Any:
+    """Кортеж услуг в text[] уходит списком: asyncpg кортежи не принимает."""
+    if name == "services" and isinstance(value, tuple):
+        return list(value)
+    return value
+
+
+async def mark_calendar_step(own_pool: asyncpg.Pool, event_id: str, step: str) -> None:
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE adminbot.gcal_events
+            SET checklist = checklist || jsonb_build_object($2::text, to_jsonb(now())),
+                updated_at = now()
+            WHERE event_id = $1
+            """,
+            event_id, step,
+        )
+
+
+async def log_calendar_action(
+    own_pool: asyncpg.Pool, *, event_id: str, action: str, dry_run: bool,
+    amo_entity: Optional[str] = None, amo_id: Optional[int] = None,
+    payload: Optional[dict] = None,
+) -> None:
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.gcal_actions
+                (event_id, action, amo_entity, amo_id, dry_run, payload)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            event_id, action, amo_entity, amo_id, dry_run, payload,
+        )
+
+
+async def fetch_calendar_taken_leads(own_pool: asyncpg.Pool, phone10: str,
+                                     exclude_event_id: str) -> set[int]:
+    """Сделки, уже закреплённые за ДРУГИМИ записями календаря того же клиента.
+
+    Заказы бота здесь не учитываются намеренно: запись календаря и заказ из бота —
+    обычно один и тот же заказ, и общая сделка у них правильная.
+    """
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT real_lead_id, primary_lead_id FROM adminbot.gcal_events
+            WHERE phone10 = $1 AND event_id <> $2
+            """,
+            phone10, exclude_event_id,
+        )
+    taken: set[int] = set()
+    for row in rows:
+        taken.update(lead for lead in (row["real_lead_id"], row["primary_lead_id"]) if lead)
+    return taken
+
+
+async def fetch_pending_calendar_links(own_pool: asyncpg.Pool,
+                                       statuses: Sequence[str]) -> list[CalendarLink]:
+    """Записи календаря, работа по которым ещё не закончена."""
+    if not statuses:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM adminbot.gcal_events WHERE status = ANY($1::text[]) "
+            "ORDER BY order_date NULLS LAST, event_id",
+            list(statuses),
+        )
+    return [_calendar_from_row(row) for row in rows]
+
+
+async def count_calendar_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]:
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT status, count(*) AS n FROM adminbot.gcal_events GROUP BY status")
+    return {row["status"]: row["n"] for row in rows}
+
+
+async def get_calendar_cursor(own_pool: asyncpg.Pool) -> tuple[Optional[str], Optional[date]]:
+    """Закладка обмена с Google: (токен, дата включения)."""
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT sync_token, sync_from FROM adminbot.gcal_cursor WHERE id = 1")
+    if row is None:
+        return None, None
+    return row["sync_token"], row["sync_from"]
+
+
+async def save_calendar_cursor(own_pool: asyncpg.Pool, sync_token: Optional[str],
+                               sync_from: date) -> None:
+    """Сохранить закладку. В репетиции сюда не приходят — там хранилище в памяти."""
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.gcal_cursor (id, sync_token, sync_from)
+            VALUES (1, $1, $2)
+            ON CONFLICT (id) DO UPDATE
+            SET sync_token = EXCLUDED.sync_token,
+                sync_from = EXCLUDED.sync_from,
+                updated_at = now()
+            """,
+            sync_token, sync_from,
+        )

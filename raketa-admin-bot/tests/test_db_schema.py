@@ -9,7 +9,7 @@
 """
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -183,7 +183,11 @@ async def test_summary_source_sees_orders_robot_never_touched(pool):
     summary = build_summary(snapshot, now=NOW)
 
     assert [row.order_id for row in summary.processed] == [596]
-    assert summary.missed == (597,)
+    # В пропущенных лежит строка сводки, а не голый номер: владельцу нужны
+    # телефон и дата заказа прямо в сообщении (его решение 2026-08-26).
+    assert [row.order_id for row in summary.missed] == [597]
+    assert summary.missed[0].phone10 == "9159496642"
+    assert summary.missed[0].order_date is not None
     assert summary.total_orders == 2
     assert summary.is_quiet is False
 
@@ -312,3 +316,60 @@ async def test_processed_letter_is_remembered(pool):
 
     assert await db.letter_was_processed(pool, "17") is True
     await db.remember_letter(pool, "17", "тот же", ["Договоры (11).xlsx"], 4)   # без дублей
+
+
+# --- календарь (этап 2) ---
+
+
+async def test_calendar_event_survives_a_repeated_exchange(pool):
+    """Запись календаря берётся в работу один раз: ключ — вечный id записи Google.
+
+    Повторный обмен случается при каждом протухании закладки, и вторая сделка
+    по той же записи — недопустима.
+    """
+    from adminbot.gcal.store import PgCalendarStore
+
+    store = PgCalendarStore(pool)
+    await store.create("evt-1", kind="order", phone10="9601861067",
+                       order_date=date(2026, 8, 27), district="советский",
+                       services=["mattress"], client_name="Юлия")
+    await store.create("evt-1", kind="order", phone10="9601861067")
+
+    link = await store.get("evt-1")
+
+    assert link.status == "new"
+    assert link.district == "советский"
+    assert link.services == ("mattress",)
+    assert (await db.count_calendar_links_by_status(pool)) == {"new": 1}
+
+
+async def test_calendar_progress_and_bookmark_are_stored(pool):
+    from adminbot.gcal.store import PgCalendarStore
+
+    store = PgCalendarStore(pool)
+    await store.create("evt-1", kind="order", phone10="9601861067")
+
+    await store.update("evt-1", status="waiting_salesbot", primary_lead_id=41400001)
+    await store.mark_step("evt-1", "fill_primary")
+    await store.log("evt-1", "update_lead", dry_run=False, entity="lead", amo_id=41400001,
+                    payload={"price": 0})
+    await store.save_cursor("TOKEN-1", sync_from=date(2026, 8, 27))
+
+    link = await store.get("evt-1")
+    assert link.status == "waiting_salesbot"
+    assert "fill_primary" in link.checklist
+    assert [row.event_id for row in await store.pending()] == ["evt-1"]
+    assert await store.cursor() == ("TOKEN-1", date(2026, 8, 27))
+
+
+async def test_calendar_lead_taken_by_another_event_is_not_reused(pool):
+    """Одна сделка не обслуживает две записи календаря."""
+    from adminbot.gcal.store import PgCalendarStore
+
+    store = PgCalendarStore(pool)
+    await store.create("evt-1", kind="order", phone10="9601861067")
+    await store.update("evt-1", real_lead_id=41400002)
+    await store.create("evt-2", kind="order", phone10="9601861067")
+
+    assert await store.taken_leads("9601861067", exclude_event_id="evt-2") == {41400002}
+    assert await store.taken_leads("9601861067", exclude_event_id="evt-1") == set()
