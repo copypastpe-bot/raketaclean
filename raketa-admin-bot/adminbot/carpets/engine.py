@@ -60,7 +60,8 @@ STEPS_FROM_SCRATCH = ("ensure_contact", "create_primary_lead",
                       "move_primary_success", "wait_salesbot")
 
 # Сколько ждём автосделку сейлзбота, прежде чем спросить владельца.
-DEFAULT_SALESBOT_WAIT_SEC = 600
+# 40 минут — с запасом на подтормаживания амо (владелец видел до 20 минут).
+DEFAULT_SALESBOT_WAIT_SEC = 2400
 
 
 @dataclass

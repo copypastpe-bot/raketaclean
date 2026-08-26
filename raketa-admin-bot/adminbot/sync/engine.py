@@ -34,7 +34,9 @@ from adminbot.sync.store import LinkStore
 log = logging.getLogger(__name__)
 
 # Сколько ждём автосделку сейлзбота, прежде чем спросить владельца (дизайн §5.3).
-DEFAULT_SALESBOT_WAIT_SEC = 600
+# 40 минут: обычно она появляется за секунды, но амо подтормаживает — владелец
+# видел задержки до 20 минут (2026-08-26).
+DEFAULT_SALESBOT_WAIT_SEC = 2400
 
 # Виды работ → значения списка «Услуга» в амо (проверены по справочнику 2026-08-25).
 SERVICE_ENUM_BY_KIND: dict[str, int] = {

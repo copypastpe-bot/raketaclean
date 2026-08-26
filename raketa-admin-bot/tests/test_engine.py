@@ -232,8 +232,27 @@ async def test_path_b_continues_when_salesbot_created_the_deal():
     assert amo.leads[701]["status_id"] == ids.STATUS_SUCCESS
 
 
+async def test_path_b_waits_out_a_slow_salesbot():
+    """Амо подтормаживает: через 20 минут ещё ждём, а не дёргаем владельца.
+
+    Владелец видел задержки автосделки до 20 минут (2026-08-26), поэтому порог
+    поднят до 40. Лишний вопрос обходится дороже лишнего ожидания.
+    """
+    amo = FakeAmo()
+    store = FakeStore(now=lambda: ORDER_MOMENT + timedelta(minutes=1))
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NEW_LEAD,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600)
+    order = make_order()
+
+    await make_engine(amo, store).process_order(order)
+    still_waiting = make_engine(amo, store, now=lambda: ORDER_MOMENT + timedelta(minutes=20))
+    link = await still_waiting.process_order(order)
+
+    assert link.status == "waiting_salesbot"
+
+
 async def test_path_b_asks_owner_when_salesbot_is_silent_too_long():
-    """Дизайн §5.3: автосделки нет 10 минут — карточка-вопрос владельцу."""
+    """Дизайн §5.3: автосделки нет и через сорок минут — карточка-вопрос владельцу."""
     amo = FakeAmo()
     # Часы у хранилища и у движка общие: иначе «сколько уже ждём» не посчитать.
     store = FakeStore(now=lambda: ORDER_MOMENT + timedelta(minutes=1))
@@ -242,7 +261,7 @@ async def test_path_b_asks_owner_when_salesbot_is_silent_too_long():
     order = make_order()
 
     await make_engine(amo, store).process_order(order)
-    late = make_engine(amo, store, now=lambda: ORDER_MOMENT + timedelta(minutes=20))
+    late = make_engine(amo, store, now=lambda: ORDER_MOMENT + timedelta(minutes=45))
     link = await late.process_order(order)
 
     assert link.status == "waiting_owner"

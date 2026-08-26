@@ -48,6 +48,13 @@ if [ -n "$REPORT" ]; then
                left(coalesce(last_error, ''), 40) AS ошибка,
                to_char(updated_at AT TIME ZONE 'Europe/Moscow', 'DD.MM HH24:MI') AS обновлено
         FROM adminbot.amo_links ORDER BY order_id"
+    echo "=== Ковры от партнёра ==="
+    sudo -u adminbot psql "$DSN" -P pager=off -c "
+        SELECT partner_id AS \"заказ партнёра\", status AS состояние, path AS путь,
+               lead_id AS \"ковровая сделка\", primary_lead_id AS лид,
+               left(coalesce(last_error, ''), 30) AS ошибка,
+               to_char(updated_at AT TIME ZONE 'Europe/Moscow', 'DD.MM HH24:MI') AS обновлено
+        FROM adminbot.carpet_links ORDER BY partner_id"
     echo "=== Последние действия в amoCRM ==="
     sudo -u adminbot psql "$DSN" -P pager=off -c "
         SELECT order_id AS заказ, action AS действие, amo_id AS объект,
