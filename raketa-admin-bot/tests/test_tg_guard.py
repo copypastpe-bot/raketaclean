@@ -68,12 +68,24 @@ async def test_stranger_gets_refusal_and_changes_nothing():
     assert await control.is_paused() is False        # чужая команда ничего не переключила
 
 
+async def test_owner_writing_plain_text_gets_a_hint_not_a_refusal():
+    """Владелец написал «привет» — это не повод отвечать ему «бот не ваш»."""
+    commands = make_commands()
+    message = FakeMessage(OWNER_ID, "Привет")
+
+    await commands.unknown(message)
+
+    assert OWNER_ONLY_REPLY not in message.replies[0]
+    assert "/status" in message.replies[0]            # подсказываем, что умеем
+
+
 def test_router_registers_owner_commands():
     """Роутер собирается и знает все команды владельца."""
     router = build_router(make_commands())
 
     assert router.message.handlers                    # обработчики зарегистрированы
-    assert len(router.message.handlers) == 6          # пять команд и отказ для чужих
+    # пять команд, подсказка владельцу на прочие сообщения и отказ для чужих
+    assert len(router.message.handlers) == 7
     assert router.callback_query.handlers == []       # карточки не подключены — кнопок нет
 
 

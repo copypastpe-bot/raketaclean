@@ -136,6 +136,16 @@ class OwnerCommands:
     async def help(self, message: Any) -> None:
         await message.answer(HELP_TEXT)
 
+    async def unknown(self, message: Any) -> None:
+        """Владелец написал не команду. Не отказ, а короткая подсказка."""
+        await message.answer(
+            "Я понимаю только команды:\n\n"
+            "/status — что происходит\n"
+            "/backlog — хвост непроведённых заказов\n"
+            "/pause · /resume — остановить и продолжить\n"
+            "/help — подробнее"
+        )
+
     async def stranger(self, message: Any) -> None:
         user = getattr(message, "from_user", None)
         log.warning("Чужое сообщение боту от %s", getattr(user, "id", "неизвестно"))
@@ -241,7 +251,9 @@ def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None
     router.message.register(commands.pause, owner, Command("pause"))
     router.message.register(commands.resume, owner, Command("resume"))
     router.message.register(commands.help, owner, Command("help", "start"))
-    router.message.register(commands.stranger)          # порядок важен: это «всё остальное»
+    # Порядок важен: сначала владелец с любым другим сообщением, потом все прочие.
+    router.message.register(commands.unknown, owner)
+    router.message.register(commands.stranger)
 
     if answers is not None:
         router.callback_query.register(answers.on_choice, owner,
