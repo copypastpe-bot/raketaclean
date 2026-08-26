@@ -316,3 +316,46 @@ async def test_interrupted_chain_continues_from_where_it_stopped():
     await engine.process_row(order)                    # сейлзбот всё ещё молчит
 
     assert len(amo.calls_of("create_lead")) == leads_created
+
+
+# --- поля, добавленные по итогам первой боевой сверки (2026-08-26) ---
+
+async def test_order_datetime_is_the_pickup_day():
+    """«Дата и время заказа» = когда партнёр забрал ковры (решение владельца)."""
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    open_carpet_lead(amo)
+
+    await make_engine(amo, store).process_row(row())
+
+    stamp = fields_of(amo)[ids.FIELD_ORDER_DATETIME]["values"][0]["value"]
+    assert datetime.fromtimestamp(int(stamp), tz=MOSCOW_TZ).date() == date(2026, 8, 16)
+
+
+async def test_client_type_source_and_comment_are_filled():
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    open_carpet_lead(amo)
+
+    await make_engine(amo, store).process_row(row())
+
+    sent = fields_of(amo)
+    assert sent[ids.FIELD_CLIENT_TYPE]["values"][0]["enum_id"] == ids.CLIENT_TYPE_PERSON
+    assert sent[ids.FIELD_SOURCE]["values"][0]["enum_id"] == ids.SOURCE_ENUM_REPEAT
+    assert sent[ids.FIELD_COMMENT]["values"][0]["value"] == "ковры"
+
+
+async def test_operator_values_in_these_fields_are_kept():
+    """Оператор мог заполнить их сам — затирать нельзя."""
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    open_carpet_lead(amo, custom_fields_values=[
+        {"field_id": ids.FIELD_ORDER_DATETIME, "values": [{"value": 1786000000}]},
+        {"field_id": ids.FIELD_SOURCE, "values": [{"enum_id": ids.SOURCE_ENUM_WORD_OF_MOUTH}]},
+        {"field_id": ids.FIELD_COMMENT, "values": [{"value": "ковёр 3х4, пятно"}]},
+        {"field_id": ids.FIELD_CLIENT_TYPE, "values": [{"enum_id": ids.CLIENT_TYPE_COMPANY}]},
+    ])
+
+    await make_engine(amo, store).process_row(row())
+
+    sent = fields_of(amo)
+    for field_id in (ids.FIELD_ORDER_DATETIME, ids.FIELD_SOURCE,
+                     ids.FIELD_COMMENT, ids.FIELD_CLIENT_TYPE):
+        assert field_id not in sent

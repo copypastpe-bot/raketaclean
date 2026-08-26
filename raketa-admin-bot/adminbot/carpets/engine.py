@@ -22,13 +22,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
 from adminbot.amo import ids
 from adminbot.amo.client import AmoError
-from adminbot.amo.fields import MOSCOW_TZ, date_field, enum_field, field_value, text_field
+from adminbot.amo.fields import (
+    MOSCOW_TZ, date_field, datetime_field, enum_field, field_value, text_field)
 from adminbot.carpets.matcher import CarpetLead, match_carpet
 from adminbot.carpets.report import CarpetRow
 from adminbot.carpets.store import CarpetStore
@@ -36,6 +37,9 @@ from adminbot.models import CarpetLink
 from adminbot.phone import mask, normalize_phone
 
 log = logging.getLogger(__name__)
+
+# Что робот пишет в «Комментарий к заказу»: так же, как в ваших ковровых сделках.
+CARPET_COMMENT = "ковры"
 
 # Способы оплаты партнёра → «Вариант оплаты» в амо.
 PAYMENT_ENUM_BY_METHOD = {
@@ -311,6 +315,21 @@ class CarpetEngine:
             fields.append(enum_field(ids.FIELD_PAYMENT_TYPE, payment))
 
         # Ниже — поля, которые владелец мог заполнить сам. Заполненное не трогаем.
+        # Состав уточнён после первой боевой сверки: в созданных роботом сделках
+        # эти поля оставались пустыми, и владелец видел неполную карточку.
+        if row.pickup_date and not field_value(existing, ids.FIELD_ORDER_DATETIME):
+            # Дата заказа для ковров — день, когда партнёр забрал их у клиента.
+            fields.append(datetime_field(ids.FIELD_ORDER_DATETIME,
+                                         datetime.combine(row.pickup_date, time(12, 0),
+                                                          tzinfo=MOSCOW_TZ)))
+        if not field_value(existing, ids.FIELD_CLIENT_TYPE):
+            # Партнёр работает с квартирами, оплата картой или наличными.
+            fields.append(enum_field(ids.FIELD_CLIENT_TYPE, ids.CLIENT_TYPE_PERSON))
+        if not field_value(existing, ids.FIELD_SOURCE):
+            fields.append(enum_field(ids.FIELD_SOURCE, ids.SOURCE_ENUM_REPEAT))
+        if not field_value(existing, ids.FIELD_COMMENT):
+            fields.append(text_field(ids.FIELD_COMMENT, CARPET_COMMENT))
+
         if row.address and not field_value(existing, ids.FIELD_ADDRESS):
             fields.append(text_field(ids.FIELD_ADDRESS, row.address))
         if not field_value(existing, ids.FIELD_SERVICE):
