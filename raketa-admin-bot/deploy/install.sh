@@ -55,6 +55,8 @@ else
     echo "пароль базы сгенерирован"
 fi
 
+# cd /tmp: иначе postgres ругается, что не может войти в домашний каталог admin.
+cd /tmp
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d clients_db <<SQL
 DO \$\$
 BEGIN
@@ -72,6 +74,12 @@ ALTER DEFAULT PRIVILEGES FOR ROLE bot IN SCHEMA public GRANT SELECT ON TABLES TO
 
 -- собственная схема робота
 CREATE SCHEMA IF NOT EXISTS adminbot AUTHORIZATION adminbot;
+
+-- Право создавать схемы в этой базе. Нужно потому, что миграция 001 начинается
+-- с CREATE SCHEMA IF NOT EXISTS, а Postgres проверяет право до проверки
+-- существования. На таблицы рабочего бота это никак не влияет: там по-прежнему
+-- только SELECT.
+GRANT CREATE ON DATABASE clients_db TO adminbot;
 SQL
 echo "роль и схема готовы"
 

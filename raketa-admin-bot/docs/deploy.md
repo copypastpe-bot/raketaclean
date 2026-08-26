@@ -119,6 +119,11 @@ ALTER DEFAULT PRIVILEGES FOR ROLE bot IN SCHEMA public GRANT SELECT ON TABLES TO
 
 -- 3) собственная схема робота
 CREATE SCHEMA IF NOT EXISTS adminbot AUTHORIZATION adminbot;
+
+-- 4) право создавать схемы: миграция 001 начинается с CREATE SCHEMA IF NOT EXISTS,
+--    а Postgres проверяет право раньше, чем существование схемы.
+--    На таблицы рабочего бота это не влияет — там остаётся только SELECT.
+GRANT CREATE ON DATABASE clients_db TO adminbot;
 ```
 
 Затем миграции — все три подряд, порядок важен:
