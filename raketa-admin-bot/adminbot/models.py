@@ -45,6 +45,28 @@ class Order:
 
 
 @dataclass(frozen=True)
+class CarpetLink:
+    """Строка adminbot.carpet_links: что робот знает о заказе партнёра по коврам.
+
+    Ключ — номер заказа в CRM партнёра: он сквозной и приходит в каждом отчёте,
+    поэтому месячный свод не приведёт к повторной обработке.
+    """
+
+    partner_id: int
+    phone10: str
+    status: str                       # new|in_progress|waiting_owner|waiting_salesbot|done|error
+    lead_id: Optional[int] = None     # сделка ковровой воронки
+    primary_lead_id: Optional[int] = None   # лид первичной, если цепочку вели с него
+    checklist: dict[str, Any] = field(default_factory=dict)
+    question: Optional[dict[str, Any]] = None
+    question_msg_id: Optional[int] = None
+    last_error: Optional[str] = None
+    source_file: Optional[str] = None       # из какого вложения пришла строка
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
 class AmoLink:
     """Строка adminbot.amo_links: что робот знает и уже сделал по заказу."""
 

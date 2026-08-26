@@ -24,8 +24,14 @@ def field_value(entity: Optional[Mapping[str, Any]], field_id: int) -> Any:
         if not isinstance(field, Mapping) or field.get("field_id") != field_id:
             continue
         for item in field.get("values") or []:
-            if isinstance(item, Mapping) and item.get("value") not in (None, ""):
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("value") not in (None, ""):
                 return item["value"]
+            # У списочных полей значение бывает только номером варианта. Поле всё
+            # равно заполнено, и затирать его нельзя.
+            if item.get("enum_id") is not None:
+                return item["enum_id"]
     return None
 
 
