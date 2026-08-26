@@ -157,23 +157,26 @@ if [ ! -f "$GCAL_KEY" ] && [ -f /home/admin/.gcal.json ]; then
     echo "ключ служебного аккаунта Google перенесён в настройки службы"
 fi
 
-now_enabled=$(grep '^AMO_SYNC_ENABLED=' "$ENV_FILE" | cut -d= -f2-)
-now_dry=$(grep '^AMO_SYNC_DRY_RUN=' "$ENV_FILE" | cut -d= -f2-)
+flag_of() { grep "^$1=" "$ENV_FILE" | cut -d= -f2- || true; }
+now_enabled=$(flag_of AMO_SYNC_ENABLED)
+now_dry=$(flag_of AMO_SYNC_DRY_RUN)
 echo "функция: $([ "$now_enabled" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
 echo "режим:   $([ "$now_dry" = 1 ] && echo 'репетиция (в amoCRM не пишем)' || echo 'БОЕВОЙ (пишем в amoCRM)')"
-echo "хвост с: $(grep "^AMO_SYNC_BACKLOG_FROM=" "$ENV_FILE" | cut -d= -f2-)"
-now_carpets=$(grep "^CARPETS_ENABLED=" "$ENV_FILE" | cut -d= -f2-)
-now_carpets_dry=$(grep "^CARPETS_DRY_RUN=" "$ENV_FILE" | cut -d= -f2-)
+echo "хвост с: $(flag_of AMO_SYNC_BACKLOG_FROM)"
+now_carpets=$(flag_of CARPETS_ENABLED)
+now_carpets_dry=$(flag_of CARPETS_DRY_RUN)
 echo "ковры:   $([ "$now_carpets" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_carpets_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
-now_gcal=$(grep "^GCAL_ENABLED=" "$ENV_FILE" | cut -d= -f2-)
-now_gcal_dry=$(grep "^GCAL_DRY_RUN=" "$ENV_FILE" | cut -d= -f2-)
+now_gcal=$(flag_of GCAL_ENABLED)
+now_gcal_dry=$(flag_of GCAL_DRY_RUN)
 echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
 
 # Проверка доступа к календарю: читает три ближайшие записи и ничего не меняет.
 if [ -n "$GCAL_CHECK" ]; then
     say "Проверка доступа к календарю"
     cd "$APP_DIR"
-    sudo -u adminbot env $(grep -E "^GCAL_" "$ENV_FILE" | xargs) \
+    # Настроек может не быть вовсе — тогда проверка сама скажет, чего не хватает.
+    GCAL_VARS=$(grep -E "^GCAL_" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $GCAL_VARS \
         "$HOME_DIR/.venv/bin/python" -m scripts.check_calendar || true
 fi
 
