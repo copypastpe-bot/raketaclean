@@ -61,30 +61,43 @@ async def oauth():
         await server.close()
 
 
-def make_token(token_uri: str, clock: list[float]) -> ServiceAccountToken:
-    return ServiceAccountToken(
-        email=KEY_FILE["client_email"], signer=FakeSigner(), token_uri=token_uri,
-        now=lambda: clock[0])
+@pytest.fixture
+async def tokens():
+    """Фабрика токенов, которая закрывает за собой сетевые сессии."""
+    made: list[ServiceAccountToken] = []
+
+    def make(token_uri: str, clock: list[float]) -> ServiceAccountToken:
+        token = ServiceAccountToken(
+            email=KEY_FILE["client_email"], signer=FakeSigner(), token_uri=token_uri,
+            now=lambda: clock[0])
+        made.append(token)
+        return token
+
+    try:
+        yield make
+    finally:
+        for token in made:
+            await token.close()
 
 
-async def test_token_is_requested_once_and_reused(oauth):
+async def test_token_is_requested_once_and_reused(oauth, tokens):
     """Токен живёт час — ходить за ним на каждый обмен незачем."""
     fake, uri = oauth
     clock = [1_000.0]
     fake.stub({"access_token": "ya29.first", "expires_in": 3600})
-    token = make_token(uri, clock)
+    token = tokens(uri, clock)
 
     assert await token() == "ya29.first"
     assert await token() == "ya29.first"
     assert len(fake.requests) == 1
 
 
-async def test_expired_token_is_refreshed(oauth):
+async def test_expired_token_is_refreshed(oauth, tokens):
     fake, uri = oauth
     clock = [1_000.0]
     fake.stub({"access_token": "ya29.first", "expires_in": 3600},
               {"access_token": "ya29.second", "expires_in": 3600})
-    token = make_token(uri, clock)
+    token = tokens(uri, clock)
 
     assert await token() == "ya29.first"
     clock[0] += 3_600                                  # час прошёл
@@ -92,10 +105,10 @@ async def test_expired_token_is_refreshed(oauth):
     assert len(fake.requests) == 2
 
 
-async def test_request_carries_a_signed_assertion(oauth):
+async def test_request_carries_a_signed_assertion(oauth, tokens):
     fake, uri = oauth
     fake.stub({"access_token": "ya29.x", "expires_in": 3600})
-    token = make_token(uri, [1_000.0])
+    token = tokens(uri, [1_000.0])
 
     await token()
 
@@ -104,12 +117,12 @@ async def test_request_carries_a_signed_assertion(oauth):
     assert sent["assertion"].count(".") == 2           # заголовок.данные.подпись
 
 
-async def test_revoked_key_gives_a_readable_error(oauth):
+async def test_revoked_key_gives_a_readable_error(oauth, tokens):
     """Владелец должен понять, что случилось, без чтения журнала Google."""
     fake, uri = oauth
     fake.stub((400, {"error": "invalid_grant",
                      "error_description": "Invalid JWT Signature."}))
-    token = make_token(uri, [1_000.0])
+    token = tokens(uri, [1_000.0])
 
     with pytest.raises(GCalKeyError) as failure:
         await token()

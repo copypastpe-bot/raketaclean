@@ -157,3 +157,66 @@ async def test_run_forever_waits_until_the_appointed_hour():
 
     assert naps == [3 * 3600]
     assert watcher.ticks == 1                                # проснулись и сделали сверку
+
+
+async def test_evening_check_covers_the_calendar():
+    """В 21:00 владелец получает и заказы, и календарь — одной картиной дня."""
+    from adminbot.gcal.watcher import CalendarTickReport
+
+    class FakeCalendar:
+        def __init__(self):
+            self.ticks = 0
+
+        async def tick(self):
+            self.ticks += 1
+            return CalendarTickReport(changes=3, processed=2, by_status={"done": 2})
+
+    calendar = FakeCalendar()
+    sent: list = []
+    reconciler = Reconciler(
+        watcher=_SilentWatcher(), source=_EmptySource(),
+        on_summary=_collect(sent), calendar_watcher=calendar,
+        on_calendar=lambda report: _collect(sent)(report),
+    )
+
+    await reconciler.run_once()
+
+    assert calendar.ticks == 1
+    assert len(sent) == 2                       # сводка по заказам и строка календаря
+
+
+async def test_calendar_failure_does_not_eat_the_summary():
+    """Сбой календаря вечером не должен лишить владельца сводки по заказам."""
+    class BrokenCalendar:
+        async def tick(self):
+            raise RuntimeError("Google недоступен")
+
+    sent: list = []
+    reconciler = Reconciler(
+        watcher=_SilentWatcher(), source=_EmptySource(),
+        on_summary=_collect(sent), calendar_watcher=BrokenCalendar(),
+        on_calendar=lambda report: _collect(sent)(report),
+    )
+
+    await reconciler.run_once()                 # не падает
+
+    assert len(sent) == 1                       # сводка по заказам всё равно ушла
+
+
+class _SilentWatcher:
+    async def tick(self):
+        return None
+
+
+class _EmptySource:
+    async def collect(self):
+        from adminbot.sync.reconcile import Snapshot
+
+        return Snapshot(orders=(), links=())
+
+
+def _collect(box: list):
+    async def send(item) -> None:
+        box.append(item)
+
+    return send

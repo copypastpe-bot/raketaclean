@@ -23,7 +23,9 @@ from aiogram.filters import BaseFilter, Command
 
 from adminbot.amo import ids
 from adminbot.control import ControlPanel
-from adminbot.tg.calendar_cards import CHOICE_PREFIX as GCAL_PREFIX, parse_calendar_choice
+from adminbot.tg.calendar_cards import (
+    CHOICE_PREFIX as GCAL_PREFIX, calendar_status_text, calendar_summary_text,
+    parse_calendar_choice)
 from adminbot.tg.cards import (
     CARPET_PREFIX, carpet_report_text, parse_carpet_choice,
     BACKLOG_GO, BACKLOG_HOLD, CHOICE_PREFIX, PATH_BY_PIPELINE, live_report_text,
@@ -51,6 +53,7 @@ HELP_TEXT = (
     "/status — что происходит: режим, пауза, очередь заказов\n"
     "/backlog — показать хвост непроведённых заказов и что я с ними сделаю\n"
     "/carpets — разобрать отчёты партнёра по коврам из почты\n"
+    "/calendar — посмотреть календарь прямо сейчас\n"
     "/pause — остановиться: в amoCRM ничего трогать не буду\n"
     "/resume — продолжить работу\n"
     "/help — эта справка\n\n"
@@ -83,6 +86,9 @@ class OwnerCommands:
         watcher: Optional[Any] = None,
         backlog: Optional[Any] = None,
         carpet_watcher: Optional[Any] = None,
+        calendar_watcher: Optional[Any] = None,
+        calendar_enabled: bool = False,
+        calendar_dry_run: bool = True,
     ) -> None:
         self.owner_tg_id = owner_tg_id
         self.control = control
@@ -91,16 +97,23 @@ class OwnerCommands:
         self.watcher = watcher
         self.backlog = backlog
         self.carpet_watcher = carpet_watcher
+        self.calendar_watcher = calendar_watcher
+        self.calendar_enabled = calendar_enabled
+        self.calendar_dry_run = calendar_dry_run
 
     async def status(self, message: Any) -> None:
-        await message.answer(status_text(
+        text = status_text(
             sync_enabled=self.sync_enabled,
             dry_run=self.dry_run,
             paused=await self.control.is_paused(),
             counts=await self.control.queue_counts(),
             last_tick_at=getattr(self.watcher, "last_tick_at", None),
             last_report=getattr(self.watcher, "last_report", None),
-        ))
+        )
+        calendar = calendar_status_text(
+            enabled=self.calendar_enabled, dry_run=self.calendar_dry_run,
+            report=getattr(self.calendar_watcher, "last_report", None))
+        await message.answer(f"{text}\n\n{calendar}")
 
     async def pause(self, message: Any) -> None:
         if await self.control.is_paused():
@@ -154,6 +167,19 @@ class OwnerCommands:
             await message.answer("Новых отчётов от партнёра нет.")
             return
         await message.answer(carpet_report_text(f"писем: {report.letters}", report))
+
+    async def calendar(self, message: Any) -> None:
+        """Что нового в календаре и что робот с этим сделал."""
+        if self.calendar_watcher is None:
+            await message.answer("Работа по календарю сейчас выключена.")
+            return
+
+        await message.answer("Смотрю календарь…")
+        report = await self.calendar_watcher.tick()
+        if report.paused:
+            await message.answer("Календарь на паузе — ничего не трогаю.")
+            return
+        await message.answer(calendar_summary_text(report))
 
     async def help(self, message: Any) -> None:
         await message.answer(HELP_TEXT)
@@ -377,7 +403,8 @@ class OwnerAnswers:
 
 
 def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None,
-                 carpets: Optional[CarpetAnswers] = None) -> Router:
+                 carpets: Optional[CarpetAnswers] = None,
+                 calendar: Optional[CalendarAnswers] = None) -> Router:
     """Собрать роутер: сначала команды владельца, последним — отказ всем прочим."""
     router = Router(name="owner")
     owner = OwnerOnly(commands.owner_tg_id)
@@ -385,6 +412,7 @@ def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None
     router.message.register(commands.status, owner, Command("status"))
     router.message.register(commands.backlog_preview, owner, Command("backlog"))
     router.message.register(commands.carpets, owner, Command("carpets"))
+    router.message.register(commands.calendar, owner, Command("calendar"))
     router.message.register(commands.pause, owner, Command("pause"))
     router.message.register(commands.resume, owner, Command("resume"))
     router.message.register(commands.help, owner, Command("help", "start"))
@@ -400,6 +428,9 @@ def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None
     if carpets is not None:
         router.callback_query.register(carpets.on_choice, owner,
                                        F.data.startswith(f"{CARPET_PREFIX}:"))
+    if calendar is not None:
+        router.callback_query.register(calendar.on_choice, owner,
+                                       F.data.startswith(f"{GCAL_PREFIX}:"))
     return router
 
 

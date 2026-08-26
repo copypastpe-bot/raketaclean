@@ -133,3 +133,76 @@ def _client_line(link: Any) -> str:
     if link.district:
         parts.append(link.district.capitalize())
     return " · ".join(parts)
+
+
+# --- тексты для владельца ---
+
+# Внутренние статусы → слова, понятные без объяснений.
+STATUS_WORDS: tuple[tuple[str, str], ...] = (
+    ("done", "сделок заполнено"),
+    ("waiting_salesbot", "ждут автосделку"),
+    ("waiting_owner", "ждут вашего ответа"),
+    ("closing", "закрываю по вашему подтверждению"),
+    ("cancelled", "отменённых заказов"),
+    ("skipped", "пропущено (выходные, перемывы, записи без телефона)"),
+    ("error", "с ошибкой — повторю сам"),
+)
+
+
+def calendar_summary_text(report: Any, counts: Optional[dict] = None) -> str:
+    """Блок вечерней сводки по календарю."""
+    lines = ["📅 Календарь"]
+
+    if not report or not (report.changes or report.processed):
+        lines.append("Новых записей не было.")
+    else:
+        lines.append(f"Изменений в календаре: {report.changes}")
+        for key, title in STATUS_WORDS:
+            value = (report.by_status or {}).get(key)
+            if value:
+                lines.append(f"   • {title}: {value}")
+
+    if report and report.questions:
+        lines.append(f"❓ Жду ответа по {len(report.questions)} записи(ям).")
+
+    if report and report.unknown_districts:
+        names = ", ".join(sorted({name.capitalize() for name in report.unknown_districts}))
+        lines += ["",
+                  f"Не знаю районов для приставок: {names}. "
+                  "Скажите, какие это районы, — буду заполнять поле «Район города»."]
+
+    if report and report.failures:
+        lines.append(f"⚠️ Не разобрал записей: {len(report.failures)} — попробую снова.")
+
+    total_done = (counts or {}).get("done")
+    if total_done:
+        lines += ["", f"Всего по календарю оформлено сделок: {total_done}"]
+    return "\n".join(lines)
+
+
+def calendar_status_text(*, enabled: bool, dry_run: bool,
+                         report: Optional[Any] = None) -> str:
+    """Строка о календаре для команды /status."""
+    if not enabled:
+        lines = ["📅 Календарь: выключен настройками сервиса"]
+        return "\n".join(lines)
+
+    mode = ("репетиция — решения принимаю, в amoCRM ничего не пишу"
+            if dry_run else "боевой — сделки оформляю по-настоящему")
+    lines = [f"📅 Календарь: {mode}"]
+
+    if report is None:
+        lines.append("   Обменов ещё не было.")
+        return "\n".join(lines)
+    if report.paused:
+        lines.append("   Сейчас на паузе.")
+        return "\n".join(lines)
+
+    lines.append(f"   Последний обмен: изменений {report.changes}, "
+                 f"обработано {report.processed}")
+    if report.known:
+        lines.append(f"   Записей, что были в календаре до включения: {report.known} — "
+                     "их не трогаю")
+    if report.full_resync:
+        lines.append("   Закладка обмена устарела — перечитал календарь заново.")
+    return "\n".join(lines)

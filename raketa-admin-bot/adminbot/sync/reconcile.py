@@ -160,6 +160,8 @@ class Reconciler:
         watcher: Any,
         source: SummarySource,
         on_summary: Callable[[DailySummary], Awaitable[None]],
+        calendar_watcher: Optional[Any] = None,
+        on_calendar: Optional[Callable[[Any], Awaitable[None]]] = None,
         hour_msk: int = 21,
         stale_after_sec: int = STALE_AFTER_SEC,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
@@ -168,6 +170,8 @@ class Reconciler:
         self.watcher = watcher
         self.source = source
         self.on_summary = on_summary
+        self.calendar_watcher = calendar_watcher
+        self.on_calendar = on_calendar
         self.hour_msk = hour_msk
         self.stale_after_sec = stale_after_sec
         self.now = now
@@ -183,7 +187,23 @@ class Reconciler:
         snapshot = await self.source.collect()
         summary = build_summary(snapshot, now=self.now(), stale_after_sec=self.stale_after_sec)
         await self.on_summary(summary)
+        await self._report_calendar()
         return summary
+
+    async def _report_calendar(self) -> None:
+        """Отдельная строка про календарь — если функция вообще включена.
+
+        Сбой здесь не должен съесть вечернюю сводку по заказам: она уже ушла,
+        и календарь — дополнение к ней, а не её часть.
+        """
+        if self.calendar_watcher is None or self.on_calendar is None:
+            return
+        try:
+            report = await self.calendar_watcher.tick()
+            if not report.paused:
+                await self.on_calendar(report)
+        except Exception:                              # noqa: BLE001
+            log.exception("Вечерний проход по календарю не удался")
 
     async def run_forever(self, stop: Optional[asyncio.Event] = None) -> None:
         while stop is None or not stop.is_set():

@@ -520,6 +520,13 @@ _UPDATABLE_GCAL_FIELDS = frozenset(
 )
 
 
+def _as_dict(value: Any) -> Optional[dict]:
+    """jsonb приходит словарём, но пул без нашего кодека отдал бы строку."""
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
 def _calendar_from_row(row: Optional[asyncpg.Record]) -> Optional[CalendarLink]:
     if row is None:
         return None
@@ -538,6 +545,7 @@ def _calendar_from_row(row: Optional[asyncpg.Record]) -> Optional[CalendarLink]:
         client_name=row["client_name"],
         district=row["district"],
         services=tuple(row["services"] or ()),
+        event_data=_as_dict(row["event_data"]),
         skip_reason=row["skip_reason"],
         path=row["path"],
         primary_lead_id=row["primary_lead_id"],

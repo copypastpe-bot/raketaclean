@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Optional
 
 from adminbot.tg.session import parse_ip_pool
 
@@ -27,6 +28,10 @@ _TRUE_VALUES = {"1", "true"}
 
 # Хвост непроведённых заказов разбираем с этой даты (решение владельца №5).
 DEFAULT_BACKLOG_FROM = date(2026, 8, 21)
+
+# Рабочий календарь компании и ключ служебного аккаунта на сервере (этап 2).
+DEFAULT_CALENDAR_ID = "raketaclean52@gmail.com"
+DEFAULT_GCAL_KEY_FILE = "~/.gcal.json"
 
 # Какую «Услугу» ставить в сделке, если поле пустое (решение владельца №7).
 # Ключ — часть имени мастера, значение — вид работ. Новый мастер добавляется
@@ -73,6 +78,18 @@ def _date(name: str, default: date) -> date:
         return date.fromisoformat(raw.strip())
     except ValueError as exc:
         raise RuntimeError(f"Переменная {name} должна быть датой ГГГГ-ММ-ДД, получено: {raw!r}") from exc
+
+
+def _optional_date(name: str) -> Optional[date]:
+    """Дата, которой может и не быть: тогда решение принимается при запуске."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"Переменная {name} должна быть датой ГГГГ-ММ-ДД, "
+                           f"получено: {raw!r}") from exc
 
 
 def _service_by_master(name: str, default: dict[str, str]) -> dict[str, str]:
@@ -137,6 +154,18 @@ class Settings:
     carpets_dry_run: bool = True
     carpets_poll_interval_sec: int = 3600
 
+    # Календарь (этап 2): свой выключатель и своя репетиция.
+    # Опрос раз в пять минут: записи появляются в рабочее время, чаще незачем,
+    # а обмен приносит только изменения и стоит одного запроса.
+    gcal_enabled: bool = False
+    gcal_dry_run: bool = True
+    gcal_poll_interval_sec: int = 300
+    gcal_calendar_id: str = DEFAULT_CALENDAR_ID
+    gcal_key_file: str = DEFAULT_GCAL_KEY_FILE
+    # С какой даты читаем календарь. Пусто — со дня включения: записи, лежавшие
+    # там раньше, владелец ведёт сам (его решение 8).
+    gcal_sync_from: Optional[date] = None
+
     # Прямые адреса Telegram: на российском сервере имя api.telegram.org
     # не разрешается, хотя сами адреса доступны. Пусто — обычный путь.
     telegram_api_ips: tuple[str, ...] = ()
@@ -178,4 +207,12 @@ class Settings:
             carpets_enabled=_flag("CARPETS_ENABLED", False),
             carpets_dry_run=_flag("CARPETS_DRY_RUN", True),
             carpets_poll_interval_sec=_int("CARPETS_POLL_INTERVAL_SEC", 3600),
+            gcal_enabled=_flag("GCAL_ENABLED", False),
+            gcal_dry_run=_flag("GCAL_DRY_RUN", True),
+            gcal_poll_interval_sec=_int("GCAL_POLL_INTERVAL_SEC", 300),
+            gcal_calendar_id=(os.environ.get("GCAL_CALENDAR_ID", "").strip()
+                              or DEFAULT_CALENDAR_ID),
+            gcal_key_file=(os.environ.get("GCAL_SERVICE_ACCOUNT_FILE", "").strip()
+                           or DEFAULT_GCAL_KEY_FILE),
+            gcal_sync_from=_optional_date("GCAL_SYNC_FROM"),
         )

@@ -127,6 +127,49 @@ class ParsedEvent:
         """Основной телефон клиента — первый в записи."""
         return self.phones[0] if self.phones else None
 
+    def to_dict(self) -> dict:
+        """Разбор для хранилища.
+
+        Робот может ждать автосделку сейлзбота дольше, чем живёт содержимое
+        одного обмена с Google: следующий обмен принесёт только изменения, а
+        незаконченную запись надо чем-то продолжать. Поэтому разбор хранится
+        рядом с записью — тот же приём, что со строками отчёта партнёра.
+        """
+        return {
+            "event_id": self.event_id,
+            "kind": self.kind.value,
+            "order_date": self.order_date.isoformat() if self.order_date else None,
+            "start_at": self.start_at.isoformat() if self.start_at else None,
+            "phones": list(self.phones),
+            "client_name": self.client_name,
+            "district": self.district,
+            "unknown_district": self.unknown_district,
+            "services": list(self.services),
+            "address": self.address,
+            "comment": self.comment,
+            "summary": self.summary,
+            "skip_reason": self.skip_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ParsedEvent":
+        return cls(
+            event_id=data["event_id"],
+            kind=EventKind(data["kind"]),
+            order_date=date.fromisoformat(data["order_date"]) if data.get("order_date") else None,
+            start_at=(datetime.fromisoformat(data["start_at"])
+                      if data.get("start_at") else None),
+            phones=tuple(data.get("phones") or ()),
+            client_name=data.get("client_name"),
+            district=data.get("district"),
+            unknown_district=data.get("unknown_district"),
+            services=tuple(data.get("services") or ()),
+            address=data.get("address"),
+            comment=data.get("comment") or "",
+            summary=data.get("summary") or "",
+            skip_reason=data.get("skip_reason"),
+        )
+
 
 def parse_event(raw: dict) -> ParsedEvent:
     """Разобрать запись Google Calendar. Ничего не запрашивает и не пишет."""

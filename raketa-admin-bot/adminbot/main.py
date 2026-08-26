@@ -22,6 +22,7 @@ import asyncio
 import logging
 import signal
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Optional
 
 import asyncpg
@@ -30,8 +31,14 @@ from aiogram import Bot, Dispatcher
 from adminbot import db
 from adminbot.amo import ids
 from adminbot.amo.client import AmoAuthError, AmoClient, AmoError
+from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.config import Settings
 from adminbot.carpets.engine import CarpetEngine
+from adminbot.gcal.auth import GCalKeyError, ServiceAccountToken
+from adminbot.gcal.client import GoogleCalendar
+from adminbot.gcal.engine import CalendarEngine
+from adminbot.gcal.store import MemoryCalendarStore, PgCalendarStore
+from adminbot.gcal.watcher import CalendarWatcher
 from adminbot.carpets.store import MemoryCarpetStore, PgCarpetStore
 from adminbot.carpets.watcher import CarpetWatcher
 from adminbot.control import PgControlPanel, sync_allowed
@@ -42,7 +49,9 @@ from adminbot.sync.reconcile import PgSummarySource, Reconciler
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import MemoryLinkStore, PgLinkStore
 from adminbot.sync.watcher import PgOrderSource, Watcher
-from adminbot.tg.bot import CarpetAnswers, OwnerAnswers, OwnerCommands, build_router
+from adminbot.tg.bot import CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router
+from adminbot.tg.calendar_cards import (
+    boat_card, calendar_question_card, calendar_summary_text, cancellation_card)
 from adminbot.tg.cards import (
     carpet_question_card, carpet_report_text, question_card, summary_text)
 from adminbot.tg.session import build_session
@@ -67,6 +76,8 @@ class App:
     reconciler: Reconciler
     stop: asyncio.Event
     carpet_watcher: Optional[Any] = None
+    calendar_watcher: Optional[Any] = None
+    calendar_token: Optional[Any] = None
 
     async def run(self) -> None:
         """Запустить всё до сигнала остановки."""
@@ -84,6 +95,9 @@ class App:
         if self.carpet_watcher is not None:
             background.append(asyncio.create_task(
                 self.carpet_watcher.run_forever(self.stop), name="carpets"))
+        if self.calendar_watcher is not None:
+            background.append(asyncio.create_task(
+                self.calendar_watcher.run_forever(self.stop), name="calendar"))
         try:
             await self._poll_until_stopped()
         finally:
@@ -178,6 +192,8 @@ async def build_app(settings: Settings) -> App:
         on_summary=_make_summary_sender(bot, settings.owner_tg_id),
         hour_msk=settings.reconcile_hour_msk,
     )
+    # Календарь собирается ниже, но в вечернюю сверку он попадает здесь же:
+    # владелец получает одну картину дня, а не два разрозненных сообщения.
 
     # Хвост проводится отдельным, всегда боевым движком: кнопка «Поехали» —
     # это осознанное разрешение владельца, даже когда сервис работает в репетиции.
@@ -197,6 +213,13 @@ async def build_app(settings: Settings) -> App:
     carpet_watcher, carpet_store = _build_carpets(settings, own_pool, bot, live_amo,
                                                   rehearsal_amo)
 
+    # Календарь: своя цепочка, свой выключатель и свой ключ доступа. Нет ключа —
+    # календарь просто не поднимается, остальные функции работают.
+    calendar_watcher, calendar_store, calendar_token = _build_calendar(
+        settings, own_pool, bot, live_amo, rehearsal_amo)
+    reconciler.calendar_watcher = calendar_watcher
+    reconciler.on_calendar = _make_calendar_summary_sender(bot, settings.owner_tg_id)
+
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(
         OwnerCommands(
@@ -207,16 +230,23 @@ async def build_app(settings: Settings) -> App:
             watcher=watcher,
             backlog=backlog,
             carpet_watcher=carpet_watcher,
+            calendar_watcher=calendar_watcher,
+            calendar_enabled=settings.gcal_enabled,
+            calendar_dry_run=settings.gcal_dry_run,
         ),
         OwnerAnswers(owner_tg_id=settings.owner_tg_id, store=store, backlog=backlog),
         CarpetAnswers(owner_tg_id=settings.owner_tg_id, store=carpet_store)
         if carpet_store else None,
+        CalendarAnswers(owner_tg_id=settings.owner_tg_id, store=calendar_store)
+        if calendar_store else None,
     ))
 
     return App(settings=settings, bot_pool=bot_pool, own_pool=own_pool,
                amo_clients=(rehearsal_amo, live_amo), bot=bot,
                dispatcher=dispatcher, watcher=watcher, reconciler=reconciler,
                carpet_watcher=carpet_watcher,
+               calendar_watcher=calendar_watcher,
+               calendar_token=calendar_token,
                stop=asyncio.Event())
 
 
@@ -260,6 +290,79 @@ def _build_carpets(settings: Settings, own_pool: Any, bot: Bot,
              "репетиция" if settings.carpets_dry_run else "БОЕВОЙ",
              mail_settings.user, mail_settings.folder)
     return watcher, store
+
+
+def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
+                    live_amo: AmoClient, rehearsal_amo: AmoClient):
+    """Собрать работу по календарю. Возвращает (наблюдатель, хранилище, ключ).
+
+    Функция выключена или ключ служебного аккаунта недоступен — календарь просто
+    не поднимается, а уборка и ковры работают как ни в чём не бывало.
+    """
+    if not settings.gcal_enabled:
+        log.info("Календарь: функция выключена настройкой GCAL_ENABLED")
+        return None, None, None
+
+    try:
+        token = ServiceAccountToken.from_file(settings.gcal_key_file)
+    except GCalKeyError as exc:
+        log.warning("Календарь не поднят: %s", exc)
+        return None, None, None
+
+    # Та же тонкость, что в уборке и коврах: в репетиции ни отметки шагов, ни
+    # закладка обмена не должны попадать в базу. Иначе боевой запуск получит от
+    # Google «изменений нет» и пропустит всё, что робот посмотрел вхолостую.
+    store = MemoryCalendarStore() if settings.gcal_dry_run else PgCalendarStore(own_pool)
+    engine = CalendarEngine(
+        amo=rehearsal_amo if settings.gcal_dry_run else live_amo,
+        store=store,
+        dry_run=settings.gcal_dry_run,
+        salesbot_wait_sec=settings.salesbot_wait_sec,
+    )
+    watcher = CalendarWatcher(
+        calendar=GoogleCalendar(calendar_id=settings.gcal_calendar_id, token=token),
+        engine=engine,
+        store=store,
+        sync_from=settings.gcal_sync_from or datetime.now(MOSCOW_TZ).date(),
+        poll_interval_sec=settings.gcal_poll_interval_sec,
+        on_question=_make_calendar_question_sender(bot, settings.owner_tg_id),
+    )
+    log.info("Календарь: включён, режим %s, календарь %s, читаю с %s",
+             "репетиция" if settings.gcal_dry_run else "БОЕВОЙ",
+             settings.gcal_calendar_id, watcher.sync_from)
+    return watcher, store, token
+
+
+def _make_calendar_summary_sender(bot: Bot, owner_tg_id: int):
+    """Вечерняя строка про календарь — вслед за сводкой по заказам."""
+
+    async def send(report) -> None:
+        await bot.send_message(owner_tg_id, calendar_summary_text(report))
+
+    return send
+
+
+def _make_calendar_question_sender(bot: Bot, owner_tg_id: int):
+    """Карточка по записи календаря. Какая именно — зависит от того, что случилось."""
+
+    async def send(link) -> Optional[int]:
+        reason = (link.question or {}).get("reason", "")
+        if reason.startswith("заказ отменён"):
+            text, keyboard = cancellation_card(link)
+        elif reason.startswith("теплоход"):
+            text, keyboard = boat_card(link)
+        else:
+            text, keyboard = calendar_question_card(link)
+
+        try:
+            sent = await bot.send_message(owner_tg_id, text, reply_markup=keyboard)
+        except Exception:                              # noqa: BLE001
+            log.exception("Календарь, запись %s: карточку отправить не удалось",
+                          link.event_id)
+            return None
+        return sent.message_id
+
+    return send
 
 
 def _make_carpet_question_sender(bot: Bot, owner_tg_id: int):

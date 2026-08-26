@@ -171,3 +171,47 @@ async def test_boat_is_created_only_after_the_button(answered):
     link = await store.get("evt-1")
     assert link.status == "new"
     assert link.path == "BOAT"
+
+
+# --- тексты для владельца ---
+
+def test_calendar_summary_speaks_plainly():
+    """В сводке нет внутренних слов робота: только то, что владельцу решать."""
+    from adminbot.gcal.watcher import CalendarTickReport
+    from adminbot.tg.calendar_cards import calendar_summary_text
+
+    report = CalendarTickReport(changes=7, processed=5,
+                                by_status={"done": 3, "waiting_salesbot": 1,
+                                           "skipped": 1, "waiting_owner": 1},
+                                questions=("evt-1",),
+                                unknown_districts=("печер", "цветы"))
+
+    text = calendar_summary_text(report, counts={"done": 12, "cancelled": 1})
+
+    assert "календар" in text.lower()
+    assert "waiting_salesbot" not in text
+    assert "Печер" in text or "печер" in text        # непонятные приставки названы
+    assert "3" in text
+
+
+def test_quiet_day_says_so():
+    from adminbot.gcal.watcher import CalendarTickReport
+    from adminbot.tg.calendar_cards import calendar_summary_text
+
+    text = calendar_summary_text(CalendarTickReport(), counts={})
+
+    assert "новых записей" in text.lower() or "ничего" in text.lower()
+
+
+def test_status_shows_mode_and_last_exchange():
+    from adminbot.gcal.watcher import CalendarTickReport
+    from adminbot.tg.calendar_cards import calendar_status_text
+
+    text = calendar_status_text(enabled=True, dry_run=True,
+                                report=CalendarTickReport(changes=2, processed=2))
+
+    assert "репетиция" in text.lower()
+    assert "выключен" not in text.lower()
+
+    off = calendar_status_text(enabled=False, dry_run=False, report=None)
+    assert "выключен" in off.lower()

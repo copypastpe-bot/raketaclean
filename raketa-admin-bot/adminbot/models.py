@@ -86,6 +86,7 @@ class CalendarLink:
     client_name: Optional[str] = None
     district: Optional[str] = None    # None — приставка заголовка непонятна
     services: tuple[str, ...] = ()
+    event_data: Optional[dict[str, Any]] = None   # разбор записи: им продолжают цепочку
     skip_reason: Optional[str] = None
     path: Optional[str] = None        # A|B|C — как ведём запись
     primary_lead_id: Optional[int] = None
