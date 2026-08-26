@@ -13,15 +13,37 @@ set -euo pipefail
 
 ENABLED=""
 DRY_RUN=""
+REPORT=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
         --disable)   ENABLED=0 ;;
         --live)      DRY_RUN=0 ;;
         --rehearsal) DRY_RUN=1 ;;
+        --report)    REPORT=1 ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
+
+# --report: только показать, что робот записал. Ничего не меняем и не перезапускаем.
+if [ -n "$REPORT" ]; then
+    DSN=$(grep '^ADMINBOT_DB_DSN=' /opt/raketa-admin-bot/.env | cut -d= -f2-)
+    cd /tmp
+    echo "=== Заказы в работе робота ==="
+    sudo -u adminbot psql "$DSN" -P pager=off -c "
+        SELECT order_id AS заказ, status AS состояние, path AS путь,
+               real_lead_id AS сделка, primary_lead_id AS лид,
+               left(coalesce(last_error, ''), 40) AS ошибка,
+               to_char(updated_at AT TIME ZONE 'Europe/Moscow', 'DD.MM HH24:MI') AS обновлено
+        FROM adminbot.amo_links ORDER BY order_id"
+    echo "=== Последние действия в amoCRM ==="
+    sudo -u adminbot psql "$DSN" -P pager=off -c "
+        SELECT order_id AS заказ, action AS действие, amo_id AS объект,
+               CASE WHEN dry_run THEN 'репетиция' ELSE 'боевое' END AS режим,
+               to_char(created_at AT TIME ZONE 'Europe/Moscow', 'DD.MM HH24:MI') AS когда
+        FROM adminbot.amo_actions ORDER BY id DESC LIMIT 25"
+    exit 0
+fi
 
 HOME_DIR=/opt/raketa-admin-bot
 APP_DIR=$HOME_DIR/app
