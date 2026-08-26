@@ -271,3 +271,14 @@ async def test_quiet_watcher_sleeps_the_full_hour():
     await watcher.run_forever(stop)
 
     assert naps == [3600]
+
+
+async def test_rehearsal_leaves_the_letter_unread():
+    """Репетиция не должна «съедать» отчёт: пометка уходит в почту по-настоящему."""
+    mailbox, engine = FakeMailBox([letter()]), FakeEngine()
+
+    await make_watcher(mailbox, engine, dry_run=True).tick()
+
+    assert engine.processed == [44426]                 # решения приняты
+    assert mailbox.seen == []                          # но письмо осталось в работе
+    assert engine.store.remembered == []

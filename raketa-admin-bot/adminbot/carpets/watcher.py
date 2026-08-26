@@ -74,6 +74,7 @@ class CarpetWatcher:
         poll_interval_sec: int = 3600,
         on_question: Optional[Callable[[CarpetRow, CarpetLink], Awaitable[Optional[int]]]] = None,
         on_report: Optional[Callable[[Any, CarpetTickReport], Awaitable[None]]] = None,
+        dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.engine = engine
@@ -84,6 +85,9 @@ class CarpetWatcher:
         self.poll_interval_sec = poll_interval_sec
         self.on_question = on_question
         self.on_report = on_report
+        # В репетиции письмо нельзя помечать прочитанным: пометка уходит в почтовый
+        # ящик по-настоящему, и отчёт исчез бы из работы, ничего не сделав в CRM.
+        self.dry_run = dry_run
         self.sleep = sleep
         self.last_report: Optional[CarpetTickReport] = None
 
@@ -159,9 +163,12 @@ class CarpetWatcher:
             log.warning("Письмо %s оставляю в работе: были сбои", letter.uid)
             return
 
-        await self.store.remember_letter(letter.uid, letter.subject,
-                                         list(letter.attachments), rows_total)
-        await self.mailbox.mark_seen(letter.uid)
+        if self.dry_run:
+            log.info("Репетиция: письмо %s оставляю непрочитанным", letter.uid)
+        else:
+            await self.store.remember_letter(letter.uid, letter.subject,
+                                             list(letter.attachments), rows_total)
+            await self.mailbox.mark_seen(letter.uid)
 
         if self.on_report:
             await self.on_report(letter, CarpetTickReport(

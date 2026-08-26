@@ -232,6 +232,7 @@ def _build_carpets(settings: Settings, own_pool: Any, bot: Bot,
         poll_interval_sec=settings.carpets_poll_interval_sec,
         on_question=_make_carpet_question_sender(bot, settings.owner_tg_id),
         on_report=_make_carpet_report_sender(bot, settings.owner_tg_id),
+        dry_run=settings.carpets_dry_run,
     )
     log.info("Ковры: включены, режим %s, почта %s/%s",
              "репетиция" if settings.carpets_dry_run else "БОЕВОЙ",
