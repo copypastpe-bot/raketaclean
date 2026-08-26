@@ -1,0 +1,244 @@
+"""Движок календаря: от записи в блокноте владельца до заполненной сделки.
+
+Что здесь важнее всего проверить:
+
+- робот **не трогает то, что уже заполнено** — правки владельца в CRM важнее
+  догадок робота (общее правило проекта);
+- робот **не двигает сделку дальше «Заказ оформлен»** и не закрывает автозадачу
+  «Назначь мастера»: мастера в записи календаря нет, и говорить в CRM, что он
+  назначен, робот не вправе (решение владельца 13);
+- **бюджет не трогается** — сумма чека известна только боту;
+- в репетиции в амо не уходит ни одного запроса.
+"""
+
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from adminbot.amo import ids
+from adminbot.gcal.engine import CalendarEngine
+from adminbot.gcal.event import EventKind, ParsedEvent
+from adminbot.gcal.store import MemoryCalendarStore
+from tests.fakes import FakeAmo
+
+MSK = ZoneInfo("Europe/Moscow")
+NOW = datetime(2026, 8, 26, 12, 0, tzinfo=MSK)
+ORDER_DAY = date(2026, 8, 27)
+
+
+def an_order(**overrides) -> ParsedEvent:
+    """Обычная запись: «Сов! Матрас, Юлия» на завтра."""
+    fields = dict(
+        event_id="evt-1", kind=EventKind.ORDER, order_date=ORDER_DAY,
+        start_at=datetime(2026, 8, 27, 14, 30, tzinfo=MSK),
+        phones=("9605379757",), client_name="Юлия", district="советский",
+        services=("mattress",), address="Панина д 7к2, кв 132",
+        comment="Матрас/2\nСушка/2\nаллергик астматик спит",
+        summary="Сов! Матрас, Юлия",
+    )
+    fields.update(overrides)
+    return ParsedEvent(**fields)
+
+
+def build(amo, *, dry_run=False, store=None) -> CalendarEngine:
+    # Часы у движка и хранилища общие: движок считает по ним, сколько уже ждёт
+    # автосделку, и разное время сломало бы этот счёт.
+    return CalendarEngine(amo=amo, store=store or MemoryCalendarStore(now=lambda: NOW),
+                          dry_run=dry_run, now=lambda: NOW)
+
+
+def sent_fields(amo, call: int = 0) -> dict[int, dict]:
+    """Поля, которые робот отправил в амо при заполнении сделки, по id поля."""
+    _, payload = amo.calls_of("update_lead")[call]
+    return {field["field_id"]: field for field in payload["custom_fields"]}
+
+
+def only_value(field: dict):
+    return field["values"][0].get("value", field["values"][0].get("enum_id"))
+
+
+@pytest.fixture
+def amo():
+    return FakeAmo()
+
+
+async def test_existing_realization_deal_is_filled_not_moved(amo):
+    """Сделка уже есть — робот дозаполняет её и оставляет на месте (решение 13)."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    engine = build(amo)
+
+    link = await engine.process(an_order())
+
+    fields = sent_fields(amo)
+    assert only_value(fields[ids.FIELD_ADDRESS]) == "Панина д 7к2, кв 132"
+    assert "аллергик астматик спит" in only_value(fields[ids.FIELD_COMMENT])
+    assert only_value(fields[ids.FIELD_DISTRICT]) == ids.DISTRICT_ENUMS["советский"]
+    assert only_value(fields[ids.FIELD_SERVICE]) == 128971           # «Чистка матрасов»
+    assert amo.calls_of("move_lead") == []                           # этап не двигали
+    assert "price" not in amo.calls_of("update_lead")[0][1]          # бюджет не наш
+    assert ids.FIELD_SPECIALIST not in fields                        # мастера не знаем
+    assert link.status == "done"
+    assert link.real_lead_id == 41400001
+
+
+async def test_filled_fields_are_never_overwritten(amo):
+    """В сделке уже стоят адрес и услуга — робот их не трогает."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "Свой адрес"}]},
+                     {"field_id": ids.FIELD_SERVICE,
+                      "values": [{"value": "Уборка", "enum_id": ids.SERVICE_ENUM_CLEANING}]},
+                 ])
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    fields = sent_fields(amo)
+    assert ids.FIELD_ADDRESS not in fields          # адрес владельца остался как был
+    assert ids.FIELD_SERVICE not in fields          # услуга тоже не переписана
+
+
+async def test_autotasks_stay_open(amo):
+    """«Назначь мастера» — работа владельца, робот её не закрывает (решение 13)."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.add_task(41400001, task_id=7, task_type_id=2270740)
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    assert amo.calls_of("complete_task") == []
+
+
+async def test_primary_lead_is_handed_over_and_waits_for_the_salesbot(amo):
+    """Лид первичной: заполнить → «Передано в работу» → ждать автосделку."""
+    amo.add_lead(41400002, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_DIALOG)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+
+    link = await engine.process(an_order())
+
+    assert amo.calls_of("move_lead") == [(41400002, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)]
+    assert link.status == "waiting_salesbot"
+    assert link.primary_lead_id == 41400002
+
+    # Сейлзбот создал автосделку — следующий проход её подхватывает и дозаполняет.
+    amo.add_lead(41400003, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    link = await engine.process(an_order())
+
+    assert link.status == "done"
+    assert link.real_lead_id == 41400003
+    assert ids.FIELD_COMMENT in sent_fields(amo, call=-1)   # автосделку дозаполнили
+
+
+async def test_no_deal_at_all_starts_the_chain(amo):
+    """Сделки нет: находим или заводим контакт, создаём лид, передаём в работу."""
+    engine = build(amo)
+
+    link = await engine.process(an_order())
+
+    created = amo.calls_of("create_contact")
+    assert created and created[0] == ("Юлия", "+79605379757")
+    assert amo.calls_of("create_lead")
+    assert link.status == "waiting_salesbot"
+
+
+async def test_silent_kinds_are_skipped_without_touching_amo(amo):
+    """Выходной мастера, перемыв и запись без телефона — молча мимо."""
+    engine = build(amo)
+
+    for kind, event_id in ((EventKind.BLOCK, "b"), (EventKind.REWASH, "r"),
+                           (EventKind.SKIP, "s"), (EventKind.UNSETTLED, "u")):
+        link = await engine.process(ParsedEvent(event_id=event_id, kind=kind,
+                                                order_date=ORDER_DAY))
+        assert link.status == "skipped", kind
+        assert link.skip_reason
+
+    assert amo.calls == []
+
+
+async def test_unsettled_event_returns_to_work_when_the_mark_is_removed(amo):
+    """Владелец снял «⁉️» — робот берёт запись в работу (решение 9)."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+
+    await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.UNSETTLED,
+                                     order_date=ORDER_DAY))
+    link = await engine.process(an_order())
+
+    assert link.status == "done"
+
+
+async def test_rehearsal_writes_nothing_to_amo(amo):
+    """Репетиция: решения принимаем, в CRM не пишем ничего."""
+    amo.dry_run = True
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, dry_run=True, store=store)
+
+    await engine.process(an_order())
+
+    assert amo.leads[41400001].get("custom_fields_values") is None   # сделка не изменилась
+    assert store.actions_of("update_lead")                           # но решение записано
+    assert store.actions_of("update_lead")[0]["dry_run"] is True
+
+
+async def test_progress_is_not_repeated_after_a_restart(amo):
+    """Повторный проход по той же записи не делает работу дважды."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+
+    await engine.process(an_order())
+    calls_after_first = len(amo.calls)
+    await engine.process(an_order())
+
+    assert len(amo.calls) == calls_after_first
+
+
+async def test_missing_salesbot_deal_asks_the_owner(amo):
+    """Автосделки нет сорок минут — это уже не задержка, а повод спросить."""
+    amo.add_lead(41400002, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_DIALOG)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await engine.process(an_order())
+
+    engine.now = lambda: NOW + timedelta(minutes=45)
+    link = await engine.process(an_order())
+
+    assert link.status == "waiting_owner"
+    assert link.question["reason"] == "сейлзбот не создал автосделку"
+
+
+async def test_amo_failure_leaves_the_event_for_the_next_pass(amo):
+    """Амо упала посреди цепочки — запись остаётся в работе, а не теряется."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.fail_on = "update_lead"
+    engine = build(amo)
+
+    link = await engine.process(an_order())
+
+    assert link.status == "error"
+    assert "AmoError" in link.last_error
+
+
+async def test_several_services_are_all_written(amo):
+    """«Уборка + Мебель» — в амо уходят оба значения: поле это позволяет."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    engine = build(amo)
+
+    await engine.process(an_order(services=("cleaning", "furniture")))
+
+    values = [item["enum_id"] for item in sent_fields(amo)[ids.FIELD_SERVICE]["values"]]
+    assert values == [ids.SERVICE_ENUM_CLEANING, ids.SERVICE_ENUM_FURNITURE]
+
+
+async def test_unknown_district_leaves_the_field_empty(amo):
+    """Приставка не расшифрована — поле пустое, догадок нет (решение 12)."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    engine = build(amo)
+
+    await engine.process(an_order(district=None))
+
+    assert ids.FIELD_DISTRICT not in sent_fields(amo)

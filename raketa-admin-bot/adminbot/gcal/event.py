@@ -111,6 +111,7 @@ class ParsedEvent:
     event_id: str
     kind: EventKind
     order_date: Optional[date] = None
+    start_at: Optional[datetime] = None      # начало работы по московскому времени
     phones: tuple[str, ...] = ()
     client_name: Optional[str] = None
     district: Optional[str] = None
@@ -138,7 +139,7 @@ def parse_event(raw: dict) -> ParsedEvent:
 
     summary = (raw.get("summary") or "").strip()
     description = raw.get("description") or ""
-    order_date = _start_date(raw.get("start") or {})
+    order_date, start_at = _start(raw.get("start") or {})
 
     if _BLOCK_MARK in summary:
         return ParsedEvent(event_id=event_id, kind=EventKind.BLOCK,
@@ -156,7 +157,7 @@ def parse_event(raw: dict) -> ParsedEvent:
 
     if "rewash" in services:
         return ParsedEvent(event_id=event_id, kind=EventKind.REWASH,
-                           order_date=order_date, summary=summary,
+                           order_date=order_date, start_at=start_at, summary=summary,
                            client_name=name, district=district)
 
     if not phones:
@@ -165,7 +166,8 @@ def parse_event(raw: dict) -> ParsedEvent:
         kind = EventKind.BOAT if _looks_like_boat(rest, services) else EventKind.SKIP
         reason = None if kind is EventKind.BOAT else "телефон не найден"
         return ParsedEvent(event_id=event_id, kind=kind, order_date=order_date,
-                           summary=summary, client_name=_boat_name(rest) or name,
+                           start_at=start_at, summary=summary,
+                           client_name=_boat_name(rest) or name,
                            district=district, unknown_district=unknown_district,
                            services=services, skip_reason=reason,
                            address=(raw.get("location") or None),
@@ -173,7 +175,7 @@ def parse_event(raw: dict) -> ParsedEvent:
 
     return ParsedEvent(
         event_id=event_id, kind=EventKind.ORDER, order_date=order_date,
-        phones=phones, client_name=name, district=district,
+        start_at=start_at, phones=phones, client_name=name, district=district,
         unknown_district=unknown_district, services=services,
         address=(raw.get("location") or None), comment=_comment(description),
         summary=summary)
@@ -182,19 +184,24 @@ def parse_event(raw: dict) -> ParsedEvent:
 # --- разбор частей ---
 
 
-def _start_date(start: dict) -> Optional[date]:
-    """Дата заказа — всегда московская: по ней ищем сделку и сверяемся с ботом."""
+def _start(start: dict) -> tuple[Optional[date], Optional[datetime]]:
+    """Когда работа: дата и момент начала, оба по московскому времени.
+
+    Дата нужна матчеру (по ней ищется сделка и сверяется заказ из бота), момент —
+    полю «Дата и время заказа» в амо: владелец смотрит в сделке именно время.
+    """
     stamp = start.get("dateTime")
     if stamp:
         moment = datetime.fromisoformat(stamp)
         if moment.tzinfo is None:                     # запись без смещения — читаем как МСК
             moment = moment.replace(tzinfo=MOSCOW_TZ)
-        return moment.astimezone(MOSCOW_TZ).date()
+        moment = moment.astimezone(MOSCOW_TZ)
+        return moment.date(), moment
 
     whole_day = start.get("date")
-    if whole_day:
-        return date.fromisoformat(whole_day[:10])
-    return None
+    if whole_day:                                     # запись на весь день: времени нет
+        return date.fromisoformat(whole_day[:10]), None
+    return None, None
 
 
 def _split_summary(summary: str) -> tuple[Optional[str], Optional[str], str]:

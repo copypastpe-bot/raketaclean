@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from adminbot.amo import ids
@@ -79,6 +79,16 @@ def text_field(field_id: int, value: Any) -> dict:
 def enum_field(field_id: int, enum_id: int) -> dict:
     """Значение из списка: «Услуга», «Специалист»."""
     return {"field_id": field_id, "values": [{"enum_id": enum_id}]}
+
+
+def enums_field(field_id: int, enum_ids: Sequence[int]) -> dict:
+    """Несколько значений одного списка сразу.
+
+    «Услуга» — поле с множественным выбором, и запись календаря вида
+    «Уборка + Мебель» должна попасть в сделку целиком. Отдельными полями это
+    не отправить: амо возьмёт последнее.
+    """
+    return {"field_id": field_id, "values": [{"enum_id": enum_id} for enum_id in enum_ids]}
 
 
 def datetime_field(field_id: int, moment: datetime) -> dict:
