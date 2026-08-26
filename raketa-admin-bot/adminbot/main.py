@@ -34,8 +34,6 @@ from adminbot.amo.client import AmoAuthError, AmoClient, AmoError
 from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.config import Settings
 from adminbot.carpets.engine import CarpetEngine
-from adminbot.gcal.auth import GCalKeyError, ServiceAccountToken
-from adminbot.gcal.client import GoogleCalendar
 from adminbot.gcal.engine import CalendarEngine
 from adminbot.gcal.store import MemoryCalendarStore, PgCalendarStore
 from adminbot.gcal.watcher import CalendarWatcher
@@ -301,6 +299,17 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
     """
     if not settings.gcal_enabled:
         log.info("Календарь: функция выключена настройкой GCAL_ENABLED")
+        return None, None, None
+
+    # Подпись ключа Google требует библиотеки google-auth. Загружаем её здесь,
+    # а не при старте сервиса: если на сервере её вдруг не окажется, не поднимется
+    # только календарь, а уборка и ковры продолжат работать.
+    try:
+        from adminbot.gcal.auth import GCalKeyError, ServiceAccountToken
+        from adminbot.gcal.client import GoogleCalendar
+    except ImportError as exc:
+        log.warning("Календарь не поднят: нет библиотеки для ключа Google (%s). "
+                    "Поможет `pip install -r requirements.txt`", exc)
         return None, None, None
 
     try:

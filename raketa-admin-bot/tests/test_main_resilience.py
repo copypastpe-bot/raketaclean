@@ -5,6 +5,7 @@ Telegram из России доступен нестабильно. Работа
 оформляться, а опрос возобновляется сам.
 """
 
+from dataclasses import replace
 import asyncio
 
 from aiogram.exceptions import TelegramNetworkError
@@ -55,3 +56,23 @@ async def test_polling_gives_up_when_service_is_stopping(monkeypatch):
     await asyncio.gather(app._poll_until_stopped(), stop_soon())
 
     assert dispatcher.attempts >= 1
+
+
+async def test_calendar_absence_does_not_break_the_service():
+    """Календарь выключен или ключа нет — остальные функции работают.
+
+    Проверяется то, ради чего у каждой функции свой выключатель: робот уже
+    в бою с уборкой и коврами, и новая функция не имеет права его уронить.
+    """
+    from adminbot.config import Settings
+    from adminbot.main import _build_calendar
+
+    settings = Settings(
+        tg_token="t", owner_tg_id=1, bot_db_dsn="postgresql://x", own_db_dsn="postgresql://x",
+        amo_base_url="https://x", amo_token="t", gcal_enabled=False)
+    assert _build_calendar(settings, None, None, None, None) == (None, None, None)
+
+    # Функция включена, но ключа на сервере нет — тоже не падаем.
+    with_key_missing = replace(settings, gcal_enabled=True,
+                               gcal_key_file="/nonexistent/gcal.json")
+    assert _build_calendar(with_key_missing, None, None, None, None) == (None, None, None)
