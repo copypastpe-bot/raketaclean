@@ -33,7 +33,7 @@ from adminbot.carpets.matcher import CarpetLead, match_carpet
 from adminbot.carpets.report import CarpetRow
 from adminbot.carpets.store import CarpetStore
 from adminbot.models import CarpetLink
-from adminbot.phone import mask
+from adminbot.phone import mask, normalize_phone
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,18 @@ PAYMENT_ENUM_BY_METHOD = {
 # (переход в финал порождает задачи сейлзбота), и только потом отмечаемся.
 STEPS_DELIVERED = ("fill_carpet_lead", "move_carpet_delivered", "note_robot_done")
 STEPS_REFUSED = ("move_carpet_refused", "note_refusal")
-STEPS_LINK_ONLY: tuple[str, ...] = ()          # владелец провёл сам — только привязка
+
+# Ковровой сделки нет, но есть лид в первичной: ставим услугу «Ковры КРИСТАЛ»
+# и передаём в работу — дальше сейлзбот сам заводит сделку в ковровой воронке.
+# Без верной услуги он заведёт сделку не в ту воронку, поэтому шаг обязателен.
+STEPS_FROM_PRIMARY = ("fill_primary_lead", "move_primary_success", "wait_salesbot")
+
+# Совсем ничего нет: находим или создаём контакт и заводим лид уже заполненным.
+STEPS_FROM_SCRATCH = ("ensure_contact", "create_primary_lead",
+                      "move_primary_success", "wait_salesbot")
+
+# Сколько ждём автосделку сейлзбота, прежде чем спросить владельца.
+DEFAULT_SALESBOT_WAIT_SEC = 600
 
 
 @dataclass
@@ -66,12 +77,16 @@ class CarpetEngine:
         amo: Any,
         store: CarpetStore,
         dry_run: bool = True,
+        salesbot_wait_sec: int = DEFAULT_SALESBOT_WAIT_SEC,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
         self.amo = amo
         self.store = store
         self.dry_run = dry_run
+        self.salesbot_wait_sec = salesbot_wait_sec
         self.now = now
+        # Найденный контакт живёт в пределах обработки строки: в хранилище ему не место.
+        self._contacts: dict[int, int] = {}
 
     async def process_row(self, row: CarpetRow,
                           source_file: Optional[str] = None) -> CarpetLink:
@@ -127,15 +142,16 @@ class CarpetEngine:
                                  dry_run=self.dry_run)
             return await self.store.update(row.partner_id, status="done")
 
-        # use_primary и create_new — цепочка с лида, это следующая задача плана.
-        return await self._ask_owner(
-            row, "сделки в CRM нет — нужна новая цепочка",
-            [self._option(lead) for lead in candidates if lead.lead_id in decision.options])
+        if decision.kind == "use_primary":
+            return await self.store.update(row.partner_id, status="in_progress",
+                                           primary_lead_id=decision.lead_id,
+                                           path="primary")
+        return await self.store.update(row.partner_id, status="in_progress", path="scratch")
 
     # --- исполнение шагов ---
 
     async def _run_steps(self, row: CarpetRow, link: CarpetLink) -> CarpetLink:
-        for step in self._steps_for(row):
+        for step in self._steps_for(row, link):
             if step in (link.checklist or {}):
                 continue
 
@@ -144,13 +160,22 @@ class CarpetEngine:
 
             if result.ask:
                 return await self._ask_owner(row, result.ask)
+            if result.wait:
+                return await self.store.update(row.partner_id, status="waiting_salesbot")
             await self.store.mark_step(row.partner_id, step)
             link = await self.store.get(row.partner_id)
 
         return await self.store.update(row.partner_id, status="done", last_error=None)
 
-    def _steps_for(self, row: CarpetRow) -> tuple[str, ...]:
-        return STEPS_REFUSED if row.is_refusal else STEPS_DELIVERED
+    def _steps_for(self, row: CarpetRow, link: Optional[CarpetLink] = None) -> tuple[str, ...]:
+        if row.is_refusal:
+            return STEPS_REFUSED
+        path = getattr(link, "path", None)
+        if path == "primary":
+            return STEPS_FROM_PRIMARY + STEPS_DELIVERED
+        if path == "scratch":
+            return STEPS_FROM_SCRATCH + STEPS_DELIVERED
+        return STEPS_DELIVERED
 
     # --- шаги ---
 
@@ -185,6 +210,76 @@ class CarpetEngine:
             lines.append(f"Расчётная стоимость в отчёте: {row.price} ₽.")
         await self._write("add_note", row, link.lead_id,
                           self.amo.add_note(link.lead_id, "\n".join(lines)))
+        return StepResult()
+
+    # --- цепочка, когда ковровой сделки ещё нет ---
+
+    async def _step_fill_primary_lead(self, row: CarpetRow, link: CarpetLink) -> StepResult:
+        """Проставить в лиде услугу «Ковры КРИСТАЛ» и данные заказа.
+
+        Услуга здесь — не украшение: по ней сейлзбот решает, в какую воронку
+        заводить сделку. Без неё ковровый заказ уедет в воронку уборки.
+        """
+        existing = await self._get_lead(link.primary_lead_id)
+        fields = self._lead_fields(row, existing)
+        if not field_value(existing, ids.FIELD_SERVICE):
+            fields.append(enum_field(ids.FIELD_SERVICE, ids.SERVICE_ENUM_CARPETS))
+        await self._write("update_lead", row, link.primary_lead_id,
+                          self.amo.update_lead(link.primary_lead_id, price=row.amount,
+                                               custom_fields=fields))
+        return StepResult()
+
+    async def _step_move_primary_success(self, row: CarpetRow, link: CarpetLink) -> StepResult:
+        await self._write("move_lead", row, link.primary_lead_id,
+                          self.amo.move_lead(link.primary_lead_id, ids.PIPELINE_PRIMARY,
+                                             ids.STATUS_SUCCESS))
+        return StepResult()
+
+    async def _step_wait_salesbot(self, row: CarpetRow, link: CarpetLink) -> StepResult:
+        """Ждём, пока сейлзбот заведёт сделку в ковровой воронке."""
+        for raw in await self.amo.find_leads_by_phone(row.phone10):
+            lead = self._to_carpet_lead(raw)
+            if lead.is_open_carpet:
+                await self.store.update(row.partner_id, lead_id=lead.lead_id,
+                                        status="in_progress")
+                return StepResult()
+
+        waited = (self.now() - _as_msk(link.updated_at, self.now())).total_seconds()
+        if waited > self.salesbot_wait_sec:
+            await self.store.log(row.partner_id, "salesbot_timeout", dry_run=self.dry_run,
+                                 payload={"waited_sec": int(waited)})
+            return StepResult(ask="сейлзбот не создал автосделку по коврам")
+        return StepResult(wait=True)
+
+    async def _step_ensure_contact(self, row: CarpetRow, link: CarpetLink) -> StepResult:
+        contacts = await self.amo.find_contacts_by_phone(row.phone10)
+        if contacts:
+            self._contacts[row.partner_id] = int(contacts[0]["id"])
+            return StepResult()
+
+        intent = await self._write(
+            "create_contact", row, None,
+            self.amo.create_contact(name=row.client_name or "Клиент",
+                                    phone=normalize_phone(row.phone10)))
+        if intent and intent.entity_id:
+            self._contacts[row.partner_id] = intent.entity_id
+        return StepResult()
+
+    async def _step_create_primary_lead(self, row: CarpetRow, link: CarpetLink) -> StepResult:
+        fields = self._lead_fields(row, existing=None)
+        fields.append(enum_field(ids.FIELD_SERVICE, ids.SERVICE_ENUM_CARPETS))
+        intent = await self._write(
+            "create_lead", row, None,
+            self.amo.create_lead(
+                name=f"Ковры, заказ партнёра №{row.partner_id}",
+                pipeline_id=ids.PIPELINE_PRIMARY,
+                status_id=ids.PRIM_STAGE_NEW_LEAD,
+                price=row.amount,
+                contact_id=self._contacts.get(row.partner_id),
+                custom_fields=fields,
+            ))
+        if intent and intent.entity_id:
+            await self.store.update(row.partner_id, primary_lead_id=intent.entity_id)
         return StepResult()
 
     async def _step_note_refusal(self, row: CarpetRow, link: CarpetLink) -> StepResult:
@@ -288,3 +383,12 @@ def _jsonable(payload: Any) -> Any:
     if isinstance(payload, (list, tuple)):
         return [_jsonable(item) for item in payload]
     return payload
+
+
+def _as_msk(moment: Optional[datetime], fallback) -> datetime:
+    """Время последнего изменения в московской зоне. Нет его — считаем «только что»."""
+    if moment is None:
+        return fallback()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=MOSCOW_TZ)
+    return moment.astimezone(MOSCOW_TZ)

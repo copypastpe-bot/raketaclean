@@ -226,3 +226,93 @@ async def test_rehearsal_changes_nothing_in_crm():
 
     assert amo.leads[lead_id]["status_id"] == ids.CARPET_STAGE_HANDED_OVER
     assert store.actions                                # но план записан в журнал
+
+
+# --- цепочка через лид первичной воронки ---
+
+async def test_primary_lead_is_pushed_to_partner_and_finished():
+    """Ковровой сделки нет, но лид в первичной есть: ведём цепочку с него.
+
+    Робот ставит услугу «Ковры КРИСТАЛ» и переводит лид в «Передано в работу» —
+    дальше сейлзбот сам заводит сделку в ковровой воронке, её и доводим.
+    """
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    amo.add_lead(31532745, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(datetime(2026, 8, 17, tzinfo=MOSCOW_TZ).timestamp()))
+    engine = make_engine(amo, store)
+    order = row(partner_id=44535, phone10="9202994600", added_date=date(2026, 8, 17))
+
+    link = await engine.process_row(order)
+    assert link.status == "waiting_salesbot"           # ждём автосделку
+
+    service = fields_of(amo)[ids.FIELD_SERVICE]["values"][0]["enum_id"]
+    assert service == ids.SERVICE_ENUM_CARPETS         # без этого сейлзбот заведёт не ту сделку
+    assert amo.calls_of("move_lead")[0] == (31532745, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+
+    # сейлзбот отработал: в ковровой воронке появилась сделка
+    open_carpet_lead(amo, 31567900)
+    link = await engine.process_row(order)
+
+    assert link.status == "done" and link.lead_id == 31567900
+    assert (31567900, ids.PIPELINE_CARPETS, ids.CARPET_STAGE_DELIVERED) in amo.calls_of("move_lead")
+
+
+async def test_silent_salesbot_becomes_a_question():
+    """Автосделки нет дольше положенного — не ждём вечно, спрашиваем владельца."""
+    # Часы хранилища и движка должны идти вместе: по ним считается, сколько ждём.
+    amo, store = FakeAmo(), MemoryCarpetStore(now=lambda: NOW)
+    amo.add_lead(31532745, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(datetime(2026, 8, 17, tzinfo=MOSCOW_TZ).timestamp()))
+    later = NOW.replace(hour=14)                       # два часа спустя
+    engine = CarpetEngine(amo=amo, store=store, dry_run=False,
+                          salesbot_wait_sec=600, now=lambda: later)
+    order = row(partner_id=44535, phone10="9202994600", added_date=date(2026, 8, 17))
+
+    await engine.process_row(order)
+    link = await engine.process_row(order)
+
+    assert link.status == "waiting_owner"
+    assert "автосделку" in link.question["reason"]
+
+
+# --- цепочка с нуля ---
+
+async def test_chain_from_scratch_creates_contact_and_lead():
+    """Заказ №44345: свежего в CRM нет вовсе — заводим всё сами."""
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    engine = make_engine(amo, store)
+    order = row(partner_id=44345, phone10="9108970195", client_name="Урзумова Светлана",
+                added_date=date(2026, 8, 8), return_date=date(2026, 8, 13))
+
+    link = await engine.process_row(order)
+
+    assert link.status == "waiting_salesbot"
+    assert amo.calls_of("create_contact")               # контакта не было — создали
+    created = amo.calls_of("create_lead")[0]
+    assert created["pipeline_id"] == ids.PIPELINE_PRIMARY
+    services = [f for f in created["custom_fields"] if f["field_id"] == ids.FIELD_SERVICE]
+    assert services[0]["values"][0]["enum_id"] == ids.SERVICE_ENUM_CARPETS
+
+
+async def test_existing_contact_is_reused():
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    amo.contacts.append({"id": 55, "name": "Урзумова Светлана"})
+
+    await make_engine(amo, store).process_row(row(partner_id=44345, phone10="9108970195"))
+
+    assert amo.calls_of("create_contact") == []
+    assert amo.calls_of("create_lead")[0]["contact_id"] == 55
+
+
+async def test_interrupted_chain_continues_from_where_it_stopped():
+    """Робота перезапустили посреди цепочки — заново лид не создаём."""
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    engine = make_engine(amo, store)
+    order = row(partner_id=44345, phone10="9108970195")
+
+    await engine.process_row(order)
+    leads_created = len(amo.calls_of("create_lead"))
+
+    await engine.process_row(order)                    # сейлзбот всё ещё молчит
+
+    assert len(amo.calls_of("create_lead")) == leads_created

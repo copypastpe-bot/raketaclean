@@ -55,6 +55,9 @@ class CarpetLink:
     partner_id: int
     phone10: str
     status: str                       # new|in_progress|waiting_owner|waiting_salesbot|done|error
+    # Как ведём заказ: сделка уже есть (None), через лид первичной («primary»)
+    # или цепочкой с нуля («scratch»).
+    path: Optional[str] = None
     lead_id: Optional[int] = None     # сделка ковровой воронки
     primary_lead_id: Optional[int] = None   # лид первичной, если цепочку вели с него
     checklist: dict[str, Any] = field(default_factory=dict)
