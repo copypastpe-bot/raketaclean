@@ -23,6 +23,7 @@ from aiogram.filters import BaseFilter, Command
 
 from adminbot.control import ControlPanel
 from adminbot.tg.cards import (
+    CARPET_PREFIX, carpet_report_text, parse_carpet_choice,
     BACKLOG_GO, BACKLOG_HOLD, CHOICE_PREFIX, PATH_BY_PIPELINE, live_report_text,
     parse_choice, preview_card,
 )
@@ -47,6 +48,7 @@ HELP_TEXT = (
     "🤖 Я слежу за заказами рабочего бота и сам оформляю по ним сделки в amoCRM.\n\n"
     "/status — что происходит: режим, пауза, очередь заказов\n"
     "/backlog — показать хвост непроведённых заказов и что я с ними сделаю\n"
+    "/carpets — разобрать отчёты партнёра по коврам из почты\n"
     "/pause — остановиться: в amoCRM ничего трогать не буду\n"
     "/resume — продолжить работу\n"
     "/help — эта справка\n\n"
@@ -78,6 +80,7 @@ class OwnerCommands:
         dry_run: bool,
         watcher: Optional[Any] = None,
         backlog: Optional[Any] = None,
+        carpet_watcher: Optional[Any] = None,
     ) -> None:
         self.owner_tg_id = owner_tg_id
         self.control = control
@@ -85,6 +88,7 @@ class OwnerCommands:
         self.dry_run = dry_run
         self.watcher = watcher
         self.backlog = backlog
+        self.carpet_watcher = carpet_watcher
 
     async def status(self, message: Any) -> None:
         await message.answer(status_text(
@@ -133,6 +137,22 @@ class OwnerCommands:
         text, keyboard = preview_card(plan)
         await message.answer(text, reply_markup=keyboard)
 
+    async def carpets(self, message: Any) -> None:
+        """Что лежит в почте от партнёра по коврам и что с этим будет."""
+        if self.carpet_watcher is None:
+            await message.answer("Разбор ковров сейчас выключен.")
+            return
+
+        await message.answer("Смотрю почту партнёра…")
+        report = await self.carpet_watcher.tick()
+        if report.paused:
+            await message.answer("Ковры на паузе — ничего не трогаю.")
+            return
+        if not report.letters and not report.processed:
+            await message.answer("Новых отчётов от партнёра нет.")
+            return
+        await message.answer(carpet_report_text(f"писем: {report.letters}", report))
+
     async def help(self, message: Any) -> None:
         await message.answer(HELP_TEXT)
 
@@ -150,6 +170,49 @@ class OwnerCommands:
         user = getattr(message, "from_user", None)
         log.warning("Чужое сообщение боту от %s", getattr(user, "id", "неизвестно"))
         await message.answer(OWNER_ONLY_REPLY)
+
+
+class CarpetAnswers:
+    """Нажатия на карточках по коврам.
+
+    Как и в уборке, ответ не идёт в CRM напрямую: он записывается рядом с заказом
+    партнёра, а работу доделает ближайший проход наблюдателя.
+    """
+
+    def __init__(self, *, owner_tg_id: int, store: Any) -> None:
+        self.owner_tg_id = owner_tg_id
+        self.store = store
+
+    async def on_choice(self, callback: Any) -> None:
+        user = getattr(callback, "from_user", None)
+        if not (user and user.id == self.owner_tg_id):
+            return
+
+        choice = parse_carpet_choice(getattr(callback, "data", None))
+        if choice is None:
+            await callback.answer()
+            return
+
+        partner_id, kind, lead_id = choice
+        link = await self.store.get(partner_id)
+        if link is None:
+            await callback.answer("Этого заказа у меня уже нет.")
+            return
+
+        if kind == "manual":
+            fields = {"status": "done", "path": None, "question": None}
+            reply = "понял, оставляю вам."
+        elif kind == "new":
+            fields = {"status": "new", "path": "scratch", "question": None}
+            reply = "заведу сделку с нуля."
+        else:
+            fields = {"status": "new", "path": None, "lead_id": lead_id, "question": None}
+            reply = f"беру сделку #{lead_id}."
+
+        await self.store.update(partner_id, **fields)
+        log.info("Ковры, заказ партнёра №%s: владелец выбрал %s", partner_id, kind)
+        await callback.answer()
+        await callback.message.edit_text(f"Ковры, заказ №{partner_id}: {reply}")
 
 
 class OwnerAnswers:
@@ -241,13 +304,15 @@ class OwnerAnswers:
         return None
 
 
-def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None) -> Router:
+def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None,
+                 carpets: Optional[CarpetAnswers] = None) -> Router:
     """Собрать роутер: сначала команды владельца, последним — отказ всем прочим."""
     router = Router(name="owner")
     owner = OwnerOnly(commands.owner_tg_id)
 
     router.message.register(commands.status, owner, Command("status"))
     router.message.register(commands.backlog_preview, owner, Command("backlog"))
+    router.message.register(commands.carpets, owner, Command("carpets"))
     router.message.register(commands.pause, owner, Command("pause"))
     router.message.register(commands.resume, owner, Command("resume"))
     router.message.register(commands.help, owner, Command("help", "start"))
@@ -260,6 +325,9 @@ def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None
                                        F.data.startswith(f"{CHOICE_PREFIX}:"))
         router.callback_query.register(answers.on_backlog, owner,
                                        F.data.startswith("backlog:"))
+    if carpets is not None:
+        router.callback_query.register(carpets.on_choice, owner,
+                                       F.data.startswith(f"{CARPET_PREFIX}:"))
     return router
 
 

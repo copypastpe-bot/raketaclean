@@ -75,6 +75,53 @@ class CarpetRow:
         """Строку нельзя обработать самостоятельно — нужен человек."""
         return not self.phone10
 
+    def to_dict(self) -> dict:
+        """Строка в виде, пригодном для хранения рядом с заказом.
+
+        Нужно затем, что цепочка не всегда заканчивается за один проход: пока
+        робот ждёт автосделку сейлзбота, письмо уже разобрано и файла под рукой
+        нет. Без сохранённой строки продолжить было бы нечем.
+        """
+        return {
+            "partner_id": self.partner_id,
+            "phone10": self.phone10,
+            "client_name": self.client_name,
+            "address": self.address,
+            "district": self.district,
+            "amount": str(self.amount),
+            "price": str(self.price),
+            "payment_method": self.payment_method,
+            "pickup_date": self.pickup_date.isoformat() if self.pickup_date else None,
+            "return_date": self.return_date.isoformat() if self.return_date else None,
+            "added_date": self.added_date.isoformat() if self.added_date else None,
+            "status": self.status,
+            "refusal_reason": self.refusal_reason,
+            "comment": self.comment,
+            "is_ours": self.is_ours,
+            "is_refusal": self.is_refusal,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CarpetRow":
+        return cls(
+            partner_id=int(data["partner_id"]),
+            phone10=data.get("phone10"),
+            client_name=data.get("client_name"),
+            address=data.get("address"),
+            district=data.get("district"),
+            amount=Decimal(data.get("amount") or 0),
+            price=Decimal(data.get("price") or 0),
+            payment_method=data.get("payment_method"),
+            pickup_date=_from_iso(data.get("pickup_date")),
+            return_date=_from_iso(data.get("return_date")),
+            added_date=_from_iso(data.get("added_date")),
+            status=data.get("status"),
+            refusal_reason=data.get("refusal_reason"),
+            comment=data.get("comment"),
+            is_ours=bool(data.get("is_ours", True)),
+            is_refusal=bool(data.get("is_refusal", False)),
+        )
+
 
 def parse_report(data: bytes) -> list[CarpetRow]:
     """Разобрать файл отчёта. На вход — содержимое вложения из письма."""
@@ -232,3 +279,7 @@ def _date(value: Any) -> Optional[date]:
             continue
     log.warning("Отчёт партнёра: не понял дату %r", value)
     return None
+
+
+def _from_iso(value: Optional[str]) -> Optional[date]:
+    return date.fromisoformat(value) if value else None

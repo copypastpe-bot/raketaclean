@@ -335,19 +335,44 @@ def _carpet_from_row(row: Optional[asyncpg.Record]) -> Optional[CarpetLink]:
 
 async def create_carpet_link(own_pool: asyncpg.Pool, partner_id: int,
                              phone10: Optional[str],
-                             source_file: Optional[str] = None) -> CarpetLink:
-    """Взять строку отчёта в работу. Повторный вызов ничего не портит."""
+                             source_file: Optional[str] = None,
+                             row_data: Optional[dict] = None) -> CarpetLink:
+    """Взять строку отчёта в работу. Повторный вызов ничего не портит.
+
+    Саму строку сохраняем рядом: письмо будет разобрано и помечено прочитанным
+    задолго до того, как сейлзбот заведёт сделку, и продолжить будет нечем.
+    """
     async with own_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO adminbot.carpet_links (partner_id, phone10, source_file)
-            VALUES ($1, $2, $3)
+            INSERT INTO adminbot.carpet_links (partner_id, phone10, source_file, row_data)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (partner_id) DO UPDATE SET updated_at = now()
             RETURNING *
             """,
-            partner_id, phone10 or "", source_file,
+            partner_id, phone10 or "", source_file, row_data,
         )
     return _carpet_from_row(row)
+
+
+async def fetch_pending_carpet_rows(own_pool: asyncpg.Pool,
+                                    statuses: Sequence[str]) -> list[tuple[dict, CarpetLink]]:
+    """Незавершённые заказы партнёра вместе с сохранёнными строками отчёта."""
+    if not statuses:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM adminbot.carpet_links "
+            "WHERE status = ANY($1::text[]) AND row_data IS NOT NULL ORDER BY partner_id",
+            list(statuses),
+        )
+    pending = []
+    for row in rows:
+        data = row["row_data"]
+        if isinstance(data, str):
+            data = json.loads(data)
+        pending.append((data, _carpet_from_row(row)))
+    return pending
 
 
 async def get_carpet_link(own_pool: asyncpg.Pool, partner_id: int) -> Optional[CarpetLink]:

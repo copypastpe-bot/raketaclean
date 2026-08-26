@@ -93,7 +93,8 @@ class CarpetEngine:
         """Продвинуть одну строку отчёта настолько, насколько это возможно сейчас."""
         link = await self.store.get(row.partner_id)
         if link is None:
-            link = await self.store.create(row.partner_id, row.phone10, source_file)
+            link = await self.store.create(row.partner_id, row.phone10, source_file,
+                                           row.to_dict())
 
         if link.status in ("done", "waiting_owner"):
             return link                            # уже разобрано или ждём ответа

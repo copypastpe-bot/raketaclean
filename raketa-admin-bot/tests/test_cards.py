@@ -5,7 +5,7 @@
 по нажатию которых робот поймёт, что именно выбрали.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from adminbot.amo import ids
@@ -181,3 +181,81 @@ def test_preview_of_an_empty_backlog_has_no_go_button():
 
     assert "нечего" in text.lower()
     assert keyboard is None
+
+
+# --- ковры от партнёра ---
+
+def carpet_row(partner_id=44426, **overrides):
+    from decimal import Decimal as D
+    from adminbot.carpets.report import CarpetRow
+    values = dict(partner_id=partner_id, phone10="9601945325",
+                  client_name="Толстая Светлана", district="Советский",
+                  amount=D("3995"), return_date=date(2026, 8, 23),
+                  added_date=date(2026, 8, 12))
+    values.update(overrides)
+    return CarpetRow(**values)
+
+
+def test_carpet_question_card_shows_the_order_and_choices():
+    from adminbot.tg.cards import carpet_question_card
+
+    question = {"reason": "какая сделка про этот заказ", "options": [
+        {"lead_id": 31516051, "pipeline_id": ids.PIPELINE_CARPETS,
+         "date": "2026-08-12", "price": 1, "name": None},
+    ]}
+
+    text, keyboard = carpet_question_card(carpet_row(), question)
+
+    assert "Ковры" in text
+    assert "44426" in text                          # номер заказа партнёра
+    assert "3 995" in text
+    assert "…5325" in text and "9601945325" not in text     # телефон замаскирован
+    assert "23.08" in text                          # когда сдали ковры
+
+    data = [button.callback_data for row_ in keyboard.inline_keyboard for button in row_]
+    assert "carpet:44426:31516051" in data
+    assert "carpet:44426:new" in data and "carpet:44426:manual" in data
+
+
+def test_carpet_refusal_card_says_it_is_a_refusal():
+    from adminbot.tg.cards import carpet_question_card
+
+    text, _ = carpet_question_card(
+        carpet_row(is_refusal=True, refusal_reason="Не взяли трубку"), None)
+
+    assert "отказ" in text.lower()
+    assert "Не взяли трубку" in text
+
+
+def test_parse_carpet_choice():
+    from adminbot.tg.cards import parse_carpet_choice
+
+    assert parse_carpet_choice("carpet:44426:31516051") == (44426, "lead", 31516051)
+    assert parse_carpet_choice("carpet:44426:new") == (44426, "new", None)
+    assert parse_carpet_choice("carpet:44426:manual") == (44426, "manual", None)
+    assert parse_carpet_choice("amosync:596:new") is None       # чужая кнопка
+    assert parse_carpet_choice("мусор") is None
+
+
+def test_carpet_report_text_sums_up_a_letter():
+    from adminbot.carpets.watcher import CarpetTickReport
+    from adminbot.tg.cards import carpet_report_text
+
+    text = carpet_report_text("отчёт с 17.08 по 23.08", CarpetTickReport(
+        letters=1, processed=5,
+        by_status={"done": 3, "waiting_owner": 1, "waiting_salesbot": 1}))
+
+    assert "отчёт с 17.08 по 23.08" in text
+    assert "Проведено: 3" in text
+    assert "ждут вашего ответа: 1" in text.lower()
+    assert "1" in text
+
+
+def test_carpet_report_says_when_all_is_clean():
+    from adminbot.carpets.watcher import CarpetTickReport
+    from adminbot.tg.cards import carpet_report_text
+
+    text = carpet_report_text("свод за август", CarpetTickReport(
+        letters=1, processed=4, by_status={"done": 4}))
+
+    assert "разбираться не с чем" in text.lower()

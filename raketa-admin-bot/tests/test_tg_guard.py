@@ -84,8 +84,8 @@ def test_router_registers_owner_commands():
     router = build_router(make_commands())
 
     assert router.message.handlers                    # обработчики зарегистрированы
-    # пять команд, подсказка владельцу на прочие сообщения и отказ для чужих
-    assert len(router.message.handlers) == 7
+    # шесть команд, подсказка владельцу на прочие сообщения и отказ для чужих
+    assert len(router.message.handlers) == 8
     assert router.callback_query.handlers == []       # карточки не подключены — кнопок нет
 
 

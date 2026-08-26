@@ -8,6 +8,8 @@
 
 CREATE TABLE IF NOT EXISTS adminbot.carpet_links (
     partner_id      bigint PRIMARY KEY,            -- номер заказа у партнёра
+    row_data        jsonb,                         -- сама строка отчёта: нужна, чтобы
+                                                   -- продолжить цепочку после ожидания
     phone10         text NOT NULL,
     status          text NOT NULL DEFAULT 'new',   -- new|in_progress|waiting_owner|waiting_salesbot|done|error
     path            text,                          -- primary|scratch (как ведём заказ)

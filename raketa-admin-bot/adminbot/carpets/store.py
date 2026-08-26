@@ -24,7 +24,8 @@ class CarpetStore(Protocol):
     async def get(self, partner_id: int) -> Optional[CarpetLink]: ...
 
     async def create(self, partner_id: int, phone10: Optional[str],
-                     source_file: Optional[str] = None) -> CarpetLink: ...
+                     source_file: Optional[str] = None,
+                     row_data: Optional[dict] = None) -> CarpetLink: ...
 
     async def update(self, partner_id: int, **fields: Any) -> Optional[CarpetLink]: ...
 
@@ -49,7 +50,8 @@ class MemoryCarpetStore:
         return self.links.get(partner_id)
 
     async def create(self, partner_id: int, phone10: Optional[str],
-                     source_file: Optional[str] = None) -> CarpetLink:
+                     source_file: Optional[str] = None,
+                     row_data: Optional[dict] = None) -> CarpetLink:
         link = self.links.get(partner_id)
         if link is None:
             link = CarpetLink(partner_id=partner_id, phone10=phone10 or "", status="new",
@@ -96,8 +98,26 @@ class PgCarpetStore:
         return await db.get_carpet_link(self._pool, partner_id)
 
     async def create(self, partner_id: int, phone10: Optional[str],
-                     source_file: Optional[str] = None) -> CarpetLink:
-        return await db.create_carpet_link(self._pool, partner_id, phone10, source_file)
+                     source_file: Optional[str] = None,
+                     row_data: Optional[dict] = None) -> CarpetLink:
+        return await db.create_carpet_link(self._pool, partner_id, phone10,
+                                           source_file, row_data)
+
+    # --- что нужно наблюдателю почты ---
+
+    async def letter_processed(self, uid: str) -> bool:
+        return await db.letter_was_processed(self._pool, uid)
+
+    async def remember_letter(self, uid: str, subject: Optional[str],
+                              files: list, rows_total: int) -> None:
+        await db.remember_letter(self._pool, uid, subject, files, rows_total)
+
+    async def pending_rows(self):
+        from adminbot.carpets.report import CarpetRow
+        from adminbot.carpets.watcher import ACTIVE_STATUSES
+
+        raw = await db.fetch_pending_carpet_rows(self._pool, ACTIVE_STATUSES)
+        return [(CarpetRow.from_dict(data), link) for data, link in raw]
 
     async def update(self, partner_id: int, **fields: Any) -> Optional[CarpetLink]:
         return await db.update_carpet_link(self._pool, partner_id, **fields)

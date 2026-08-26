@@ -2,10 +2,14 @@
 
 Запуск:  python -m adminbot.main
 
-Три занятия работают параллельно и не мешают друг другу:
+Занятия работают параллельно и не мешают друг другу:
 1) наблюдатель — раз в минуту доводит заказы до проведённых сделок;
 2) вечерняя сверка — в 21:00 МСК отчитывается за день;
-3) бот владельца — принимает команды.
+3) бот владельца — принимает команды;
+4) ковры — раз в час забирает отчёты партнёра из почты (если включены).
+
+У каждой функции свой выключатель: ковры можно поднять или погасить,
+не трогая уборку, и наоборот.
 
 Глобальных переменных здесь нет: всё, что нужно частям робота, собирается
 в объекте `App` и передаётся явно. Так любую часть можно поднять отдельно
@@ -27,15 +31,20 @@ from adminbot import db
 from adminbot.amo import ids
 from adminbot.amo.client import AmoAuthError, AmoClient, AmoError
 from adminbot.config import Settings
+from adminbot.carpets.engine import CarpetEngine
+from adminbot.carpets.store import PgCarpetStore
+from adminbot.carpets.watcher import CarpetWatcher
 from adminbot.control import PgControlPanel, sync_allowed
+from adminbot.mail import MailBox, mail_settings_from_env
 from adminbot.sync.backlog import BacklogRunner
 from adminbot.sync.engine import Engine, service_enums
 from adminbot.sync.reconcile import PgSummarySource, Reconciler
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import MemoryLinkStore, PgLinkStore
 from adminbot.sync.watcher import PgOrderSource, Watcher
-from adminbot.tg.bot import OwnerAnswers, OwnerCommands, build_router
-from adminbot.tg.cards import question_card, summary_text
+from adminbot.tg.bot import CarpetAnswers, OwnerAnswers, OwnerCommands, build_router
+from adminbot.tg.cards import (
+    carpet_question_card, carpet_report_text, question_card, summary_text)
 from adminbot.tg.session import build_session
 
 log = logging.getLogger("adminbot")
@@ -54,6 +63,7 @@ class App:
     watcher: Watcher
     reconciler: Reconciler
     stop: asyncio.Event
+    carpet_watcher: Optional[Any] = None
 
     async def run(self) -> None:
         """Запустить всё до сигнала остановки."""
@@ -68,6 +78,9 @@ class App:
             asyncio.create_task(self.reconciler.run_forever(self.stop), name="reconcile"),
             asyncio.create_task(self._stop_polling_on_signal(), name="stopper"),
         ]
+        if self.carpet_watcher is not None:
+            background.append(asyncio.create_task(
+                self.carpet_watcher.run_forever(self.stop), name="carpets"))
         try:
             await self.dispatcher.start_polling(self.bot, handle_signals=False,
                                                 close_bot_session=False)
@@ -157,6 +170,11 @@ async def build_app(settings: Settings) -> App:
                            service_by_master=services),
     )
 
+    # Ковры от партнёра: своя цепочка и свой выключатель. Если функция выключена
+    # или нет доступа к почте, наблюдатель просто не создаётся — уборка работает.
+    carpet_watcher, carpet_store = _build_carpets(settings, own_pool, bot, live_amo,
+                                                  rehearsal_amo)
+
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(
         OwnerCommands(
@@ -166,14 +184,80 @@ async def build_app(settings: Settings) -> App:
             dry_run=settings.amo_sync_dry_run,
             watcher=watcher,
             backlog=backlog,
+            carpet_watcher=carpet_watcher,
         ),
         OwnerAnswers(owner_tg_id=settings.owner_tg_id, store=store, backlog=backlog),
+        CarpetAnswers(owner_tg_id=settings.owner_tg_id, store=carpet_store)
+        if carpet_store else None,
     ))
 
     return App(settings=settings, bot_pool=bot_pool, own_pool=own_pool,
                amo_clients=(rehearsal_amo, live_amo), bot=bot,
                dispatcher=dispatcher, watcher=watcher, reconciler=reconciler,
+               carpet_watcher=carpet_watcher,
                stop=asyncio.Event())
+
+
+def _build_carpets(settings: Settings, own_pool: Any, bot: Bot,
+                   live_amo: AmoClient, rehearsal_amo: AmoClient):
+    """Собрать разбор ковров. Возвращает (наблюдатель, хранилище) или (None, None).
+
+    Функция выключена или нет доступа к почте — ковры просто не поднимаются,
+    а уборка работает как ни в чём не бывало. Это и есть «свой выключатель
+    у каждой функции» из дизайна.
+    """
+    if not settings.carpets_enabled:
+        log.info("Ковры: функция выключена настройкой CARPETS_ENABLED")
+        return None, None
+
+    try:
+        mail_settings = mail_settings_from_env()
+    except RuntimeError as exc:
+        log.warning("Ковры не подняты: %s", exc)
+        return None, None
+
+    store = PgCarpetStore(own_pool)
+    engine = CarpetEngine(
+        amo=rehearsal_amo if settings.carpets_dry_run else live_amo,
+        store=store,
+        dry_run=settings.carpets_dry_run,
+        salesbot_wait_sec=settings.salesbot_wait_sec,
+    )
+    watcher = CarpetWatcher(
+        engine=engine,
+        mailbox=MailBox(connect=mail_settings.connect, folder=mail_settings.folder),
+        store=store,
+        poll_interval_sec=settings.carpets_poll_interval_sec,
+        on_question=_make_carpet_question_sender(bot, settings.owner_tg_id),
+        on_report=_make_carpet_report_sender(bot, settings.owner_tg_id),
+    )
+    log.info("Ковры: включены, режим %s, почта %s/%s",
+             "репетиция" if settings.carpets_dry_run else "БОЕВОЙ",
+             mail_settings.user, mail_settings.folder)
+    return watcher, store
+
+
+def _make_carpet_question_sender(bot: Bot, owner_tg_id: int):
+    async def send(row, link) -> Optional[int]:
+        text, keyboard = carpet_question_card(row, link.question)
+        try:
+            sent = await bot.send_message(owner_tg_id, text, reply_markup=keyboard)
+        except Exception:                              # noqa: BLE001
+            log.exception("Ковры, заказ №%s: карточку отправить не удалось", row.partner_id)
+            return None
+        return sent.message_id
+
+    return send
+
+
+def _make_carpet_report_sender(bot: Bot, owner_tg_id: int):
+    async def send(letter, report) -> None:
+        try:
+            await bot.send_message(owner_tg_id, carpet_report_text(letter.subject, report))
+        except Exception:                              # noqa: BLE001
+            log.exception("Ковры: отчёт по письму отправить не удалось")
+
+    return send
 
 
 def _make_summary_sender(bot: Bot, owner_tg_id: int):

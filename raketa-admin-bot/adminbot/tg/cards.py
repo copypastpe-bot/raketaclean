@@ -248,3 +248,94 @@ PATH_BY_PIPELINE = {
     ids.PIPELINE_REALIZATION: "A",
     ids.PIPELINE_PRIMARY: "B",
 }
+
+
+# --- ковры от партнёра ---
+
+CARPET_PREFIX = "carpet"
+
+CARPET_REASONS = {
+    "какая сделка про этот заказ": "Нашёл несколько сделок — какая из них про эти ковры?",
+    "в строке отчёта не разобрал телефон": "В строке отчёта не разобрал номер телефона — "
+                                           "искать сделку не по чему.",
+    "сейлзбот не создал автосделку по коврам": "Лид передан в работу, но ковровую "
+                                               "автосделку так и не увидел.",
+}
+CARPET_DEFAULT_REASON = "Не смог решить сам, что делать с этим заказом партнёра."
+
+
+def carpet_question_card(row: Any, question: Optional[dict]):
+    """Вопрос по строке отчёта партнёра."""
+    reason = (question or {}).get("reason", "")
+    options = (question or {}).get("options") or []
+
+    head = [f"🧶 Ковры · заказ партнёра №{row.partner_id}"]
+    if getattr(row, "client_name", None):
+        head.append(row.client_name)
+    head.append(mask(row.phone10))
+    if row.is_refusal:
+        head.append("ОТКАЗ")
+    else:
+        head.append(f"{money(row.amount)} ₽")
+    if getattr(row, "district", None):
+        head.append(row.district)
+    if row.return_date:
+        head.append(f"сдано {row.return_date:%d.%m}")
+
+    lines = [" · ".join(head), ""]
+    if row.is_refusal and row.refusal_reason:
+        lines.append(f"Причина отказа: {row.refusal_reason}")
+        lines.append("")
+    lines.append(CARPET_REASONS.get(reason, CARPET_DEFAULT_REASON))
+
+    rows = [[InlineKeyboardButton(text=_option_label(option),
+                                  callback_data=_carpet_choice(row.partner_id,
+                                                               str(option["lead_id"])))]
+            for option in options]
+    rows.append([
+        InlineKeyboardButton(text="➕ Завести сделку",
+                             callback_data=_carpet_choice(row.partner_id, "new")),
+        InlineKeyboardButton(text="✋ Сам разберусь",
+                             callback_data=_carpet_choice(row.partner_id, "manual")),
+    ])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def parse_carpet_choice(data: Optional[str]) -> Optional[tuple[int, str, Optional[int]]]:
+    """Разобрать нажатие на ковровой карточке: (заказ партнёра, выбор, сделка)."""
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != CARPET_PREFIX or not parts[1].isdigit():
+        return None
+
+    partner_id, choice = int(parts[1]), parts[2]
+    if choice in ("new", "manual"):
+        return partner_id, choice, None
+    if choice.isdigit():
+        return partner_id, "lead", int(choice)
+    return None
+
+
+def carpet_report_text(subject: Optional[str], report: Any) -> str:
+    """Итог разбора одного письма партнёра."""
+    counts = dict(getattr(report, "by_status", {}) or {})
+    lines = [f"🧶 Разобрал отчёт партнёра: {subject or 'без темы'}", ""]
+    lines.append(f"✅ Проведено: {counts.get('done', 0)} из {report.processed}")
+
+    waiting = counts.get("waiting_owner", 0)
+    if waiting:
+        lines.append(f"❓ Ждут вашего ответа: {waiting}")
+    in_flight = counts.get("waiting_salesbot", 0) + counts.get("in_progress", 0)
+    if in_flight:
+        lines.append(f"⏳ В работе (ждут автосделку): {in_flight}")
+    if counts.get("error"):
+        lines.append(f"⚠️ Ошибок: {counts['error']}")
+    if getattr(report, "failures", ()):
+        lines.append(f"⚠️ Не разобрано строк: {len(report.failures)}")
+
+    if not (waiting or in_flight or counts.get("error") or getattr(report, "failures", ())):
+        lines += ["", "Всё разобрано — разбираться не с чем."]
+    return "\n".join(lines)
+
+
+def _carpet_choice(partner_id: int, value: str) -> str:
+    return f"{CARPET_PREFIX}:{partner_id}:{value}"
