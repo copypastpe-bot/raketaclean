@@ -7,6 +7,8 @@
 #   sudo raketa-admin-bot-update --rehearsal   репетиция: решать, но не писать
 #   sudo raketa-admin-bot-update --backlog-from=2026-08-14   с какой даты разбирать заказы
 #   sudo raketa-admin-bot-update --report      что робот записал (ничего не меняет)
+#   sudo raketa-admin-bot-update --carpets-on --carpets-rehearsal   ковры: репетиция
+#   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
 #
 # Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
 # меняются только два выключателя, и каждый раз печатается итоговое состояние.
@@ -17,6 +19,8 @@ ENABLED=""
 DRY_RUN=""
 REPORT=""
 BACKLOG_FROM=""
+CARPETS=""
+CARPETS_DRY=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
@@ -25,6 +29,10 @@ for arg in "$@"; do
         --rehearsal) DRY_RUN=1 ;;
         --report)    REPORT=1 ;;
         --backlog-from=*) BACKLOG_FROM="${arg#*=}" ;;
+        --carpets-on)        CARPETS=1 ;;
+        --carpets-off)       CARPETS=0 ;;
+        --carpets-live)      CARPETS_DRY=0 ;;
+        --carpets-rehearsal) CARPETS_DRY=1 ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -103,12 +111,24 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$ENABLED" ] && set_flag AMO_SYNC_ENABLED "$ENABLED"
 [ -n "$DRY_RUN" ] && set_flag AMO_SYNC_DRY_RUN "$DRY_RUN"
 [ -n "$BACKLOG_FROM" ] && set_flag AMO_SYNC_BACKLOG_FROM "$BACKLOG_FROM"
+[ -n "$CARPETS" ] && set_flag CARPETS_ENABLED "$CARPETS"
+[ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
+
+# Доступы к почте робота лежат отдельным файлом у admin. Переносим их в настройки
+# службы один раз: сама служба читает только свой .env.
+if ! grep -q "^MAIL_USER=" "$ENV_FILE" && [ -f /home/admin/.mail_robot.env ]; then
+    grep -E "^MAIL_[A-Z_]+=" /home/admin/.mail_robot.env >> "$ENV_FILE"
+    echo "доступы к почте перенесены в настройки службы"
+fi
 
 now_enabled=$(grep '^AMO_SYNC_ENABLED=' "$ENV_FILE" | cut -d= -f2-)
 now_dry=$(grep '^AMO_SYNC_DRY_RUN=' "$ENV_FILE" | cut -d= -f2-)
 echo "функция: $([ "$now_enabled" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
 echo "режим:   $([ "$now_dry" = 1 ] && echo 'репетиция (в amoCRM не пишем)' || echo 'БОЕВОЙ (пишем в amoCRM)')"
 echo "хвост с: $(grep "^AMO_SYNC_BACKLOG_FROM=" "$ENV_FILE" | cut -d= -f2-)"
+now_carpets=$(grep "^CARPETS_ENABLED=" "$ENV_FILE" | cut -d= -f2-)
+now_carpets_dry=$(grep "^CARPETS_DRY_RUN=" "$ENV_FILE" | cut -d= -f2-)
+echo "ковры:   $([ "$now_carpets" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_carpets_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
 
 say "6. Перезапуск"
 systemctl restart raketa-admin-bot.service

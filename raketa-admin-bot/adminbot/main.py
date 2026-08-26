@@ -32,7 +32,7 @@ from adminbot.amo import ids
 from adminbot.amo.client import AmoAuthError, AmoClient, AmoError
 from adminbot.config import Settings
 from adminbot.carpets.engine import CarpetEngine
-from adminbot.carpets.store import PgCarpetStore
+from adminbot.carpets.store import MemoryCarpetStore, PgCarpetStore
 from adminbot.carpets.watcher import CarpetWatcher
 from adminbot.control import PgControlPanel, sync_allowed
 from adminbot.mail import MailBox, mail_settings_from_env
@@ -216,7 +216,9 @@ def _build_carpets(settings: Settings, own_pool: Any, bot: Bot,
         log.warning("Ковры не подняты: %s", exc)
         return None, None
 
-    store = PgCarpetStore(own_pool)
+    # Та же тонкость, что и в уборке: в репетиции отметки шагов не должны попадать
+    # в базу, иначе боевой прогон сочтёт работу выполненной и пропустит её.
+    store = MemoryCarpetStore() if settings.carpets_dry_run else PgCarpetStore(own_pool)
     engine = CarpetEngine(
         amo=rehearsal_amo if settings.carpets_dry_run else live_amo,
         store=store,

@@ -44,6 +44,8 @@ class MemoryCarpetStore:
     def __init__(self, now: Optional[Any] = None) -> None:
         self.links: dict[int, CarpetLink] = {}
         self.actions: list[dict] = []
+        self.letters: dict[str, tuple] = {}
+        self.rows: dict[int, dict] = {}
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     async def get(self, partner_id: int) -> Optional[CarpetLink]:
@@ -52,6 +54,8 @@ class MemoryCarpetStore:
     async def create(self, partner_id: int, phone10: Optional[str],
                      source_file: Optional[str] = None,
                      row_data: Optional[dict] = None) -> CarpetLink:
+        if row_data is not None:
+            self.rows[partner_id] = row_data
         link = self.links.get(partner_id)
         if link is None:
             link = CarpetLink(partner_id=partner_id, phone10=phone10 or "", status="new",
@@ -86,6 +90,24 @@ class MemoryCarpetStore:
 
     def actions_of(self, action: str) -> list[dict]:
         return [row for row in self.actions if row["action"] == action]
+
+    # --- что нужно наблюдателю почты ---
+
+    async def letter_processed(self, uid: str) -> bool:
+        return uid in self.letters
+
+    async def remember_letter(self, uid: str, subject: Optional[str],
+                              files: list, rows_total: int) -> None:
+        self.letters[uid] = (subject, list(files), rows_total)
+
+    async def pending_rows(self):
+        """В репетиции незавершённые строки живут здесь же, в памяти."""
+        from adminbot.carpets.report import CarpetRow
+        from adminbot.carpets.watcher import ACTIVE_STATUSES
+
+        return [(CarpetRow.from_dict(self.rows[partner_id]), link)
+                for partner_id, link in self.links.items()
+                if link.status in ACTIVE_STATUSES and partner_id in self.rows]
 
 
 class PgCarpetStore:
