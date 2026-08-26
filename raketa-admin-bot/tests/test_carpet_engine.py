@@ -108,20 +108,22 @@ async def test_unknown_district_is_left_empty():
 
 
 async def test_filled_fields_are_not_overwritten():
-    """Адрес, услугу и специалиста владелец мог поправить руками."""
+    """Адрес владелец мог поправить руками — робот его не трогает.
+
+    Услуга и специалист — исключение: в ковровой воронке они всегда ковровые,
+    см. test_service_and_specialist_are_overwritten_in_a_carpet_deal.
+    """
     amo, store = FakeAmo(), MemoryCarpetStore()
     open_carpet_lead(amo, custom_fields_values=[
         {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "свой адрес"}]},
-        {"field_id": ids.FIELD_SERVICE, "values": [{"enum_id": 128971}]},
-        {"field_id": ids.FIELD_SPECIALIST, "values": [{"enum_id": 951505}]},
+        {"field_id": ids.FIELD_COMMENT, "values": [{"value": "ковёр 3х4, пятно"}]},
     ])
 
     await make_engine(amo, store).process_row(row())
 
     sent = fields_of(amo)
     assert ids.FIELD_ADDRESS not in sent
-    assert ids.FIELD_SERVICE not in sent
-    assert ids.FIELD_SPECIALIST not in sent
+    assert ids.FIELD_COMMENT not in sent
 
 
 async def test_empty_fields_are_filled_with_carpet_defaults():
@@ -359,3 +361,43 @@ async def test_operator_values_in_these_fields_are_kept():
     for field_id in (ids.FIELD_ORDER_DATETIME, ids.FIELD_SOURCE,
                      ids.FIELD_COMMENT, ids.FIELD_CLIENT_TYPE):
         assert field_id not in sent
+
+
+# --- сделка, разделённая сейлзботом (случай №44352, 2026-08-26) ---
+
+async def test_service_and_specialist_are_overwritten_in_a_carpet_deal():
+    """Лид был на две услуги сразу — сейлзбот разделил его на две сделки.
+
+    В ковровую копию уехали услуга «Чистка мебели» и мастер уборки: сейлзбот
+    просто скопировал поля исходного лида. Для ковровой воронки это заведомо
+    неверно, поэтому здесь робот перезаписывает оба поля (решение владельца).
+    """
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    open_carpet_lead(amo, custom_fields_values=[
+        {"field_id": ids.FIELD_SERVICE, "values": [{"enum_id": ids.SERVICE_ENUM_FURNITURE}]},
+        {"field_id": ids.FIELD_SPECIALIST, "values": [{"enum_id": 951507}]},
+    ])
+
+    await make_engine(amo, store).process_row(row())
+
+    sent = fields_of(amo)
+    assert sent[ids.FIELD_SERVICE]["values"][0]["enum_id"] == ids.SERVICE_ENUM_CARPETS
+    assert sent[ids.FIELD_SPECIALIST]["values"][0]["enum_id"] == ids.SPECIALIST_ENUM_CARPETS
+
+
+async def test_service_in_the_primary_lead_is_left_alone():
+    """А вот в лиде первичной воронки услуг может быть несколько — не трогаем.
+
+    Затерев её, робот сломал бы разделение: сейлзбот не завёл бы сделку
+    на вторую услугу.
+    """
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    amo.add_lead(31532745, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(datetime(2026, 8, 17, tzinfo=MOSCOW_TZ).timestamp()),
+                 custom_fields_values=[{"field_id": ids.FIELD_SERVICE,
+                                        "values": [{"enum_id": ids.SERVICE_ENUM_FURNITURE}]}])
+
+    await make_engine(amo, store).process_row(
+        row(partner_id=44535, phone10="9202994600", added_date=date(2026, 8, 17)))
+
+    assert ids.FIELD_SERVICE not in fields_of(amo)

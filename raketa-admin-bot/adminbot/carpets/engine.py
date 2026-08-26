@@ -187,9 +187,10 @@ class CarpetEngine:
 
     async def _step_fill_carpet_lead(self, row: CarpetRow, link: CarpetLink) -> StepResult:
         existing = await self._get_lead(link.lead_id)
+        fields = self._lead_fields(row, existing, carpet_deal=True)
         await self._write("update_lead", row, link.lead_id,
                           self.amo.update_lead(link.lead_id, price=row.amount,
-                                               custom_fields=self._lead_fields(row, existing)))
+                                               custom_fields=fields))
         return StepResult()
 
     async def _step_move_carpet_delivered(self, row: CarpetRow, link: CarpetLink) -> StepResult:
@@ -228,8 +229,6 @@ class CarpetEngine:
         """
         existing = await self._get_lead(link.primary_lead_id)
         fields = self._lead_fields(row, existing)
-        if not field_value(existing, ids.FIELD_SERVICE):
-            fields.append(enum_field(ids.FIELD_SERVICE, ids.SERVICE_ENUM_CARPETS))
         await self._write("update_lead", row, link.primary_lead_id,
                           self.amo.update_lead(link.primary_lead_id, price=row.amount,
                                                custom_fields=fields))
@@ -273,7 +272,6 @@ class CarpetEngine:
 
     async def _step_create_primary_lead(self, row: CarpetRow, link: CarpetLink) -> StepResult:
         fields = self._lead_fields(row, existing=None)
-        fields.append(enum_field(ids.FIELD_SERVICE, ids.SERVICE_ENUM_CARPETS))
         intent = await self._write(
             "create_lead", row, None,
             self.amo.create_lead(
@@ -296,7 +294,8 @@ class CarpetEngine:
 
     # --- поля сделки ---
 
-    def _lead_fields(self, row: CarpetRow, existing: Optional[dict]) -> list[dict]:
+    def _lead_fields(self, row: CarpetRow, existing: Optional[dict],
+                     *, carpet_deal: bool = False) -> list[dict]:
         fields: list[dict] = []
 
         if row.pickup_date:
@@ -332,9 +331,15 @@ class CarpetEngine:
 
         if row.address and not field_value(existing, ids.FIELD_ADDRESS):
             fields.append(text_field(ids.FIELD_ADDRESS, row.address))
-        if not field_value(existing, ids.FIELD_SERVICE):
+        # Услуга и специалист. В ковровой воронке они заведомо ковровые, поэтому
+        # там робот их перезаписывает: лид мог быть на две услуги сразу, сейлзбот
+        # разделил его на две сделки и скопировал в ковровую поля исходного лида —
+        # так в ней оказывались «Чистка мебели» и мастер уборки (заказ №44352).
+        # А вот в самом лиде первичной воронки услуг может быть несколько: затерев
+        # её, робот сломал бы разделение.
+        if carpet_deal or not field_value(existing, ids.FIELD_SERVICE):
             fields.append(enum_field(ids.FIELD_SERVICE, ids.SERVICE_ENUM_CARPETS))
-        if not field_value(existing, ids.FIELD_SPECIALIST):
+        if carpet_deal or not field_value(existing, ids.FIELD_SPECIALIST):
             fields.append(enum_field(ids.FIELD_SPECIALIST, ids.SPECIALIST_ENUM_CARPETS))
         return fields
 
