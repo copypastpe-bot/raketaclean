@@ -18,7 +18,6 @@ import socket
 import time
 from typing import Any, Awaitable, Callable, Optional, Sequence
 
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp.abc import AbstractResolver
 from aiohttp.resolver import DefaultResolver
 
@@ -136,8 +135,15 @@ def _record(host: str, ip: str, port: int) -> dict[str, Any]:
     }
 
 
-def build_session(ip_pool: Sequence[str] = (), proxy: Optional[str] = None) -> AiohttpSession:
-    """Сессия для бота: с прямыми адресами Telegram, если они заданы."""
+def build_session(ip_pool: Sequence[str] = (), proxy: Optional[str] = None):
+    """Сессия для бота: с прямыми адресами Telegram, если они заданы.
+
+    aiogram импортируется здесь, а не наверху файла: разбор адресов нужен
+    конфигурации, а конфигурацией пользуются скрипты прогонов, которым
+    Telegram не нужен вовсе.
+    """
+    from aiogram.client.session.aiohttp import AiohttpSession
+
     session = AiohttpSession(proxy=proxy or None)
     if ip_pool:
         session._connector_init["resolver"] = TelegramIPResolver(ip_pool)
