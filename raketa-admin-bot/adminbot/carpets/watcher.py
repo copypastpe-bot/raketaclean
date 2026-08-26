@@ -29,6 +29,9 @@ log = logging.getLogger(__name__)
 # Статусы, по которым работа ещё не закончена. `waiting_owner` здесь тоже есть:
 # движок по нему ничего не делает, но наблюдателю он нужен, чтобы дослать карточку,
 # если Telegram в прошлый раз не ответил.
+# Пока есть незаконченная работа, следующий проход делаем скоро, а не через час.
+QUICK_RETRY_SEC = 60
+
 ACTIVE_STATUSES: tuple[str, ...] = (
     "new", "in_progress", "waiting_salesbot", "error", "waiting_owner",
 )
@@ -112,7 +115,19 @@ class CarpetWatcher:
                 await self.tick()
             except Exception:                          # noqa: BLE001
                 log.exception("Проход по коврам не удался")
-            await self.sleep(self.poll_interval_sec)
+            await self.sleep(self._next_delay())
+
+    def _next_delay(self) -> float:
+        """Обычно ждём час, но не тогда, когда работа не закончена.
+
+        Письма приходят раз в неделю, поэтому час — нормальный шаг. Но если робот
+        передал лид в работу и ждёт автосделку сейлзбота, тот управляется за
+        секунды: час простоя здесь был бы нелепым.
+        """
+        counts = dict(getattr(self.last_report, "by_status", {}) or {})
+        unfinished = sum(counts.get(status, 0) for status in
+                         ("waiting_salesbot", "in_progress", "new", "error"))
+        return QUICK_RETRY_SEC if unfinished else self.poll_interval_sec
 
     # --- внутреннее ---
 

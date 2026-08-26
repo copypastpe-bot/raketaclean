@@ -237,3 +237,37 @@ async def test_run_forever_sleeps_between_ticks():
     await watcher.run_forever(stop)
 
     assert naps == [3600, 3600]                        # письма приходят раз в неделю
+
+
+async def test_unfinished_work_shortens_the_pause():
+    """Ждём автосделку сейлзбота — час простоя здесь был бы нелепым."""
+    mailbox, engine = FakeMailBox([]), FakeEngine()
+    waiting = CarpetLink(partner_id=44535, phone10="9202994600", status="waiting_salesbot")
+    engine.store.pending = [(row(44535, phone10="9202994600"), waiting)]
+    engine.results = {44535: waiting}
+    stop = asyncio.Event()
+    naps = []
+
+    async def fake_sleep(seconds):
+        naps.append(seconds)
+        stop.set()
+
+    watcher = make_watcher(mailbox, engine, poll_interval_sec=3600, sleep=fake_sleep)
+    await watcher.run_forever(stop)
+
+    assert naps == [60]
+
+
+async def test_quiet_watcher_sleeps_the_full_hour():
+    mailbox, engine = FakeMailBox([]), FakeEngine()
+    stop = asyncio.Event()
+    naps = []
+
+    async def fake_sleep(seconds):
+        naps.append(seconds)
+        stop.set()
+
+    watcher = make_watcher(mailbox, engine, poll_interval_sec=3600, sleep=fake_sleep)
+    await watcher.run_forever(stop)
+
+    assert naps == [3600]
