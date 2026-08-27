@@ -83,14 +83,16 @@ async def test_existing_realization_deal_is_filled_not_moved(amo):
 
 
 async def test_filled_fields_are_never_overwritten(amo):
-    """Заполненные поля робот не трогает. Кроме адреса — он живёт в календаре.
+    """Заполненные поля робот не трогает. Кроме адреса и комментария.
 
-    Адрес стал исключением по решению владельца 2026-08-27: амо подставляет
-    в сделку адрес из карточки клиента, а куда ехать сегодня — знает календарь.
+    Оба стали исключением по решению владельца 2026-08-27: амо подставляет
+    в сделку адрес из карточки клиента, а в комментарии лида стоит огрызок
+    от заявки («Хим чи») — состав заказа и адрес живут в календаре.
     """
     amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
                  custom_fields_values=[
-                     {"field_id": ids.FIELD_COMMENT, "values": [{"value": "Свой текст"}]},
+                     {"field_id": ids.FIELD_PAYMENT_TYPE,
+                      "values": [{"value": "Наличка", "enum_id": ids.PAYMENT_ENUM_CASH}]},
                      {"field_id": ids.FIELD_SERVICE,
                       "values": [{"value": "Уборка", "enum_id": ids.SERVICE_ENUM_CLEANING}]},
                  ])
@@ -99,9 +101,9 @@ async def test_filled_fields_are_never_overwritten(amo):
     await engine.process(an_order())
 
     fields = sent_fields(amo)
-    assert ids.FIELD_COMMENT not in fields          # комментарий владельца цел
-    assert ids.FIELD_SERVICE not in fields          # услуга тоже не переписана
-    assert ids.FIELD_ADDRESS in fields              # а адрес обновлён из записи
+    assert ids.FIELD_SERVICE not in fields          # услуга не переписана
+    assert ids.FIELD_ADDRESS in fields              # адрес обновлён из записи
+    assert ids.FIELD_COMMENT in fields              # и комментарий тоже
 
 
 async def test_autotasks_stay_open(amo):
@@ -421,3 +423,37 @@ async def test_address_is_not_written_to_the_client_card(amo):
 
     for _contact_id, payload in amo.calls_of("update_contact"):
         assert "адрес" not in str(payload).lower()
+
+
+async def test_comment_from_the_calendar_wins(amo):
+    """Состав заказа из записи важнее огрызка, пришедшего с заявкой.
+
+    Живой случай 2026-08-27: в лиде стояло «Хим чи», а в записи — «детский
+    матрас с сушкой 2000р / что-то еще / минимальна 3000р». В сделку попал
+    огрызок, потому что поле не было пустым.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_COMMENT, "values": [{"value": "Хим чи"}]}])
+    engine = build(amo)
+
+    await engine.process(an_order(comment="детский матрас с сушкой 2000р\nминимальна 3000р"))
+
+    assert "детский матрас" in only_value(sent_fields(amo)[ids.FIELD_COMMENT])
+
+
+async def test_same_comment_is_not_rewritten(amo):
+    """Тот же текст второй раз не отправляем: лишний запрос в амо ни к чему."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_COMMENT,
+                      "values": [{"value": "Матрас/2\nСушка/2\nаллергик астматик спит"}]},
+                     {"field_id": ids.FIELD_ADDRESS,
+                      "values": [{"value": "Панина д 7к2, кв 132"}]}])
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    fields = sent_fields(amo)
+    assert ids.FIELD_COMMENT not in fields
+    assert ids.FIELD_ADDRESS not in fields

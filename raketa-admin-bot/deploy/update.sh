@@ -213,6 +213,14 @@ if [ -n "$SHOW_LEADS" ] || [ -n "$SHOW_LEAD_IDS" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.show_leads || true
 fi
 
+# Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS" ] && [ -z "$GCAL_RUN" ] \
+        && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM" ]; then
+    echo
+    echo "Служба не перезапускалась: это была только проверка."
+    exit 0
+fi
+
 say "6. Перезапуск"
 systemctl restart raketa-admin-bot.service
 sleep 4

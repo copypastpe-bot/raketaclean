@@ -65,7 +65,7 @@ async def main() -> int:
     for raw in ordered[:LIMIT]:
         parsed = parse_event(raw)
         services = ", ".join(SERVICE_WORDS.get(kind, kind) for kind in parsed.services)
-        print(f"• {parsed.summary or '(без заголовка)'}")
+        print(f"• {parsed.summary or '(без заголовка)'}   [{parsed.event_id}]")
         print(f"    вид: {KIND_WORDS.get(parsed.kind, parsed.kind.value)}"
               + (f", услуга: {services}" if services else "")
               + (f", район: {parsed.district}" if parsed.district else "")
@@ -74,6 +74,9 @@ async def main() -> int:
             print(f"    адрес: {parsed.address}")
         else:
             print("    адрес: в записи не указан (поле «Адрес» останется пустым)")
+        if parsed.comment:
+            shown = parsed.comment.replace("\n", " / ")
+            print(f"    комментарий: {shown[:100]}")
         if parsed.phone10:
             print(f"    телефон найден: …{parsed.phone10[-4:]}")
         elif parsed.kind is EventKind.ORDER:
