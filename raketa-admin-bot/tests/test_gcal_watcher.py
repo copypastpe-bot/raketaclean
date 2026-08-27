@@ -211,3 +211,45 @@ async def test_known_district_without_a_field_in_amo_is_reported():
 
     assert report.districts_missing == ("балахнинский",)
     assert report.unknown_districts == ()
+
+
+async def test_rehearsal_reports_every_record_to_the_owner():
+    """В репетиции владелец узнаёт и об уверенных решениях, а не только о вопросах."""
+    store = MemoryCalendarStore()
+    sent: list = []
+
+    async def on_rehearsal(link, actions) -> None:
+        sent.append((link.event_id, [a["action"] for a in actions]))
+
+    class WorkingEngine(FakeEngine):
+        async def process(self, event):
+            link = await store.create(event.event_id, kind=event.kind.value)
+            await store.log(event.event_id, "create_lead", dry_run=True, amo_id=41400009)
+            self.seen.append(event)
+            return await store.update(event.event_id, status="done") or link
+
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((ORDER,), "T2"))
+    watcher = build(calendar, engine=WorkingEngine(), store=store,
+                    dry_run=True, on_rehearsal=on_rehearsal)
+
+    await watcher.tick()
+    await watcher.tick()
+
+    assert sent == [("evt-1", ["create_lead"])]
+
+
+async def test_live_mode_stays_quiet():
+    """В бою робот работает молча: отчёт по каждому заказу — это спам."""
+    store = MemoryCalendarStore()
+    sent: list = []
+
+    async def on_rehearsal(link, actions) -> None:
+        sent.append(link.event_id)
+
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((ORDER,), "T2"))
+    watcher = build(calendar, store=store, dry_run=False, on_rehearsal=on_rehearsal)
+
+    await watcher.tick()
+    await watcher.tick()
+
+    assert sent == []

@@ -49,7 +49,8 @@ from adminbot.sync.store import MemoryLinkStore, PgLinkStore
 from adminbot.sync.watcher import PgOrderSource, Watcher
 from adminbot.tg.bot import CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router
 from adminbot.tg.calendar_cards import (
-    boat_card, calendar_question_card, calendar_summary_text, cancellation_card)
+    boat_card, calendar_question_card, calendar_summary_text, cancellation_card,
+    rehearsal_text)
 from adminbot.tg.cards import (
     carpet_question_card, carpet_report_text, question_card, summary_text)
 from adminbot.tg.session import build_session
@@ -335,6 +336,8 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
         sync_from=settings.gcal_sync_from or datetime.now(MOSCOW_TZ).date(),
         poll_interval_sec=settings.gcal_poll_interval_sec,
         on_question=_make_calendar_question_sender(bot, settings.owner_tg_id),
+        on_rehearsal=_make_rehearsal_sender(bot, settings.owner_tg_id),
+        dry_run=settings.gcal_dry_run,
     )
     log.info("Календарь: включён, режим %s, календарь %s, читаю с %s",
              "репетиция" if settings.gcal_dry_run else "БОЕВОЙ",
@@ -347,6 +350,15 @@ def _make_calendar_summary_sender(bot: Bot, owner_tg_id: int):
 
     async def send(report) -> None:
         await bot.send_message(owner_tg_id, calendar_summary_text(report))
+
+    return send
+
+
+def _make_rehearsal_sender(bot: Bot, owner_tg_id: int):
+    """Отчёт репетиции: что робот сделал бы с записью календаря."""
+
+    async def send(link, actions) -> None:
+        await bot.send_message(owner_tg_id, rehearsal_text(link, actions))
 
     return send
 

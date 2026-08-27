@@ -215,3 +215,46 @@ def test_status_shows_mode_and_last_exchange():
 
     off = calendar_status_text(enabled=False, dry_run=False, report=None)
     assert "выключен" in off.lower()
+
+
+# --- отчёт репетиции ---
+
+def test_rehearsal_card_tells_what_would_happen():
+    """В репетиции робот обязан рассказывать даже об уверенных решениях.
+
+    Иначе прогон бесполезен: владелец видит только вопросы, а как раз вопросов
+    робот в хорошем случае и не задаёт.
+    """
+    from adminbot.tg.calendar_cards import rehearsal_text
+
+    link = a_link(status="done", question=None, path="C", district="борский",
+                  client_name="Светлана", order_date=date(2026, 8, 31),
+                  services=("furniture",))
+    actions = [
+        {"action": "create_contact", "amo_id": None},
+        {"action": "create_lead", "amo_id": 41400009},
+        {"action": "move_lead", "amo_id": 41400009},
+    ]
+
+    text = rehearsal_text(link, actions)
+
+    assert "репетиц" in text.lower()
+    assert "Светлана" in text and "31.08" in text
+    assert "+79605379757" in text                 # телефон целиком — бот личный
+    assert "мебель" in text.lower() and "Борский" in text
+    assert "создам контакт" in text.lower()
+    assert "создам сделку" in text.lower()
+    assert "в CRM ничего не менял" in text or "не менял" in text
+
+
+def test_rehearsal_card_is_honest_about_doing_nothing():
+    """Запись пропущена — так и говорим, без выдуманной работы."""
+    from adminbot.tg.calendar_cards import rehearsal_text
+
+    link = a_link(status="skipped", question=None,
+                  skip_reason="перемыв по гарантии — сделка не нужна")
+
+    text = rehearsal_text(link, [])
+
+    assert "перемыв" in text.lower()
+    assert "создам" not in text.lower()

@@ -21,6 +21,9 @@ from adminbot.gcal.event import EventKind, parse_event
 from adminbot.tg.calendar_cards import SERVICE_WORDS
 
 DEFAULT_CALENDAR = "raketaclean52@gmail.com"
+# Сколько записей печатать. Календарь ведут на недели вперёд, а глазами смотрят
+# ближайшие: два десятка покрывают неделю с запасом.
+LIMIT = int(os.environ.get("GCAL_CHECK_LIMIT", "20"))
 KIND_WORDS = {
     EventKind.ORDER: "заказ",
     EventKind.BLOCK: "выходной мастера",
@@ -56,7 +59,10 @@ async def main() -> int:
     print(f"Календарь {calendar_id} доступен. Записей в ближайшие дни: "
           f"{len(batch.events)}\n")
 
-    for raw in batch.events[:5]:
+    # По времени работы, а не в порядке выдачи Google: владельцу нужен его день.
+    ordered = sorted(batch.events, key=lambda raw: str(
+        (raw.get("start") or {}).get("dateTime") or (raw.get("start") or {}).get("date") or ""))
+    for raw in ordered[:LIMIT]:
         parsed = parse_event(raw)
         services = ", ".join(SERVICE_WORDS.get(kind, kind) for kind in parsed.services)
         print(f"• {parsed.summary or '(без заголовка)'}")

@@ -61,6 +61,8 @@ class CalendarWatcher:
         is_enabled: Optional[Callable[[], Any]] = None,
         poll_interval_sec: int = 300,
         on_question: Optional[Callable[[Any], Awaitable[Optional[int]]]] = None,
+        on_rehearsal: Optional[Callable[[Any, list], Awaitable[None]]] = None,
+        dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.calendar = calendar
@@ -70,6 +72,11 @@ class CalendarWatcher:
         self.is_enabled = is_enabled
         self.poll_interval_sec = poll_interval_sec
         self.on_question = on_question
+        # В репетиции о каждой записи рассказываем владельцу: уверенные решения
+        # робот принимает молча, и без отчёта прогон показал бы пустоту.
+        # В бою это был бы спам — там говорим только о вопросах и вечерней сводке.
+        self.on_rehearsal = on_rehearsal
+        self.dry_run = dry_run
         self.sleep = sleep
         self.last_report: Optional[CalendarTickReport] = None
 
@@ -172,6 +179,8 @@ class CalendarWatcher:
         await self._save_event_data(parsed, link)
         if await self._maybe_ask(link):
             questions.append(parsed.event_id)
+        elif self.dry_run and self.on_rehearsal is not None:
+            await self._report_rehearsal(link)
 
     async def _save_event_data(self, parsed: ParsedEvent, link: Any) -> None:
         """Держать разбор рядом с записью: им продолжают незаконченную цепочку."""
@@ -180,6 +189,15 @@ class CalendarWatcher:
         if getattr(link, "event_data", None) == parsed.to_dict():
             return
         await self.store.update(parsed.event_id, event_data=parsed.to_dict())
+
+    async def _report_rehearsal(self, link: Any) -> None:
+        """Рассказать владельцу, что робот сделал бы с этой записью."""
+        actions = [row for row in getattr(self.store, "actions", [])
+                   if row.get("event_id") == link.event_id]
+        try:
+            await self.on_rehearsal(link, actions)
+        except Exception:                              # noqa: BLE001 — Telegram не роняет проход
+            log.exception("Календарь, запись %s: отчёт репетиции не ушёл", link.event_id)
 
     async def _maybe_ask(self, link: Any) -> bool:
         """Карточка уходит один раз: повтор дублировал бы вопрос каждый проход."""

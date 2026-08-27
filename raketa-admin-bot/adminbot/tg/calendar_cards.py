@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -212,4 +212,67 @@ def calendar_status_text(*, enabled: bool, dry_run: bool,
                      "их не трогаю")
     if report.full_resync:
         lines.append("   Закладка обмена устарела — перечитал календарь заново.")
+    return "\n".join(lines)
+
+
+# --- отчёт репетиции ---
+
+# Действия робота человеческим языком. {id} — место для номера сделки в амо.
+ACTION_WORDS = {
+    "create_contact": "создам контакт клиента",
+    "create_lead": "создам сделку",
+    "update_lead": "заполню сделку {id}",
+    "move_lead": "переведу сделку {id} в работу",
+    "update_contact": "поправлю имя контакта",
+    "add_note": "оставлю примечание в сделке {id}",
+    "ask_owner": "спрошу вас",
+    "salesbot_timeout": "подожду автосделку",
+}
+
+# Внутренние состояния записи → что это значит для владельца.
+STATE_WORDS = {
+    "done": "готово",
+    "waiting_salesbot": "жду автосделку сейлзбота",
+    "waiting_owner": "жду вашего ответа",
+    "closing": "закрою сделку по вашему подтверждению",
+    "cancelled": "заказ отменён",
+    "error": "не получилось, повторю",
+}
+
+
+def rehearsal_text(link: Any, actions: Sequence[dict]) -> str:
+    """Что робот сделал бы с записью. Только для репетиции.
+
+    В репетиции молчать нельзя: уверенные решения робот принимает без вопросов,
+    и если о них не рассказывать, прогон покажет владельцу пустоту — а проверить
+    он должен именно их.
+    """
+    lines = ["🧪 Репетиция по записи календаря", _client_line(link)]
+
+    if link.status == "skipped":
+        lines.append(f"Пропускаю: {link.skip_reason or 'не похоже на заказ'}.")
+        lines.append("В CRM ничего не менял.")
+        return "\n".join(lines)
+
+    steps = []
+    for action in actions:
+        words = ACTION_WORDS.get(action.get("action", ""))
+        if not words:
+            continue
+        step = words.format(id=f"#{action['amo_id']}" if action.get("amo_id") else "")
+        if step not in steps:
+            steps.append(step)
+
+    if steps:
+        lines.append("")
+        lines.append("Сделал бы:")
+        lines += [f"   • {step}" for step in steps]
+    else:
+        lines.append("Делать нечего: всё уже заполнено.")
+
+    state = STATE_WORDS.get(link.status)
+    if state and link.status != "done":
+        lines.append(f"Дальше: {state}.")
+
+    lines += ["", "В CRM ничего не менял — это репетиция."]
     return "\n".join(lines)
