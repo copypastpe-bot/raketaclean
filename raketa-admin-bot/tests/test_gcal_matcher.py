@@ -51,14 +51,18 @@ def test_nothing_found_means_new_deal():
     assert decision.kind == "create_new"
 
 
-def test_closed_deal_is_a_past_order_not_a_candidate():
-    """Заказ ещё не выполнен: закрытая сделка — прошлая работа клиента."""
+def test_closed_deal_is_never_taken_into_work():
+    """Заказ ещё не выполнен, а сделка закрыта — работать с ней робот не станет.
+
+    Он либо спросит владельца (если закрыта ровно на дату записи), либо заведёт
+    новую, но дозаполнять и двигать закрытую не будет никогда.
+    """
     closed = realization(3, status=ids.STATUS_SUCCESS, order_date=ORDER_DAY,
                          closed_date=ORDER_DAY)
 
     decision = match_event(order_date=ORDER_DAY, candidates=[closed])
 
-    assert decision.kind == "create_new"       # чужого не трогаем и не привязываемся
+    assert decision.kind not in ("use_realization", "use_primary")
 
 
 def test_date_picks_between_two_open_deals():
@@ -143,3 +147,41 @@ def test_realization_wins_over_primary():
 
     assert decision.kind == "use_realization"
     assert decision.lead_id == 2
+
+
+def test_closed_deal_on_the_same_day_is_a_question():
+    """Владелец мог провести этот заказ сам до того, как записал его в календарь.
+
+    Решение владельца 2026-08-27. Раньше робот молча заводил вторую сделку:
+    закрытые он считает прошлой работой клиента. Но закрытая ровно на дату
+    записи — скорее тот же заказ, и решать это должен владелец.
+    """
+    closed = realization(5, status=ids.STATUS_SUCCESS, order_date=ORDER_DAY,
+                         closed_date=ORDER_DAY)
+
+    decision = match_event(order_date=ORDER_DAY, candidates=[closed])
+
+    assert decision.kind == "ask_owner_closed"
+    assert decision.options == (5,)
+
+
+def test_old_closed_deal_is_still_just_history():
+    """Закрытая сделка с другой датой — прошлый заказ, вопрос задавать не о чем."""
+    closed = realization(5, status=ids.STATUS_SUCCESS, order_date=date(2026, 5, 10),
+                         closed_date=date(2026, 5, 12))
+
+    decision = match_event(order_date=ORDER_DAY, candidates=[closed])
+
+    assert decision.kind == "create_new"
+
+
+def test_open_deal_wins_over_a_closed_one():
+    """Есть открытая — работаем с ней, закрытая не мешает."""
+    decision = match_event(
+        order_date=ORDER_DAY,
+        candidates=[realization(5, status=ids.STATUS_SUCCESS, order_date=ORDER_DAY,
+                                closed_date=ORDER_DAY),
+                    realization(6, order_date=ORDER_DAY)])
+
+    assert decision.kind == "use_realization"
+    assert decision.lead_id == 6

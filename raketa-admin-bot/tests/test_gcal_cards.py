@@ -308,3 +308,31 @@ def test_changed_record_message_lists_what_was_updated():
     assert "изменил" in text.lower() or "поправил" in text.lower()
     assert "адрес" in text and "комментарий" in text
     assert "/leads/detail/31570695" in text
+
+
+def test_closed_deal_question_offers_to_confirm_not_to_work():
+    """По закрытой сделке робот предлагает признать её, а не работать с ней."""
+    link = a_link(question={"reason": "ask_owner_closed", "options": [
+        {"lead_id": 31570357, "pipeline_id": 4482787, "date": "2026-08-27"}]})
+
+    text, keyboard = calendar_question_card(link)
+
+    assert "закрыт" in text.lower() and "сами" in text.lower()
+    buttons = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert any("Это она" in b for b in buttons)
+    assert any("Создать новую" in b for b in buttons)
+
+
+async def test_owner_confirms_the_closed_deal(answered):
+    store, answers = answered
+    await store.update("evt-1", status="waiting_owner", real_lead_id=None,
+                       question={"reason": "ask_owner_closed",
+                                 "options": [{"lead_id": 31570357,
+                                              "pipeline_id": 4482787}]})
+
+    await answers.on_choice(FakeCallback("gcal:linked_31570357"))
+
+    link = await store.get("evt-1")
+    assert link.status == "done"
+    assert link.real_lead_id == 31570357
+    assert link.path == "done"                   # работать по ней робот не будет

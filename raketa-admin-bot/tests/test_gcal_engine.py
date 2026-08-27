@@ -494,3 +494,54 @@ async def test_untouched_record_is_not_rewritten(amo):
     await engine.process(an_order())
 
     assert len(amo.calls) == calls_before
+
+
+# --- «Источник сделки» (правило владельца 2026-08-27) ---
+
+async def test_source_is_filled_in_an_existing_lead_when_empty(amo):
+    """Лид есть, источник в нём не указан — ставим «Сарафанное радио»."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    fields = sent_fields(amo)
+    assert fields[ids.FIELD_SOURCE]["values"] == [
+        {"enum_id": ids.SOURCE_ENUM_WORD_OF_MOUTH}]
+
+
+async def test_source_in_the_lead_is_never_overwritten(amo):
+    """Источник в лиде указан — он и остаётся: там правда о том, откуда клиент."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_SOURCE,
+                      "values": [{"value": "Авито", "enum_id": 235983}]}])
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    assert ids.FIELD_SOURCE not in sent_fields(amo)
+
+
+async def test_new_client_gets_word_of_mouth(amo):
+    """Ни лида, ни контакта — клиент пришёл впервые, это сарафан."""
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    created = amo.calls_of("create_lead")[0]
+    fields = {field["field_id"]: field for field in created["custom_fields"]}
+    assert fields[ids.FIELD_SOURCE]["values"] == [
+        {"enum_id": ids.SOURCE_ENUM_WORD_OF_MOUTH}]
+
+
+async def test_known_contact_without_a_lead_is_a_repeat_order(amo):
+    """Лида нет, но контакт в CRM есть — значит клиент возвращается."""
+    amo.contacts.append({"id": 555, "name": "Юлия"})
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    created = amo.calls_of("create_lead")[0]
+    fields = {field["field_id"]: field for field in created["custom_fields"]}
+    assert fields[ids.FIELD_SOURCE]["values"] == [{"enum_id": ids.SOURCE_ENUM_REPEAT}]

@@ -303,6 +303,13 @@ class CalendarAnswers:
         # Выбрана конкретная сделка. Путь зависит от воронки: готовую сделку
         # реализации остаётся дозаполнить, а лид первичной нужно ещё передать
         # в работу и дождаться автосделки.
+        if choice.startswith("linked_"):
+            # Владелец подтвердил: заказ уже проведён им самим. Запоминаем связку,
+            # в CRM не лезем — там всё сделано.
+            lead_id = int(choice.removeprefix("linked_"))
+            return ({"status": "done", "path": "done", "real_lead_id": lead_id},
+                    f"понял, это сделка #{lead_id} — ничего не трогаю.")
+
         lead_id = int(choice.removeprefix("lead_"))
         pipeline_id = next((option.get("pipeline_id")
                             for option in ((link.question or {}).get("options") or [])

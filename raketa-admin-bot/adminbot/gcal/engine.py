@@ -103,7 +103,7 @@ PATHS: dict[str, tuple[str, ...]] = {"A": PATH_A, "B": PATH_B, "C": PATH_C,
                                      "BOAT": PATH_BOAT}
 
 _PATH_BY_KIND = {"use_realization": "A", "use_primary": "B", "create_new": "C"}
-_ASK_KINDS = ("ask_owner", "ask_owner_stale")
+_ASK_KINDS = ("ask_owner", "ask_owner_stale", "ask_owner_closed")
 
 # Шаги, которые делаются не всегда.
 _CONDITIONAL = {"note_duplicates": lambda link, scratch: bool(scratch.duplicates)}
@@ -498,12 +498,17 @@ class CalendarEngine:
         if service_enums and not field_value(existing, ids.FIELD_SERVICE):
             fields.append(enums_field(ids.FIELD_SERVICE, service_enums))
 
-        if creating:
+        # «Источник сделки» — правило владельца 2026-08-27:
+        #   лид есть, источник в нём не указан      → «Сарафанное радио»;
+        #   ни лида, ни контакта (заводим с нуля)   → «Сарафанное радио»;
+        #   лида нет, а контакт в CRM есть          → «Повторный заказ».
+        # Указанный источник не трогаем никогда: там правда о том, откуда клиент.
+        if not field_value(existing, ids.FIELD_SOURCE):
             scratch = self._scratch.get(event.event_id) or _Scratch()
+            repeat = creating and not scratch.is_new_client
             fields.append(enums_field(
                 ids.FIELD_SOURCE,
-                [ids.SOURCE_ENUM_WORD_OF_MOUTH if scratch.is_new_client
-                 else ids.SOURCE_ENUM_REPEAT]))
+                [ids.SOURCE_ENUM_REPEAT if repeat else ids.SOURCE_ENUM_WORD_OF_MOUTH]))
         return fields
 
     async def _write(self, action: str, event: ParsedEvent, amo_id: Optional[int],

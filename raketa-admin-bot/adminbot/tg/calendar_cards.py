@@ -31,6 +31,9 @@ SERVICE_WORDS = {
 REASON_TEXTS = {
     "ask_owner": "Нашёл несколько подходящих сделок — какая из них про этот заказ?",
     "ask_owner_stale": "Свежих сделок нет, есть только старые. Завести новую?",
+    "ask_owner_closed": "У клиента есть закрытая сделка ровно на эту дату — "
+                        "похоже, вы уже провели этот заказ сами. Это она или "
+                        "заказ новый?",
     "сейлзбот не создал автосделку": "Лид передан в работу, но автосделку так и не увидел.",
 }
 DEFAULT_REASON = "Не смог решить сам, как поступить с этой записью календаря."
@@ -98,8 +101,10 @@ def calendar_question_card(link: Any) -> tuple[str, InlineKeyboardMarkup]:
         REASON_TEXTS.get(reason, DEFAULT_REASON),
     ])
 
-    rows = [[InlineKeyboardButton(text=_option_label(option),
-                                  callback_data=_choice(f"lead_{option['lead_id']}"))]
+    # По закрытой сделке работать нечего: её можно только признать «той самой».
+    prefix = "linked" if reason == "ask_owner_closed" else "lead"
+    rows = [[InlineKeyboardButton(text=_option_label(option, reason),
+                                  callback_data=_choice(f"{prefix}_{option['lead_id']}"))]
             for option in options]
     if reason == "сейлзбот не создал автосделку":
         rows.append([InlineKeyboardButton(text="🔄 Проверить ещё раз",
@@ -111,9 +116,11 @@ def calendar_question_card(link: Any) -> tuple[str, InlineKeyboardMarkup]:
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _option_label(option: dict) -> str:
+def _option_label(option: dict, reason: str = "") -> str:
     """Подпись кнопки: номер сделки и её дата, если она известна."""
     label = f"Сделка #{option['lead_id']}"
+    if reason == "ask_owner_closed":
+        label = f"✔️ Это она — #{option['lead_id']}"
     when = option.get("date")
     return f"{label} · {when[8:10]}.{when[5:7]}" if when else label
 

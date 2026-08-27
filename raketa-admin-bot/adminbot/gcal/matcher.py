@@ -5,8 +5,10 @@
 
 Чем этот случай отличается от заказа из бота:
 
-1. **Заказ ещё не выполнен.** Робот смотрит вперёд, а не назад. Закрытая сделка
-   здесь не кандидат вовсе: это прошлая работа того же клиента.
+1. **Заказ ещё не выполнен.** Робот смотрит вперёд, а не назад: закрытая сделка —
+   как правило, прошлая работа того же клиента, и в работу она не берётся.
+   Исключение — закрытая ровно на дату записи: владелец мог провести этот самый
+   заказ сам, поэтому робот спрашивает, а не заводит вторую (решение 2026-08-27).
 2. **Нет ни суммы, ни мастера.** В записи календаря их просто нет, поэтому
    отсеять чужую сделку по цене и «Специалисту» нечем. Остаётся дата.
 3. **Запись появляется задолго до работы.** Постоянные клиенты бронируют за три
@@ -81,10 +83,10 @@ def match_event(*, order_date: date, candidates: Iterable[LeadInfo],
     один и тот же заказ, и общая сделка у них правильная.
     """
     taken = set(taken_lead_ids)
-    ours = [lead for lead in candidates
+    mine = [lead for lead in candidates
             if lead.pipeline_id not in ids.PIPELINES_IGNORED
-            and lead.lead_id not in taken
-            and lead.is_open]                  # закрытая сделка — прошлая работа клиента
+            and lead.lead_id not in taken]
+    ours = [lead for lead in mine if lead.is_open]
 
     realization = [lead for lead in ours if lead.pipeline_id == ids.PIPELINE_REALIZATION]
     primary = [lead for lead in ours if lead.pipeline_id == ids.PIPELINE_PRIMARY]
@@ -117,5 +119,13 @@ def match_event(*, order_date: date, candidates: Iterable[LeadInfo],
     if stale:
         return _ask(stale, kind="ask_owner_stale")
 
-    # 4. Ничего нет — заводим цепочку с нуля.
+    # 4. Открытого ничего нет. Но если у клиента есть ЗАКРЫТАЯ сделка ровно на
+    #    дату записи — владелец мог провести этот заказ сам, до того как записал
+    #    его в календарь. Молча заводить вторую нельзя (решение владельца 2026-08-27).
+    same_day_closed = [lead for lead in mine
+                       if not lead.is_open and _within_dates(order_date, lead)]
+    if same_day_closed:
+        return _ask(same_day_closed, kind="ask_owner_closed")
+
+    # 5. Ничего нет — заводим цепочку с нуля.
     return Decision(kind="create_new")
