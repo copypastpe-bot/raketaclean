@@ -53,6 +53,16 @@ SERVICE_ENUMS: dict[str, int] = {
     "windows": ids.SERVICE_ENUM_WINDOWS,
 }
 
+# Пометка записи, которая лежала в календаре ДО включения функции. Такие заказы
+# владелец ведёт сам (его решение 8), и правка записи не возвращает её в работу:
+# иначе первое же изменение состава завело бы сделку по чужой работе.
+KEPT_OUT_REASON = "была в календаре до включения"
+
+
+def _kept_out_of_work(link: CalendarLink) -> bool:
+    return (link.skip_reason or "").startswith(KEPT_OUT_REASON)
+
+
 # Виды записей, по которым робот молчит, и почему.
 SILENT_KINDS: dict[EventKind, str] = {
     EventKind.BLOCK: "выходной мастера",
@@ -140,6 +150,11 @@ class CalendarEngine:
 
         if link.status in ("done", "waiting_owner", "cancelled"):
             return link                        # закончили или ждём ответа владельца
+
+        if _kept_out_of_work(link):
+            # Запись лежала в календаре до включения: этот заказ владелец ведёт
+            # сам, и правка записи не делает его нашей работой (решение 8).
+            return link
 
         if event.kind in SILENT_KINDS:
             return await self._skip(event, link)
@@ -472,7 +487,7 @@ class CalendarEngine:
         }
         changed = {name: value for name, value in updates.items()
                    if getattr(link, name, None) != value}
-        if link.status == "skipped":
+        if link.status == "skipped" and not _kept_out_of_work(link):
             # Владелец снял пометку «⁉️» — запись снова в работе (решение 9).
             changed["status"] = "new"
             changed["skip_reason"] = None

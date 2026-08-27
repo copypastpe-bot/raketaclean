@@ -26,6 +26,7 @@ from datetime import date
 from typing import Any, Awaitable, Callable, Optional
 
 from adminbot.amo import ids
+from adminbot.gcal.engine import KEPT_OUT_REASON
 from adminbot.gcal.event import EventKind, ParsedEvent, parse_event
 
 log = logging.getLogger(__name__)
@@ -162,7 +163,7 @@ class CalendarWatcher:
                                 phone10=parsed.phone10, order_date=parsed.order_date,
                                 event_data=parsed.to_dict())
         await self.store.update(parsed.event_id, status="skipped",
-                                skip_reason="была в календаре до включения")
+                                skip_reason=KEPT_OUT_REASON)
 
     async def _handle(self, parsed: ParsedEvent, statuses: Counter,
                       questions: list, failures: list) -> None:

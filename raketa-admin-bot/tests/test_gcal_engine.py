@@ -298,3 +298,36 @@ async def test_deal_closed_by_owner_before_the_answer(amo):
 
     assert link.status == "cancelled"
     assert amo.calls_of("move_lead") == []
+
+
+async def test_editing_an_old_record_does_not_wake_it_up(amo):
+    """Правка записи, лежавшей в календаре до включения, не заводит сделку.
+
+    Иначе решение владельца «старое веду сам» нарушалось бы при первой же
+    правке: робот получил бы изменение и принял запись за новую работу.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="skipped",
+                       skip_reason="была в календаре до включения")
+
+    link = await engine.process(an_order(comment="Дописал состав"))
+
+    assert link.status == "skipped"
+    assert amo.calls == []
+
+
+async def test_removing_the_unsettled_mark_still_wakes_the_record(amo):
+    """А снятие пометки «⁉️» по-прежнему возвращает запись в работу (решение 9)."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="unsettled", phone10=None)
+    await store.update("evt-1", status="skipped",
+                       skip_reason="дата не подтверждена — ждём, пока снимут пометку")
+
+    link = await engine.process(an_order())
+
+    assert link.status == "done"
