@@ -12,6 +12,8 @@
 #   sudo raketa-admin-bot-update --gcal-on --gcal-rehearsal         календарь: репетиция
 #   sudo raketa-admin-bot-update --gcal-live                        календарь: боевой режим
 #   sudo raketa-admin-bot-update --gcal-check                       проверить доступ к календарю
+#   sudo raketa-admin-bot-update --gcal-run=ID[,ID]                 провести эти записи календаря
+#   sudo raketa-admin-bot-update --gcal-run=ID --gcal-preview       то же, но без записи в CRM
 #
 # Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
 # меняются только два выключателя, и каждый раз печатается итоговое состояние.
@@ -27,6 +29,8 @@ CARPETS_DRY=""
 GCAL=""
 GCAL_DRY=""
 GCAL_CHECK=""
+GCAL_RUN=""
+GCAL_PREVIEW=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
@@ -44,6 +48,8 @@ for arg in "$@"; do
         --gcal-live)      GCAL_DRY=0 ;;
         --gcal-rehearsal) GCAL_DRY=1 ;;
         --gcal-check)     GCAL_CHECK=1 ;;
+        --gcal-run=*)     GCAL_RUN="${arg#*=}" ;;
+        --gcal-preview)   GCAL_PREVIEW=1 ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -178,6 +184,17 @@ if [ -n "$GCAL_CHECK" ]; then
     GCAL_VARS=$(grep -E "^GCAL_" "$ENV_FILE" | xargs || true)
     sudo -u adminbot env $GCAL_VARS \
         "$HOME_DIR/.venv/bin/python" -m scripts.check_calendar || true
+fi
+
+# Разовый прогон по названным записям календаря: заводит сделки по-настоящему
+# (или показывает, что сделал бы, если добавлен --gcal-preview).
+if [ -n "$GCAL_RUN" ]; then
+    say "Прогон записей календаря"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS GCAL_RUN_IDS="$GCAL_RUN" \
+        GCAL_RUN_PREVIEW="${GCAL_PREVIEW:-0}" \
+        "$HOME_DIR/.venv/bin/python" -m scripts.run_calendar || true
 fi
 
 say "6. Перезапуск"
