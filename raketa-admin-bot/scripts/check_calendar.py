@@ -70,6 +70,10 @@ async def main() -> int:
               + (f", услуга: {services}" if services else "")
               + (f", район: {parsed.district}" if parsed.district else "")
               + (f", когда: {parsed.order_date:%d.%m.%Y}" if parsed.order_date else ""))
+        if parsed.address:
+            print(f"    адрес: {parsed.address}")
+        else:
+            print("    адрес: в записи не указан (поле «Адрес» останется пустым)")
         if parsed.phone10:
             print(f"    телефон найден: …{parsed.phone10[-4:]}")
         elif parsed.kind is EventKind.ORDER:

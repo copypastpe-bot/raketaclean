@@ -455,7 +455,11 @@ class CalendarEngine:
                 event.order_date, time(hour=12), tzinfo=MOSCOW_TZ)
             fields.append(datetime_field(ids.FIELD_ORDER_DATETIME, moment))
 
-        if event.address and not field_value(existing, ids.FIELD_ADDRESS):
+        # Адрес — исключение из правила «заполненное не трогаем» (решение владельца
+        # 2026-08-27). В сделку амо подставляет адрес из карточки клиента, то есть
+        # адрес прошлого заказа; куда ехать мастеру сегодня, написано в календаре.
+        # В карточку клиента робот адрес не пишет: заказ бывает и не по его адресу.
+        if event.address and field_value(existing, ids.FIELD_ADDRESS) != event.address:
             fields.append(text_field(ids.FIELD_ADDRESS, event.address))
 
         if event.comment and not field_value(existing, ids.FIELD_COMMENT):

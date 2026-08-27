@@ -83,10 +83,14 @@ async def test_existing_realization_deal_is_filled_not_moved(amo):
 
 
 async def test_filled_fields_are_never_overwritten(amo):
-    """В сделке уже стоят адрес и услуга — робот их не трогает."""
+    """Заполненные поля робот не трогает. Кроме адреса — он живёт в календаре.
+
+    Адрес стал исключением по решению владельца 2026-08-27: амо подставляет
+    в сделку адрес из карточки клиента, а куда ехать сегодня — знает календарь.
+    """
     amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
                  custom_fields_values=[
-                     {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "Свой адрес"}]},
+                     {"field_id": ids.FIELD_COMMENT, "values": [{"value": "Свой текст"}]},
                      {"field_id": ids.FIELD_SERVICE,
                       "values": [{"value": "Уборка", "enum_id": ids.SERVICE_ENUM_CLEANING}]},
                  ])
@@ -95,8 +99,9 @@ async def test_filled_fields_are_never_overwritten(amo):
     await engine.process(an_order())
 
     fields = sent_fields(amo)
-    assert ids.FIELD_ADDRESS not in fields          # адрес владельца остался как был
+    assert ids.FIELD_COMMENT not in fields          # комментарий владельца цел
     assert ids.FIELD_SERVICE not in fields          # услуга тоже не переписана
+    assert ids.FIELD_ADDRESS in fields              # а адрес обновлён из записи
 
 
 async def test_autotasks_stay_open(amo):
@@ -385,3 +390,34 @@ async def test_finished_record_keeps_its_details_fresh(amo):
     assert link.phone10 == "9151231544"           # но телефон теперь верный
     assert link.client_name == "Алена"
     assert amo.calls == []                        # в CRM не полезли
+
+
+async def test_address_from_the_calendar_wins(amo):
+    """Адрес заказа берётся из записи, даже если в сделке уже что-то стоит.
+
+    Решение владельца 2026-08-27: в сделку амо подставляет адрес из карточки
+    клиента — адрес прошлого заказа. Куда ехать мастеру сегодня, написано
+    в календаре, и это главнее.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_ADDRESS,
+                      "values": [{"value": "Бор ул. Луначарского 208"}]}])
+    engine = build(amo)
+
+    await engine.process(an_order(address="Перекопская, д. 10, п7, э3, кв. 247"))
+
+    fields = sent_fields(amo)
+    assert only_value(fields[ids.FIELD_ADDRESS]) == "Перекопская, д. 10, п7, э3, кв. 247"
+
+
+async def test_address_is_not_written_to_the_client_card(amo):
+    """В карточку клиента адрес не уходит: заказ бывает не по адресу клиента."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.contacts.append({"id": 555, "name": "Входящий 79605379757"})
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    for _contact_id, payload in amo.calls_of("update_contact"):
+        assert "адрес" not in str(payload).lower()
