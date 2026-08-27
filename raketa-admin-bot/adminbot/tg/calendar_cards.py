@@ -276,3 +276,50 @@ def rehearsal_text(link: Any, actions: Sequence[dict]) -> str:
 
     lines += ["", "В CRM ничего не менял — это репетиция."]
     return "\n".join(lines)
+
+
+def deal_url(base_url: str, lead_id: Optional[int]) -> str:
+    return f"{base_url.rstrip('/')}/leads/detail/{lead_id}" if lead_id else ""
+
+
+def done_text(link: Any, actions: Sequence[dict], *, base_url: str) -> str:
+    """Сообщение о сделанной работе — для недели наблюдения.
+
+    Владелец проверяет по горячим следам, поэтому в сообщении ровно то, что
+    нужно для проверки: чей заказ, что робот сделал со сделкой (взял готовую
+    или завёл новую) и ссылка, по которой смотреть.
+    """
+    kinds = {row.get("action") for row in actions}
+    created_lead = "create_lead" in kinds
+    created_contact = "create_contact" in kinds
+
+    if created_lead:
+        what = "создал сделку с нуля"
+    elif "move_lead" in kinds:
+        what = "взял готовый лид и передал его в работу"
+    else:
+        what = "взял существующую сделку и дозаполнил"
+
+    lines = ["📅 Календарь · " + what, _client_line(link)]
+    if created_contact:
+        lines.append("Клиента в CRM не было — завёл новый контакт.")
+
+    url = deal_url(base_url, link.real_lead_id or link.primary_lead_id)
+    if url:
+        lines += ["", url]
+    if link.status == "waiting_salesbot":
+        lines.append("Жду автосделку сейлзбота — допишу, когда появится.")
+    return "\n".join(lines)
+
+
+def updated_text(link: Any, changed: Sequence[str], *, base_url: str) -> str:
+    """Запись поправили после проведения — что робот подтянул в сделку."""
+    lines = [
+        "📅 Календарь · запись изменилась",
+        _client_line(link),
+        f"Поправил в сделке: {', '.join(changed)}.",
+    ]
+    url = deal_url(base_url, link.real_lead_id or link.primary_lead_id)
+    if url:
+        lines += ["", url]
+    return "\n".join(lines)

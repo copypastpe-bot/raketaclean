@@ -353,3 +353,26 @@ def carpet_report_text(subject: Optional[str], report: Any) -> str:
 
 def _carpet_choice(partner_id: int, value: str) -> str:
     return f"{CARPET_PREFIX}:{partner_id}:{value}"
+
+
+# --- сообщения о сделанной работе (неделя наблюдения с 2026-08-27) ---
+
+# Путь заказа → что это значило на деле, словами владельца.
+PATH_WORDS = {
+    "A": "взял готовую сделку и довёл до конца",
+    "B": "заполнил лид, передал в работу и довёл сделку до конца",
+    "C": "создал сделку с нуля и довёл до конца",
+    "done": "ничего не делал: вы уже провели её сами, я только запомнил связку",
+}
+
+
+def order_done_text(order: Any, link: Any, *, base_url: str) -> str:
+    """Сообщение о проведённом заказе — чтобы проверить по горячим следам."""
+    lines = [
+        "✅ Заказ из бота · " + PATH_WORDS.get(link.path or "", "провёл сделку"),
+        _order_line(order),
+    ]
+    lead_id = link.real_lead_id or link.primary_lead_id
+    if lead_id:
+        lines += ["", f"{base_url.rstrip('/')}/leads/detail/{lead_id}"]
+    return "\n".join(lines)

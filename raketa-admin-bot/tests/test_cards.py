@@ -262,3 +262,37 @@ def test_carpet_report_says_when_all_is_clean():
         letters=1, processed=4, by_status={"done": 4}))
 
     assert "разбираться не с чем" in text.lower()
+
+
+def test_order_done_message_for_the_week_of_watching():
+    """О каждом проведённом заказе — сообщение со ссылкой (решение 2026-08-27)."""
+    from adminbot.tg.cards import order_done_text
+    from adminbot.models import AmoLink
+    from tests.test_watcher import make_order
+
+    order = make_order(591)
+    link = AmoLink(order_id=591, phone10=order.phone10, status="done", path="A",
+                   real_lead_id=31570695)
+
+    text = order_done_text(order, link, base_url="https://raketacleancrm.amocrm.ru")
+
+    assert "Заказ №591" in text
+    assert "+7" in text                                  # телефон целиком
+    assert "https://raketacleancrm.amocrm.ru/leads/detail/31570695" in text
+    assert "взял" in text.lower()
+
+
+def test_order_done_message_tells_a_new_deal_from_an_old_one():
+    from adminbot.tg.cards import order_done_text
+    from adminbot.models import AmoLink
+    from tests.test_watcher import make_order
+
+    created = AmoLink(order_id=592, phone10="9601861067", status="done", path="C",
+                      real_lead_id=41400009)
+    by_owner = AmoLink(order_id=593, phone10="9601861067", status="done", path="done",
+                       real_lead_id=41400010)
+
+    assert "создал" in order_done_text(make_order(592), created,
+                                       base_url="https://x").lower()
+    assert "вы" in order_done_text(make_order(593), by_owner,
+                                   base_url="https://x").lower()

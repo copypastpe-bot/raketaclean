@@ -52,6 +52,8 @@ class CalendarStore(Protocol):
 
     async def forget(self, event_id: str) -> None: ...
 
+    async def actions_for(self, event_id: str) -> list[dict]: ...
+
     async def cursor(self) -> tuple[Optional[str], Optional[date]]: ...
 
     async def save_cursor(self, sync_token: Optional[str], *, sync_from: date) -> None: ...
@@ -136,6 +138,9 @@ class MemoryCalendarStore:
     async def save_cursor(self, sync_token: Optional[str], *, sync_from: date) -> None:
         self._cursor = (sync_token, sync_from)
 
+    async def actions_for(self, event_id: str) -> list[dict]:
+        return [row for row in self.actions if row.get("event_id") == event_id]
+
     def actions_of(self, action: str) -> list[dict]:
         return [row for row in self.actions if row["action"] == action]
 
@@ -180,6 +185,9 @@ class PgCalendarStore:
 
     async def forget(self, event_id: str) -> None:
         await db.delete_calendar_link(self._pool, event_id)
+
+    async def actions_for(self, event_id: str) -> list[dict]:
+        return await db.fetch_calendar_actions(self._pool, event_id)
 
     async def cursor(self) -> tuple[Optional[str], Optional[date]]:
         return await db.get_calendar_cursor(self._pool)

@@ -457,3 +457,40 @@ async def test_same_comment_is_not_rewritten(amo):
     fields = sent_fields(amo)
     assert ids.FIELD_COMMENT not in fields
     assert ids.FIELD_ADDRESS not in fields
+
+
+async def test_edited_record_updates_the_deal(amo):
+    """Владелец дописал состав и поменял адрес — робот подтянул это в сделку.
+
+    Решение владельца 2026-08-27: раз адрес и комментарий живут в календаре,
+    они должны быть верны и после правки, а не только в момент заведения.
+    Дату при этом не трогаем (решение 5) — её впишет заказ из бота.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await engine.process(an_order())
+    calls_before = len(amo.calls_of("update_lead"))
+
+    changed = await engine.process(an_order(
+        address="Другая улица, д 1", comment="Диван + два кресла, сушка"))
+
+    fields = sent_fields(amo, call=-1)
+    assert len(amo.calls_of("update_lead")) == calls_before + 1
+    assert only_value(fields[ids.FIELD_ADDRESS]) == "Другая улица, д 1"
+    assert "два кресла" in only_value(fields[ids.FIELD_COMMENT])
+    assert ids.FIELD_ORDER_DATETIME not in fields     # дату не правим
+    assert changed.status == "done"
+
+
+async def test_untouched_record_is_not_rewritten(amo):
+    """Запись пришла без изменений — в амо не идём вовсе."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await engine.process(an_order())
+    calls_before = len(amo.calls)
+
+    await engine.process(an_order())
+
+    assert len(amo.calls) == calls_before

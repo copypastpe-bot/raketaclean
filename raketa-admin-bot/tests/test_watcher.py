@@ -187,3 +187,68 @@ async def test_run_forever_survives_a_broken_tick():
     await watcher.run_forever(stop)
 
     assert len(ticks) == 2      # после падения цикл продолжил работу
+
+
+async def test_finished_order_is_reported_to_the_owner():
+    """Неделя наблюдения: о каждом проведённом заказе робот пишет владельцу.
+
+    Решение владельца 2026-08-27 — он проверяет работу по горячим следам,
+    поэтому сообщение уходит сразу, а не только в вечерней сводке.
+    """
+    reported: list = []
+
+    async def on_done(order, link) -> None:
+        reported.append((order.order_id, link.status))
+
+    order = make_order(591)
+    watcher = Watcher(engine=_EngineStub({591: "done"}), source=_SourceStub([order]),
+                      on_done=on_done)
+
+    await watcher.tick()
+
+    assert reported == [(591, "done")]
+
+
+async def test_order_waiting_for_the_owner_is_not_reported_twice():
+    """Заказ, по которому ушёл вопрос, не дублируется сообщением о работе."""
+    reported: list = []
+
+    async def on_done(order, link) -> None:
+        reported.append(order.order_id)
+
+    async def on_question(order, link) -> int:
+        return 555
+
+    order = make_order(592)
+    watcher = Watcher(engine=_EngineStub({592: "waiting_owner"}),
+                      source=_SourceStub([order]),
+                      on_question=on_question, on_done=on_done)
+
+    await watcher.tick()
+
+    assert reported == []
+
+
+class _SourceStub:
+    def __init__(self, orders):
+        self._orders = orders
+
+    async def pending(self):
+        return list(self._orders)
+
+
+class _EngineStub:
+    def __init__(self, statuses):
+        self._statuses = statuses
+        self.store = _StoreStub()
+
+    async def process_order(self, order):
+        from adminbot.models import AmoLink
+
+        return AmoLink(order_id=order.order_id, phone10=order.phone10,
+                       status=self._statuses[order.order_id], real_lead_id=41400001)
+
+
+class _StoreStub:
+    async def update(self, order_id, **fields):
+        return None

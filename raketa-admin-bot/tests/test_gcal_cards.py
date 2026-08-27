@@ -258,3 +258,53 @@ def test_rehearsal_card_is_honest_about_doing_nothing():
 
     assert "перемыв" in text.lower()
     assert "создам" not in text.lower()
+
+
+# --- сообщения о сделанной работе (неделя наблюдения) ---
+
+def test_done_message_says_what_happened_and_gives_the_link():
+    """Владелец проверяет работу по горячим следам: что сделал и куда смотреть."""
+    from adminbot.tg.calendar_cards import done_text
+
+    link = a_link(status="done", question=None, path="B", real_lead_id=31570695,
+                  client_name="Милена", order_date=date(2026, 8, 28),
+                  services=("mattress",), district="нижегородский")
+    actions = [{"action": "update_lead", "amo_id": 31570689},
+               {"action": "move_lead", "amo_id": 31570689},
+               {"action": "update_lead", "amo_id": 31570695}]
+
+    text = done_text(link, actions, base_url="https://raketacleancrm.amocrm.ru")
+
+    assert "Календарь" in text
+    assert "Милена" in text and "28.08" in text
+    assert "матрас" in text.lower()
+    assert "https://raketacleancrm.amocrm.ru/leads/detail/31570695" in text
+    assert "взял" in text.lower()                    # существующую сделку, не создал
+
+
+def test_done_message_distinguishes_a_new_deal():
+    from adminbot.tg.calendar_cards import done_text
+
+    link = a_link(status="done", question=None, path="C", real_lead_id=41400009)
+    actions = [{"action": "create_contact", "amo_id": None},
+               {"action": "create_lead", "amo_id": 41400007}]
+
+    text = done_text(link, actions, base_url="https://raketacleancrm.amocrm.ru")
+
+    assert "создал" in text.lower()
+    assert "новый контакт" in text.lower()           # клиента в CRM не было
+
+
+def test_changed_record_message_lists_what_was_updated():
+    """Запись поправили после проведения — говорим, что именно подтянули."""
+    from adminbot.tg.calendar_cards import updated_text
+
+    link = a_link(status="done", question=None, real_lead_id=31570695,
+                  client_name="Милена")
+
+    text = updated_text(link, ("адрес", "комментарий"),
+                        base_url="https://raketacleancrm.amocrm.ru")
+
+    assert "изменил" in text.lower() or "поправил" in text.lower()
+    assert "адрес" in text and "комментарий" in text
+    assert "/leads/detail/31570695" in text

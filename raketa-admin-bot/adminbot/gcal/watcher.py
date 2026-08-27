@@ -63,6 +63,8 @@ class CalendarWatcher:
         poll_interval_sec: int = 300,
         on_question: Optional[Callable[[Any], Awaitable[Optional[int]]]] = None,
         on_rehearsal: Optional[Callable[[Any, list], Awaitable[None]]] = None,
+        on_done: Optional[Callable[[Any, list], Awaitable[None]]] = None,
+        on_updated: Optional[Callable[[Any, tuple], Awaitable[None]]] = None,
         dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -77,6 +79,11 @@ class CalendarWatcher:
         # робот принимает молча, и без отчёта прогон показал бы пустоту.
         # В бою это был бы спам — там говорим только о вопросах и вечерней сводке.
         self.on_rehearsal = on_rehearsal
+        # Неделя наблюдения (решение владельца 2026-08-27): о каждой сделанной
+        # работе робот пишет владельцу сразу, со ссылкой на сделку. Выключается
+        # снятием обработчика, без правки логики.
+        self.on_done = on_done
+        self.on_updated = on_updated
         self.dry_run = dry_run
         self.sleep = sleep
         self.last_report: Optional[CalendarTickReport] = None
@@ -178,10 +185,18 @@ class CalendarWatcher:
             return
         statuses[link.status] += 1
         await self._save_event_data(parsed, link)
+
+        edits = tuple(getattr(self.engine, "last_edits", ()) or ())
+        if edits:
+            self.engine.last_edits = ()
+            await self._notify(self.on_updated, link, edits)
+
         if await self._maybe_ask(link):
             questions.append(parsed.event_id)
         elif self.dry_run and self.on_rehearsal is not None:
             await self._report_rehearsal(link)
+        elif not self.dry_run and link.status in ("done", "waiting_salesbot") and not edits:
+            await self._notify(self.on_done, link, await self._actions_of(link))
 
     async def _save_event_data(self, parsed: ParsedEvent, link: Any) -> None:
         """Держать разбор рядом с записью: им продолжают незаконченную цепочку."""
@@ -193,12 +208,21 @@ class CalendarWatcher:
 
     async def _report_rehearsal(self, link: Any) -> None:
         """Рассказать владельцу, что робот сделал бы с этой записью."""
-        actions = [row for row in getattr(self.store, "actions", [])
-                   if row.get("event_id") == link.event_id]
+        await self._notify(self.on_rehearsal, link, await self._actions_of(link))
+
+    async def _actions_of(self, link: Any) -> list:
+        """Что робот сделал по этой записи — из журнала своего хранилища."""
+        return await self.store.actions_for(link.event_id)
+
+    async def _notify(self, handler, link: Any, payload) -> None:
+        """Сообщение владельцу не должно ронять проход: Telegram бывает недоступен."""
+        if handler is None:
+            return
         try:
-            await self.on_rehearsal(link, actions)
-        except Exception:                              # noqa: BLE001 — Telegram не роняет проход
-            log.exception("Календарь, запись %s: отчёт репетиции не ушёл", link.event_id)
+            await handler(link, payload)
+        except Exception:                              # noqa: BLE001
+            log.exception("Календарь, запись %s: сообщение владельцу не ушло",
+                          link.event_id)
 
     async def _maybe_ask(self, link: Any) -> bool:
         """Карточка уходит один раз: повтор дублировал бы вопрос каждый проход."""

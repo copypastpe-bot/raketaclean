@@ -66,6 +66,17 @@ def _kept_out_of_work(link: CalendarLink) -> bool:
     return (link.skip_reason or "").startswith(KEPT_OUT_REASON)
 
 
+# Что робот подтягивает в уже заведённую сделку, если запись поправили
+# (решение владельца 2026-08-27). Даты здесь нет намеренно: её при переносе
+# робот не правит, фактическую впишет заказ из бота.
+CHANGEABLE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("address", "адрес"),
+    ("comment", "комментарий"),
+    ("services", "услуга"),
+    ("district", "район"),
+)
+
+
 # Виды записей, по которым робот молчит, и почему.
 SILENT_KINDS: dict[EventKind, str] = {
     EventKind.BLOCK: "выходной мастера",
@@ -132,6 +143,9 @@ class CalendarEngine:
         # У каждого движка свои черновики: в сервисе их работает несколько сразу
         # (наблюдатель, репетиция), и путать их расчёты нельзя.
         self._scratch: dict[str, _Scratch] = {}
+        # Что подтянулось в сделку при последней правке записи: наблюдатель
+        # берёт это, чтобы сказать владельцу, что именно поменялось.
+        self.last_edits: tuple[str, ...] = ()
 
     # --- основной ход ---
 
@@ -155,7 +169,11 @@ class CalendarEngine:
         # того, как робот отработал, а телефон и дата нужны ему позже — в карточке
         # отмены и в проверке, не занята ли сделка другой записью.
         if event.kind not in SILENT_KINDS and event.kind is not EventKind.BOAT:
+            before = link
             link = await self._refresh(event, link)
+            if link.status == "done" and not _kept_out_of_work(link):
+                # Запись поправили после проведения — доносим правку до сделки.
+                await self._apply_edits(event, link, before)
 
         if link.status in ("done", "waiting_owner", "cancelled"):
             return link                        # закончили или ждём ответа владельца
@@ -507,6 +525,9 @@ class CalendarEngine:
             "client_name": event.client_name,
             "district": event.district,
             "services": list(event.services),
+            # Разбор целиком: по нему видно, что именно поправил владелец в записи,
+            # и им же продолжают незаконченную цепочку после перезапуска.
+            "event_data": event.to_dict(),
         }
         changed = {name: value for name, value in updates.items()
                    if getattr(link, name, None) != value}
@@ -517,6 +538,40 @@ class CalendarEngine:
         if not changed:
             return link
         return await self.store.update(event.event_id, **changed) or link
+
+    async def _apply_edits(self, event: ParsedEvent, link: CalendarLink,
+                           before: CalendarLink) -> None:
+        """Подтянуть правку записи в уже заведённую сделку.
+
+        Сравниваем с тем, что робот помнил о записи: так правка видна, даже
+        если в самой сделке владелец успел что-то поменять.
+        """
+        lead_id = link.real_lead_id or link.primary_lead_id
+        if lead_id is None:
+            return
+
+        previous = before.event_data or {}
+        if not previous:
+            return                             # прошлого разбора нет — сравнить не с чем
+
+        changed = [title for name, title in CHANGEABLE_FIELDS
+                   if _value_of(event, name) != _value_of_dict(previous, name)]
+        if not changed:
+            return
+
+        existing = await self._get_lead(lead_id)
+        fields = self._lead_fields(event, existing)
+        # Дату не переносим: решение владельца 5 — фактическую впишет заказ бота.
+        fields = [field for field in fields
+                  if field["field_id"] != ids.FIELD_ORDER_DATETIME]
+        if not fields:
+            return
+
+        log.info("Календарь, запись %s: запись изменилась (%s) — обновляю сделку %s",
+                 event.event_id, ", ".join(changed), lead_id)
+        await self._write("update_lead", event, lead_id,
+                          self.amo.update_lead(lead_id, custom_fields=fields))
+        self.last_edits = tuple(changed)       # наблюдателю — о чём сказать владельцу
 
     async def _ask_owner(self, link: CalendarLink, reason: str,
                          payload: Optional[dict] = None) -> CalendarLink:
@@ -610,3 +665,14 @@ def _jsonable(payload: Any) -> Any:
     if isinstance(payload, (list, tuple)):
         return [_jsonable(item) for item in payload]
     return payload
+
+
+def _value_of(event: ParsedEvent, name: str) -> Any:
+    """Значение поля записи в том виде, в каком его помнит хранилище."""
+    value = getattr(event, name, None)
+    return tuple(value) if isinstance(value, (list, tuple)) else value
+
+
+def _value_of_dict(data: dict, name: str) -> Any:
+    value = data.get(name)
+    return tuple(value) if isinstance(value, (list, tuple)) else value

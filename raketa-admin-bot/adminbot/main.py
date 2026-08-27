@@ -50,9 +50,10 @@ from adminbot.sync.watcher import PgOrderSource, Watcher
 from adminbot.tg.bot import CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router
 from adminbot.tg.calendar_cards import (
     boat_card, calendar_question_card, calendar_summary_text, cancellation_card,
-    rehearsal_text)
+    done_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
-    carpet_question_card, carpet_report_text, question_card, summary_text)
+    carpet_question_card, carpet_report_text, order_done_text, question_card,
+    summary_text)
 from adminbot.tg.session import build_session
 
 log = logging.getLogger("adminbot")
@@ -183,6 +184,9 @@ async def build_app(settings: Settings) -> App:
         is_enabled=sync_allowed(sync_enabled=settings.amo_sync_enabled, control=control),
         poll_interval_sec=settings.poll_interval_sec,
         on_question=_make_question_sender(bot, settings.owner_tg_id),
+        # Неделя наблюдения (решение владельца 2026-08-27): о каждом проведённом
+        # заказе робот пишет владельцу сразу, со ссылкой на сделку.
+        on_done=_make_order_done_sender(bot, settings.owner_tg_id, settings.amo_base_url),
     )
 
     reconciler = Reconciler(
@@ -337,6 +341,10 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
         poll_interval_sec=settings.gcal_poll_interval_sec,
         on_question=_make_calendar_question_sender(bot, settings.owner_tg_id),
         on_rehearsal=_make_rehearsal_sender(bot, settings.owner_tg_id),
+        on_done=_make_calendar_done_sender(bot, settings.owner_tg_id,
+                                           settings.amo_base_url),
+        on_updated=_make_calendar_updated_sender(bot, settings.owner_tg_id,
+                                                 settings.amo_base_url),
         dry_run=settings.gcal_dry_run,
     )
     log.info("Календарь: включён, режим %s, календарь %s, читаю с %s",
@@ -350,6 +358,36 @@ def _make_calendar_summary_sender(bot: Bot, owner_tg_id: int):
 
     async def send(report) -> None:
         await bot.send_message(owner_tg_id, calendar_summary_text(report))
+
+    return send
+
+
+def _make_order_done_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+    """Сообщение о проведённом заказе из бота."""
+
+    async def send(order, link) -> None:
+        await bot.send_message(owner_tg_id,
+                               order_done_text(order, link, base_url=amo_base_url))
+
+    return send
+
+
+def _make_calendar_done_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+    """Сообщение о сделке, заведённой по записи календаря."""
+
+    async def send(link, actions) -> None:
+        await bot.send_message(owner_tg_id,
+                               done_text(link, actions, base_url=amo_base_url))
+
+    return send
+
+
+def _make_calendar_updated_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+    """Сообщение о том, что правка записи доехала до сделки."""
+
+    async def send(link, changed) -> None:
+        await bot.send_message(owner_tg_id,
+                               updated_text(link, changed, base_url=amo_base_url))
 
     return send
 

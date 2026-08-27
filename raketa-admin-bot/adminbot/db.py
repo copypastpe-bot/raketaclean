@@ -740,3 +740,18 @@ async def delete_calendar_link(own_pool: asyncpg.Pool, event_id: str) -> None:
     """Забыть запись календаря. Только для ручного разбора последствий."""
     async with own_pool.acquire() as conn:
         await conn.execute("DELETE FROM adminbot.gcal_events WHERE event_id = $1", event_id)
+
+
+async def fetch_calendar_actions(own_pool: asyncpg.Pool, event_id: str,
+                                 limit: int = 20) -> list[dict]:
+    """Что робот делал по записи календаря — для сообщения владельцу."""
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT action, amo_entity, amo_id, dry_run, payload, created_at
+            FROM adminbot.gcal_actions WHERE event_id = $1
+            ORDER BY id DESC LIMIT $2
+            """,
+            event_id, limit,
+        )
+    return [dict(row) for row in rows]

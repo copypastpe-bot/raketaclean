@@ -63,6 +63,7 @@ class Watcher:
         is_enabled: Optional[Callable[[], Any]] = None,
         poll_interval_sec: int = 60,
         on_question: Optional[Callable[[Order, AmoLink], Awaitable[Optional[int]]]] = None,
+        on_done: Optional[Callable[[Order, AmoLink], Awaitable[None]]] = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
@@ -73,6 +74,10 @@ class Watcher:
         self.is_enabled = is_enabled
         self.poll_interval_sec = poll_interval_sec
         self.on_question = on_question
+        # Неделя наблюдения (решение владельца 2026-08-27): о каждом проведённом
+        # заказе робот пишет владельцу сразу, со ссылкой на сделку. Отключается
+        # снятием обработчика.
+        self.on_done = on_done
         self.sleep = sleep
         self.now = now
         # Последний проход — чтобы владелец мог спросить /status и увидеть,
@@ -103,6 +108,8 @@ class Watcher:
             statuses[link.status] += 1
             if await self._maybe_ask(order, link):
                 questions.append(order.order_id)
+            elif link.status == "done" and self.on_done is not None:
+                await self._report_done(order, link)
 
         return self._remember(TickReport(
             scanned=len(orders), by_status=dict(statuses),
@@ -132,6 +139,13 @@ class Watcher:
         if asyncio.iscoroutine(result):
             result = await result
         return bool(result)
+
+    async def _report_done(self, order: Order, link: AmoLink) -> None:
+        """Сообщение владельцу не должно ронять проход: Telegram бывает недоступен."""
+        try:
+            await self.on_done(order, link)
+        except Exception:                              # noqa: BLE001
+            log.exception("Заказ №%s: сообщение о работе не ушло", order.order_id)
 
     async def _maybe_ask(self, order: Order, link: AmoLink) -> bool:
         """Отправить карточку-вопрос, если она ещё не отправлена. True — отправили."""
