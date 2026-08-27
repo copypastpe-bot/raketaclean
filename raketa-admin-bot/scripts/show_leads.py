@@ -73,6 +73,11 @@ async def main() -> int:
             comment = field_value(lead, ids.FIELD_COMMENT)
             if comment:
                 print(f"    комментарий: {str(comment)[:120]}")
+            for contact_id in lead_contact_ids(lead):
+                contact = await amo.get_contact(contact_id)
+                phones = ", ".join(contact_phones(contact or {})) or "—"
+                print(f"    контакт: #{contact_id} {(contact or {}).get('name') or '—'}"
+                      f" · {phones}")
             print(f"    ссылка: {settings.amo_base_url}/leads/detail/{lead_id}")
             print()
     finally:

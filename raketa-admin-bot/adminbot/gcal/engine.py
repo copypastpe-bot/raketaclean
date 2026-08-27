@@ -148,6 +148,12 @@ class CalendarEngine:
         if event.kind is EventKind.CANCELLED:
             return await self._handle_cancelled(link)
 
+        # Сведения записи держим свежими всегда: владелец правит календарь и после
+        # того, как робот отработал, а телефон и дата нужны ему позже — в карточке
+        # отмены и в проверке, не занята ли сделка другой записью.
+        if event.kind not in SILENT_KINDS and event.kind is not EventKind.BOAT:
+            link = await self._refresh(event, link)
+
         if link.status in ("done", "waiting_owner", "cancelled"):
             return link                        # закончили или ждём ответа владельца
 
@@ -163,9 +169,6 @@ class CalendarEngine:
             # Сам теплоход робот не заводит: ни телефона, ни цены в записи нет.
             return await self._ask_owner(link, "теплоход — завести сделку?",
                                          payload=_boat_option(event))
-
-        # Запись могла измениться с прошлого раза: подтягиваем разбор в хранилище.
-        link = await self._refresh(event, link)
 
         try:
             if link.path is None:

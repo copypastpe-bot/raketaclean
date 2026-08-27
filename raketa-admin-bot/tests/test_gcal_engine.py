@@ -365,3 +365,23 @@ async def test_salesbot_deal_taken_by_another_record_is_not_stolen(amo):
     link = await engine.process(second)
 
     assert link.real_lead_id == 41400012
+
+
+async def test_finished_record_keeps_its_details_fresh(amo):
+    """Владелец поправил телефон в проведённой записи — память робота обновляется.
+
+    Работать по такой записи уже нечего, но её сведения нужны позже: по телефону
+    робот проверяет, не занята ли сделка другой записью, а в карточке отмены
+    показывает владельцу, кому звонить.
+    """
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="done", real_lead_id=41400001)
+
+    link = await engine.process(an_order(phones=("9151231544",), client_name="Алена"))
+
+    assert link.status == "done"                  # цепочку не начинаем заново
+    assert link.phone10 == "9151231544"           # но телефон теперь верный
+    assert link.client_name == "Алена"
+    assert amo.calls == []                        # в CRM не полезли
