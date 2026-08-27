@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Awaitable, Callable, Optional
 
+from adminbot.amo import ids
 from adminbot.gcal.event import EventKind, ParsedEvent, parse_event
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class CalendarTickReport:
     by_status: dict[str, int] = field(default_factory=dict)
     questions: tuple[str, ...] = ()                   # записи, по которым ушёл вопрос
     unknown_districts: tuple[str, ...] = ()           # приставки, которых робот не знает
+    districts_missing: tuple[str, ...] = ()           # район понят, но его нет в списке амо
     failures: tuple[tuple[str, str], ...] = ()
     full_resync: bool = False
 
@@ -86,12 +88,18 @@ class CalendarWatcher:
         questions: list[str] = []
         failures: list[tuple[str, str]] = []
         unknown: list[str] = []
+        missing: list[str] = []
         known = 0
 
         for raw in batch.events:
             parsed = parse_event(raw)
             if parsed.unknown_district and parsed.unknown_district not in unknown:
                 unknown.append(parsed.unknown_district)
+            # Район понятен, а значения в списке амо для него нет: поле останется
+            # пустым, и владелец должен узнать об этом, а не гадать.
+            if (parsed.district and parsed.district not in ids.DISTRICT_ENUMS
+                    and parsed.district not in missing):
+                missing.append(parsed.district)
 
             if first_run:
                 await self._remember_known(parsed)
@@ -113,7 +121,8 @@ class CalendarWatcher:
         return self._remember(CalendarTickReport(
             changes=len(batch.events), known=known, processed=sum(statuses.values()),
             by_status=dict(statuses), questions=tuple(questions),
-            unknown_districts=tuple(unknown), failures=tuple(failures),
+            unknown_districts=tuple(unknown), districts_missing=tuple(missing),
+            failures=tuple(failures),
             full_resync=batch.full_resync))
 
     async def run_forever(self, stop: Optional[asyncio.Event] = None) -> None:

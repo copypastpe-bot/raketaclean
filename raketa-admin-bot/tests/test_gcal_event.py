@@ -250,3 +250,30 @@ def test_event_timezone_is_respected():
                           "start": {"dateTime": "2026-08-24T23:30:00+02:00"}})
 
     assert parsed.order_date == date(2026, 8, 25)
+
+
+def test_owner_district_canon():
+    """Канон приставок от владельца (2026-08-27).
+
+    Балахнинский и Дальнеконстантиновский робот понимает, но заполнить поле
+    не сможет: таких значений нет в списке «Район города» амо. Об этом он
+    скажет в вечерней сводке, а не будет молча ставить что-то похожее.
+    """
+    from adminbot.amo import ids
+
+    canon = {
+        "Авт": "автозаводский", "Бал": "балахнинский", "Бог": "богородский",
+        "Бор": "борский", "Дал": "дальнеконстантиновский", "Кан": "канавинский",
+        "Кст": "кстовский", "Лен": "ленинский", "Мос": "московский",
+        "Ниж": "нижегородский", "При": "приокский", "Сов": "советский",
+        "Сор": "сормовский",
+    }
+    for prefix, district in canon.items():
+        parsed = parse_event({"id": prefix, "summary": f"{prefix}! Диван, Ирина",
+                              "description": "89601861067",
+                              "start": {"dateTime": "2026-08-27T10:00:00+03:00"}})
+        assert parsed.district == district, prefix
+        assert parsed.unknown_district is None, prefix
+
+    without_field = {"балахнинский", "дальнеконстантиновский"}
+    assert without_field & set(ids.DISTRICT_ENUMS) == set()      # их в амо и правда нет

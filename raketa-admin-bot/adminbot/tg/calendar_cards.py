@@ -171,6 +171,13 @@ def calendar_summary_text(report: Any, counts: Optional[dict] = None) -> str:
                   f"Не знаю районов для приставок: {names}. "
                   "Скажите, какие это районы, — буду заполнять поле «Район города»."]
 
+    if report and getattr(report, "districts_missing", ()):
+        names = ", ".join(sorted({name.capitalize() for name in report.districts_missing}))
+        lines += ["",
+                  f"В списке «Район города» амо нет: {names}. "
+                  "Пока их там нет, поле по таким заказам останется пустым — "
+                  "добавьте значения в CRM, и я начну заполнять."]
+
     if report and report.failures:
         lines.append(f"⚠️ Не разобрал записей: {len(report.failures)} — попробую снова.")
 

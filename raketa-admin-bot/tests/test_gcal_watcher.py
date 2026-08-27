@@ -196,3 +196,18 @@ async def test_question_card_is_sent_once():
 
     assert sent == ["evt-1"]
     assert (await store.get("evt-1")).question_msg_id == 777
+
+
+async def test_known_district_without_a_field_in_amo_is_reported():
+    """Балахнинский робот понимает, но в списке амо его нет — это не «непонятная»
+    приставка, а недостающее значение в CRM. Владелец должен видеть разницу."""
+    store = MemoryCalendarStore()
+    balakhna = {**ORDER, "id": "evt-bal", "summary": "Бал! Диван, Ирина"}
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((balakhna,), "T2"))
+    watcher = build(calendar, store=store)
+
+    await watcher.tick()
+    report = await watcher.tick()
+
+    assert report.districts_missing == ("балахнинский",)
+    assert report.unknown_districts == ()
