@@ -302,9 +302,19 @@ class CalendarEngine:
         return StepResult()
 
     async def _step_wait_salesbot(self, event: ParsedEvent, link: CalendarLink) -> StepResult:
+        """Дождаться автосделки, которую сейлзбот создаёт после «Передано в работу».
+
+        Берём только СВОБОДНУЮ сделку. У клиента бывает два заказа подряд, и
+        сделка предыдущей записи открыта и видна по тому же телефону: без этой
+        проверки второй заказ прицепился бы к чужой сделке, а при отмене робот
+        предложил бы закрыть не ту.
+        """
+        taken = await self.store.taken_leads(event.phone10,
+                                             exclude_event_id=event.event_id)
         for lead in await self.amo.find_leads_by_phone(event.phone10):
             info = _to_lead_info(lead)
-            if info.pipeline_id == ids.PIPELINE_REALIZATION and info.is_open:
+            if (info.pipeline_id == ids.PIPELINE_REALIZATION and info.is_open
+                    and info.lead_id not in taken):
                 await self.store.update(event.event_id, real_lead_id=info.lead_id,
                                         status="in_progress")
                 return StepResult()

@@ -331,3 +331,37 @@ async def test_removing_the_unsettled_mark_still_wakes_the_record(amo):
     link = await engine.process(an_order())
 
     assert link.status == "done"
+
+
+async def test_salesbot_deal_taken_by_another_record_is_not_stolen(amo):
+    """Две записи одного клиента подряд — у каждой своя автосделка.
+
+    После «Передано в работу» робот ищет появившуюся автосделку по телефону.
+    Если не проверить, не занята ли найденная сделка другой записью календаря,
+    второй заказ прицепится к сделке первого: в CRM данные разъедутся, а при
+    отмене робот предложит закрыть чужую сделку.
+    """
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+
+    # Первая запись прошла цепочку и заняла автосделку 41400010.
+    await store.create("evt-first", kind="order", phone10="9605379757")
+    await store.update("evt-first", status="done", real_lead_id=41400010)
+    amo.add_lead(41400010, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+
+    # Вторая запись того же клиента: лид создан, ждём её собственную автосделку.
+    await store.create("evt-second", kind="order", phone10="9605379757")
+    await store.update("evt-second", status="waiting_salesbot", path="C",
+                       primary_lead_id=41400011)
+    second = an_order(event_id="evt-second", order_date=date(2026, 8, 28))
+
+    link = await engine.process(second)
+
+    assert link.real_lead_id != 41400010          # чужую сделку не забрали
+    assert link.status == "waiting_salesbot"      # ждём свою
+
+    # Сейлзбот создал автосделку для второго лида — её и берём.
+    amo.add_lead(41400012, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    link = await engine.process(second)
+
+    assert link.real_lead_id == 41400012

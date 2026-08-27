@@ -734,3 +734,9 @@ async def find_calendar_link_by_question_msg(own_pool: asyncpg.Pool,
             message_id,
         )
     return _calendar_from_row(row)
+
+
+async def delete_calendar_link(own_pool: asyncpg.Pool, event_id: str) -> None:
+    """Забыть запись календаря. Только для ручного разбора последствий."""
+    async with own_pool.acquire() as conn:
+        await conn.execute("DELETE FROM adminbot.gcal_events WHERE event_id = $1", event_id)

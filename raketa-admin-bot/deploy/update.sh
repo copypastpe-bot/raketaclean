@@ -31,6 +31,9 @@ GCAL_DRY=""
 GCAL_CHECK=""
 GCAL_RUN=""
 GCAL_PREVIEW=""
+GCAL_RESET=""
+SHOW_LEADS=""
+SHOW_LEAD_IDS=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
@@ -50,6 +53,9 @@ for arg in "$@"; do
         --gcal-check)     GCAL_CHECK=1 ;;
         --gcal-run=*)     GCAL_RUN="${arg#*=}" ;;
         --gcal-preview)   GCAL_PREVIEW=1 ;;
+        --gcal-reset)     GCAL_RESET=1 ;;
+        --leads=*)        SHOW_LEADS="${arg#*=}" ;;
+        --lead-ids=*)     SHOW_LEAD_IDS="${arg#*=}" ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -193,8 +199,18 @@ if [ -n "$GCAL_RUN" ]; then
     cd "$APP_DIR"
     ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
     sudo -u adminbot env $ENV_VARS GCAL_RUN_IDS="$GCAL_RUN" \
-        GCAL_RUN_PREVIEW="${GCAL_PREVIEW:-0}" \
+        GCAL_RUN_PREVIEW="${GCAL_PREVIEW:-0}" GCAL_RUN_RESET="${GCAL_RESET:-0}" \
         "$HOME_DIR/.venv/bin/python" -m scripts.run_calendar || true
+fi
+
+# Диагностика: какие сделки у клиента в CRM. Ничего не меняет.
+if [ -n "$SHOW_LEADS" ] || [ -n "$SHOW_LEAD_IDS" ]; then
+    say "Сделки клиента"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS SHOW_LEADS_PHONE="$SHOW_LEADS" \
+        SHOW_LEADS_IDS="$SHOW_LEAD_IDS" \
+        "$HOME_DIR/.venv/bin/python" -m scripts.show_leads || true
 fi
 
 say "6. Перезапуск"

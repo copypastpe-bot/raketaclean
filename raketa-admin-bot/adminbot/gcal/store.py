@@ -50,6 +50,8 @@ class CalendarStore(Protocol):
 
     async def find_by_question_msg(self, message_id: Optional[int]) -> Optional[CalendarLink]: ...
 
+    async def forget(self, event_id: str) -> None: ...
+
     async def cursor(self) -> tuple[Optional[str], Optional[date]]: ...
 
     async def save_cursor(self, sync_token: Optional[str], *, sync_from: date) -> None: ...
@@ -120,6 +122,14 @@ class MemoryCalendarStore:
         return next((link for link in self.links.values()
                      if link.question_msg_id == int(message_id)), None)
 
+    async def forget(self, event_id: str) -> None:
+        """Забыть запись целиком — чтобы провести её заново с чистого листа.
+
+        Нужно только для ручного разбора последствий: обычный ход работы
+        полагается на чек-лист, который как раз не даёт делать одно дважды.
+        """
+        self.links.pop(event_id, None)
+
     async def cursor(self) -> tuple[Optional[str], Optional[date]]:
         return self._cursor
 
@@ -167,6 +177,9 @@ class PgCalendarStore:
         if message_id is None:
             return None
         return await db.find_calendar_link_by_question_msg(self._pool, int(message_id))
+
+    async def forget(self, event_id: str) -> None:
+        await db.delete_calendar_link(self._pool, event_id)
 
     async def cursor(self) -> tuple[Optional[str], Optional[date]]:
         return await db.get_calendar_cursor(self._pool)

@@ -87,6 +87,11 @@ async def _run_one(engine, store, parsed, settings: Settings, preview: bool) -> 
         print(f"Это не заказ ({parsed.kind.value}) — не провожу.")
         return
 
+    if os.environ.get("GCAL_RUN_RESET", "").strip() in ("1", "true"):
+        # Разбор последствий: провести запись заново, как будто робот её не видел.
+        await store.forget(parsed.event_id)
+        print("   прежнее состояние записи забыто — начинаю с чистого листа")
+
     # Запись могла быть помечена «была в календаре до включения»: владелец просит
     # провести её явно, значит пометку снимаем.
     link = await store.get(parsed.event_id)
