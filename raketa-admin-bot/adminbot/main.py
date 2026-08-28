@@ -373,11 +373,16 @@ def _make_order_done_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
 
 
 def _make_calendar_done_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
-    """Сообщение о сделке, заведённой по записи календаря."""
+    """Сообщение о сделке, заведённой по записи календаря.
 
-    async def send(link, actions) -> None:
-        await bot.send_message(owner_tg_id,
-                               done_text(link, actions, base_url=amo_base_url))
+    Возвращает номер отправленного сообщения — по нему наблюдатель понимает,
+    что об этой работе владелец уже извещён, и второй раз не пишет.
+    """
+
+    async def send(link, actions) -> Optional[int]:
+        sent = await bot.send_message(owner_tg_id,
+                                      done_text(link, actions, base_url=amo_base_url))
+        return sent.message_id
 
     return send
 

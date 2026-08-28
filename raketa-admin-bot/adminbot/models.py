@@ -95,6 +95,7 @@ class CalendarLink:
     checklist: dict[str, Any] = field(default_factory=dict)
     question: Optional[dict[str, Any]] = None
     question_msg_id: Optional[int] = None
+    done_msg_id: Optional[int] = None  # отчёт о работе отправлен — второй раз не пишем
     last_error: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

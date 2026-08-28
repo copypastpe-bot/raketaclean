@@ -10,6 +10,9 @@
    изменения, которые не успели обработаться: следующий обмен их уже не покажет.
 3. **Одна плохая запись не роняет проход.** Остальные обрабатываются, сбойная
    остаётся в работе и вернётся в следующий раз.
+4. **Одна работа — одно сообщение владельцу.** Проходов по одной записи бывает
+   несколько подряд (робот ждёт автосделку и проверяет её каждую минуту), и
+   отчитываться на каждом — значит слать по три письма об одном деле.
 
 Незавершённые записи (ожидание автосделки, ошибки, неотправленные карточки)
 берутся не из календаря, а из своего хранилища: обмен приносит только изменения,
@@ -63,7 +66,7 @@ class CalendarWatcher:
         poll_interval_sec: int = 300,
         on_question: Optional[Callable[[Any], Awaitable[Optional[int]]]] = None,
         on_rehearsal: Optional[Callable[[Any, list], Awaitable[None]]] = None,
-        on_done: Optional[Callable[[Any, list], Awaitable[None]]] = None,
+        on_done: Optional[Callable[[Any, list], Awaitable[Optional[int]]]] = None,
         on_updated: Optional[Callable[[Any, tuple], Awaitable[None]]] = None,
         dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -79,9 +82,10 @@ class CalendarWatcher:
         # робот принимает молча, и без отчёта прогон показал бы пустоту.
         # В бою это был бы спам — там говорим только о вопросах и вечерней сводке.
         self.on_rehearsal = on_rehearsal
-        # Неделя наблюдения (решение владельца 2026-08-27): о каждой сделанной
-        # работе робот пишет владельцу сразу, со ссылкой на сделку. Выключается
-        # снятием обработчика, без правки логики.
+        # Неделя наблюдения (решение владельца 2026-08-27): о сделанной работе
+        # робот пишет владельцу сразу, со ссылкой на сделку — одно сообщение
+        # на запись, когда работа закончена целиком (уточнение 2026-08-28).
+        # Выключается снятием обработчика, без правки логики.
         self.on_done = on_done
         self.on_updated = on_updated
         self.dry_run = dry_run
@@ -105,9 +109,14 @@ class CalendarWatcher:
         unknown: list[str] = []
         missing: list[str] = []
         known = 0
+        # Записи, разобранные в этом проходе: та, что только что пришла с
+        # изменениями, лежит и в незавершённых — без этого списка движок сходил бы
+        # по ней в amoCRM дважды за один проход.
+        handled: set[str] = set()
 
         for raw in batch.events:
             parsed = parse_event(raw)
+            handled.add(parsed.event_id)
             if parsed.unknown_district and parsed.unknown_district not in unknown:
                 unknown.append(parsed.unknown_district)
             # Район понятен, а значения в списке амо для него нет: поле останется
@@ -125,6 +134,8 @@ class CalendarWatcher:
 
         # Незавершённое из прошлых проходов: ожидание автосделки, ошибки, вопросы.
         for link in await self.store.pending():
+            if link.event_id in handled:
+                continue                              # уже провели по изменениям
             if not link.event_data:
                 continue                              # разбора нет — продолжать нечем
             await self._handle(ParsedEvent.from_dict(link.event_data),
@@ -195,8 +206,8 @@ class CalendarWatcher:
             questions.append(parsed.event_id)
         elif self.dry_run and self.on_rehearsal is not None:
             await self._report_rehearsal(link)
-        elif not self.dry_run and link.status in ("done", "waiting_salesbot") and not edits:
-            await self._notify(self.on_done, link, await self._actions_of(link))
+        elif not self.dry_run and link.status == "done" and not edits:
+            await self._maybe_report_done(link)
 
     async def _save_event_data(self, parsed: ParsedEvent, link: Any) -> None:
         """Держать разбор рядом с записью: им продолжают незаконченную цепочку."""
@@ -223,6 +234,29 @@ class CalendarWatcher:
         except Exception:                              # noqa: BLE001
             log.exception("Календарь, запись %s: сообщение владельцу не ушло",
                           link.event_id)
+
+    async def _maybe_report_done(self, link: Any) -> None:
+        """Отчёт о сделанной работе уходит РОВНО один раз — когда работа закончена.
+
+        Пока робот ждёт автосделку сейлзбота, он молчит: ожидание — это середина
+        работы, а не сделанное дело, и ссылка в такой момент вела бы на лид,
+        а не на сделку. Отметку робот ставит только после того, как Telegram
+        принял сообщение: иначе обрыв связи означал бы «отчитался», а владелец
+        не получил бы ничего.
+        """
+        if self.on_done is None or link.done_msg_id:
+            return
+
+        try:
+            message_id = await self.on_done(link, await self._actions_of(link))
+        except Exception:                              # noqa: BLE001 — Telegram падает
+            log.exception("Календарь, запись %s: отчёт о работе не ушёл", link.event_id)
+            return
+        if not message_id:
+            log.warning("Календарь, запись %s: отчёт о работе отправить не удалось",
+                        link.event_id)
+            return
+        await self.store.update(link.event_id, done_msg_id=int(message_id))
 
     async def _maybe_ask(self, link: Any) -> bool:
         """Карточка уходит один раз: повтор дублировал бы вопрос каждый проход."""

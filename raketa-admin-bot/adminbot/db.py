@@ -516,7 +516,7 @@ async def apply_migration(pool: asyncpg.Pool, sql_path: str) -> None:
 _UPDATABLE_GCAL_FIELDS = frozenset(
     {"kind", "status", "skip_reason", "path", "phone10", "client_name", "district",
      "services", "order_date", "event_data", "primary_lead_id", "real_lead_id",
-     "order_id", "question", "question_msg_id", "last_error"}
+     "order_id", "question", "question_msg_id", "done_msg_id", "last_error"}
 )
 
 
@@ -554,6 +554,7 @@ def _calendar_from_row(row: Optional[asyncpg.Record]) -> Optional[CalendarLink]:
         checklist=checklist or {},
         question=question,
         question_msg_id=row["question_msg_id"],
+        done_msg_id=row["done_msg_id"],
         last_error=row["last_error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],

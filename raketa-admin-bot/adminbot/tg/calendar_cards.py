@@ -295,6 +295,10 @@ def done_text(link: Any, actions: Sequence[dict], *, base_url: str) -> str:
     Владелец проверяет по горячим следам, поэтому в сообщении ровно то, что
     нужно для проверки: чей заказ, что робот сделал со сделкой (взял готовую
     или завёл новую) и ссылка, по которой смотреть.
+
+    Уходит один раз на запись — когда работа закончена целиком. Промежуточное
+    «жду автосделку» владельцу не нужно: ссылка в такой момент ведёт на лид,
+    а не на сделку, и три сообщения об одном деле только мешают проверять.
     """
     kinds = {row.get("action") for row in actions}
     created_lead = "create_lead" in kinds
@@ -314,8 +318,6 @@ def done_text(link: Any, actions: Sequence[dict], *, base_url: str) -> str:
     url = deal_url(base_url, link.real_lead_id or link.primary_lead_id)
     if url:
         lines += ["", url]
-    if link.status == "waiting_salesbot":
-        lines.append("Жду автосделку сейлзбота — допишу, когда появится.")
     return "\n".join(lines)
 
 

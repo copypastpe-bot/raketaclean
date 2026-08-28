@@ -253,3 +253,145 @@ async def test_live_mode_stays_quiet():
     await watcher.tick()
 
     assert sent == []
+
+
+# --- отчёт о сделанной работе (неделя наблюдения) ---
+
+
+class FinishingEngine(FakeEngine):
+    """Работа по записи заканчивается за один проход: сделка реализации уже была."""
+
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+
+    async def process(self, event):
+        link = await self.store.create(event.event_id, kind=event.kind.value)
+        self.seen.append(event)
+        return await self.store.update(event.event_id, status="done",
+                                       real_lead_id=31600001) or link
+
+
+class SlowSalesbot(FakeEngine):
+    """Два прохода ждём автосделку, на третьем она появляется.
+
+    Ровно то, что происходит вживую: робот заводит лид и передаёт его в работу,
+    а сделку реализации сейлзбот создаёт спустя минуту-другую.
+    """
+
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+        self.attempts = 0
+
+    async def process(self, event):
+        link = await self.store.create(event.event_id, kind=event.kind.value)
+        self.attempts += 1
+        if self.attempts == 1:
+            await self.store.log(event.event_id, "create_lead", dry_run=False,
+                                 amo_id=41400009)
+        if self.attempts < 3:
+            return await self.store.update(event.event_id, status="waiting_salesbot",
+                                           primary_lead_id=41400009) or link
+        return await self.store.update(event.event_id, status="done",
+                                       real_lead_id=31600001) or link
+
+
+async def test_one_record_is_handled_once_per_pass():
+    """Запись, пришедшая с изменениями и лежащая в незавершённых, — одна работа.
+
+    Незавершённые робот добирает из своего хранилища, потому что ждать автосделку
+    он может дольше, чем живёт одна пачка изменений. Но запись, которая только что
+    пришла из календаря, попадает в оба списка сразу — и до этой проверки движок
+    ходил по ней в amoCRM дважды за проход.
+    """
+    store = MemoryCalendarStore()
+    engine = SlowSalesbot(store)
+
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((ORDER,), "T2"))
+    watcher = build(calendar, engine=engine, store=store, dry_run=False)
+
+    await watcher.tick()
+    await watcher.tick()
+
+    assert engine.attempts == 1
+
+
+async def test_finished_work_is_reported_once():
+    """Отчёт уходит один раз — когда работа по записи закончена целиком.
+
+    Пока робот ждёт автосделку сейлзбота, он молчит: ожидание — это середина
+    работы, а не сделанное дело. Раньше отчёт уходил на каждом проходе, и по
+    одной записи владелец получал три почти одинаковых сообщения, причём в двух
+    первых ссылка вела на лид, а не на сделку.
+    """
+    store = MemoryCalendarStore()
+    sent: list = []
+
+    async def on_done(link, actions):
+        sent.append((link.event_id, link.real_lead_id))
+        return 555
+
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((ORDER,), "T2"))
+    watcher = build(calendar, engine=SlowSalesbot(store), store=store,
+                    dry_run=False, on_done=on_done)
+
+    await watcher.tick()                           # включение: запоминаем календарь
+    await watcher.tick()                           # завёл лид, ждёт автосделку
+    assert sent == []                              # ожидание — не повод писать
+    await watcher.tick()                           # всё ещё ждёт
+    assert sent == []
+    await watcher.tick()                           # автосделка появилась — готово
+
+    assert sent == [("evt-1", 31600001)]           # одно сообщение, ссылка на сделку
+    assert (await store.get("evt-1")).done_msg_id == 555
+
+
+async def test_a_finished_record_is_not_reported_again():
+    """Запись правят в календаре и после проведения — отчёт не повторяется.
+
+    Изменение, до сделки не дошедшее (скажем, поправили имя клиента), заново
+    прогоняет запись через движок. Без отметки «уже отчитался» владелец получил
+    бы второе сообщение о работе, сделанной вчера.
+    """
+    store = MemoryCalendarStore()
+    sent: list = []
+
+    async def on_done(link, actions):
+        sent.append(link.event_id)
+        return 777
+
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((ORDER,), "T2"),
+                            SyncBatch((ORDER,), "T3"))
+    watcher = build(calendar, engine=FinishingEngine(store), store=store,
+                    dry_run=False, on_done=on_done)
+
+    await watcher.tick()
+    await watcher.tick()
+    await watcher.tick()
+
+    assert sent == ["evt-1"]
+
+
+async def test_the_mark_is_set_only_after_telegram_took_the_message():
+    """Телеграм не ответил — отметку не ставим, иначе отчёт пропадёт навсегда."""
+    store = MemoryCalendarStore()
+    answers = [None, 999]
+    sent: list = []
+
+    async def on_done(link, actions):
+        sent.append(link.event_id)
+        return answers.pop(0)
+
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((ORDER,), "T2"),
+                            SyncBatch((ORDER,), "T3"))
+    watcher = build(calendar, engine=FinishingEngine(store), store=store,
+                    dry_run=False, on_done=on_done)
+
+    await watcher.tick()
+    await watcher.tick()                           # Telegram промолчал
+    assert (await store.get("evt-1")).done_msg_id is None
+    await watcher.tick()                           # повторная попытка
+
+    assert sent == ["evt-1", "evt-1"]
+    assert (await store.get("evt-1")).done_msg_id == 999
