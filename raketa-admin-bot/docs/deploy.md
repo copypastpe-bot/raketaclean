@@ -227,13 +227,28 @@ admin ALL=(root) NOPASSWD: /usr/bin/systemctl restart raketa-admin-bot.service, 
 
 ## 9. Обновление кода
 
+Код едет `локальная машина → /home/admin/raketa-admin-bot → служба`. Git на сервере
+не участвует: в `/opt/raketa-admin-bot/app` лежит копия без `.git`, и `git pull`
+там выполнить нельзя. Два шага, оба обязательны:
+
 ```bash
-sudo -u adminbot git -C /opt/raketa-admin-bot/app pull
-sudo -u adminbot /opt/raketa-admin-bot/.venv/bin/pip install -q -r /opt/raketa-admin-bot/app/requirements.txt
-sudo systemctl restart raketa-admin-bot.service
+# 1. Перенести код в рабочую копию на сервере (с локальной машины, из корня репозитория)
+rsync -a --delete --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
+      --exclude '.pytest_cache' --exclude '.env' --exclude '.DS_Store' \
+      ./ admin@91.200.150.68:/home/admin/raketa-admin-bot/
+
+# 2. Обновить службу: код → зависимости → миграции → перезапуск
+ssh admin@91.200.150.68 'sudo raketa-admin-bot-update'
 ```
 
-Если менялись миграции — применить новые файлы из `migrations/` до перезапуска.
+Пропустить первый шаг — значит перезапустить службу на прежней версии: скрипт
+обновления берёт код из `/home/admin/raketa-admin-bot`, а не из GitHub. Признак,
+что код не доехал: в шаге «4. Миграции» нет файла, который вы только что добавили.
+
+Перед переносом полезно посмотреть, что именно поедет: тот же `rsync` с ключами
+`--dry-run --itemize-changes`. Миграции скрипт применяет сам (все файлы
+`migrations/*.sql` по порядку) — и делает это до перезапуска, поэтому новая
+колонка появляется раньше, чем её начинает читать новый код.
 
 ## 10. Если что-то пошло не так
 
