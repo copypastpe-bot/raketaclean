@@ -18,6 +18,20 @@ Project log (central memory): /Users/evgenijpastusenko/Projects/agent1/project_a
 4. current implementation plan in `docs/plans/`
 5. recon facts: `/Users/evgenijpastusenko/Projects/tgbot-v1/recon/` (00-summary, 06-matching-metrics)
 
+## Related Project
+
+`tgbot-v1` (`~/Projects/tgbot-v1`) is the **main project**: the working bot that owns the
+shared database, talks to clients through Wahelp, and now runs the amoCRM exchange and the
+pre-job client conversation. Its context lives at
+`/Users/evgenijpastusenko/Projects/agent1/project_ai_context/tgbot-v1/`.
+
+**Start the session in the directory of the project you are about to change.** The working
+directory decides which project rules load, where git commands land, and which context
+files get updated at session close. Most work happens in `tgbot-v1`; this repository is
+opened when the admin bot itself is being built. Do not merge the two memories: this
+project's hard rule — never write to the worker bot's tables — has no counterpart there,
+and mixing the two will eventually put a rule where it does not belong.
+
 ## Central Context
 
 This project uses central agent memory outside the current repository.
