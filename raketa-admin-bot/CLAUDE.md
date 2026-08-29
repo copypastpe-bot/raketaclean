@@ -18,7 +18,11 @@ Project log (central memory): /Users/evgenijpastusenko/Projects/agent1/project_a
 4. current implementation plan in `docs/plans/`
 5. recon facts: `/Users/evgenijpastusenko/Projects/tgbot-v1/recon/` (00-summary, 06-matching-metrics)
 
-## Related Project
+## Related Projects
+
+`smm-autopost` (`~/Projects/smm-autopost`) — third project, created 2026-08-29: auto-posting
+of media from cleaning jobs to social networks. Runs on a different server (Contabo), shares
+no data with either bot. Context: `agent1/project_ai_context/smm-autopost/`.
 
 `tgbot-v1` (`~/Projects/tgbot-v1`) is the **main project**: the working bot that owns the
 shared database, talks to clients through Wahelp, and now runs the amoCRM exchange and the
