@@ -63,6 +63,35 @@ async def test_status_warns_when_switched_off_in_service_settings():
     assert "на сервере" in text.lower()
 
 
+async def test_status_shows_autocall_disabled_by_default():
+    commands = make_commands()
+
+    message = FakeMessage()
+    await commands.status(message)
+
+    assert "автозвонок: выключен" in message.replies[0].lower()
+
+
+async def test_status_shows_autocall_rehearsal():
+    commands = make_commands(autocall_enabled=True, autocall_dry_run=True)
+
+    message = FakeMessage()
+    await commands.status(message)
+    text = message.replies[0]
+
+    assert "автозвонок: репетиция" in text.lower()
+
+
+async def test_status_shows_autocall_live():
+    commands = make_commands(autocall_enabled=True, autocall_dry_run=False)
+
+    message = FakeMessage()
+    await commands.status(message)
+    text = message.replies[0]
+
+    assert "Автозвонок: БОЕВОЙ" in text
+
+
 async def test_status_of_an_empty_queue():
     commands = make_commands(control=MemoryControlPanel(counts={}))
 

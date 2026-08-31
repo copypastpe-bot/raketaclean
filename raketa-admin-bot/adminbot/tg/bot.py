@@ -89,6 +89,8 @@ class OwnerCommands:
         calendar_watcher: Optional[Any] = None,
         calendar_enabled: bool = False,
         calendar_dry_run: bool = True,
+        autocall_enabled: bool = False,
+        autocall_dry_run: bool = True,
     ) -> None:
         self.owner_tg_id = owner_tg_id
         self.control = control
@@ -100,6 +102,8 @@ class OwnerCommands:
         self.calendar_watcher = calendar_watcher
         self.calendar_enabled = calendar_enabled
         self.calendar_dry_run = calendar_dry_run
+        self.autocall_enabled = autocall_enabled
+        self.autocall_dry_run = autocall_dry_run
 
     async def status(self, message: Any) -> None:
         text = status_text(
@@ -113,7 +117,9 @@ class OwnerCommands:
         calendar = calendar_status_text(
             enabled=self.calendar_enabled, dry_run=self.calendar_dry_run,
             report=getattr(self.calendar_watcher, "last_report", None))
-        await message.answer(f"{text}\n\n{calendar}")
+        autocall = _autocall_status_line(
+            enabled=self.autocall_enabled, dry_run=self.autocall_dry_run)
+        await message.answer(f"{text}\n\n{calendar}\n\n{autocall}")
 
     async def pause(self, message: Any) -> None:
         if await self.control.is_paused():
@@ -473,6 +479,18 @@ def status_text(*, sync_enabled: bool, dry_run: bool, paused: bool,
     else:
         lines.append("\nПроходов ещё не было.")
     return "\n".join(lines)
+
+
+def _autocall_status_line(*, enabled: bool, dry_run: bool) -> str:
+    """Строка про автозвонок для /status — минимум, без разбора наблюдателя.
+
+    В отличие от календаря, здесь не нужен разбор последнего прохода: важно
+    только видеть, включена ли функция и в каком она режиме (тот же словарь
+    «репетиция / БОЕВОЙ», что и в остальных выключателях сервиса).
+    """
+    if not enabled:
+        return "Автозвонок: выключен"
+    return f"Автозвонок: {'репетиция' if dry_run else 'БОЕВОЙ'}"
 
 
 def _queue_block(counts: dict[str, int]) -> str:

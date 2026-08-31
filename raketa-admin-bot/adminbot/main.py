@@ -33,6 +33,12 @@ from adminbot.amo import ids
 from adminbot.amo.client import AmoAuthError, AmoClient, AmoError
 from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.config import Settings
+from adminbot.autocall import pbx as autocall_pbx
+from adminbot.autocall.engine import AutocallEngine
+from adminbot.autocall.pbx import MemoryPbx
+from adminbot.autocall.store import MemoryAutocallStore, PgAutocallStore
+from adminbot.autocall.watcher import AutocallWatcher
+from adminbot.autocall.window import validate_window
 from adminbot.carpets.engine import CarpetEngine
 from adminbot.gcal.engine import CalendarEngine
 from adminbot.gcal.store import MemoryCalendarStore, PgCalendarStore
@@ -47,6 +53,8 @@ from adminbot.sync.reconcile import PgSummarySource, Reconciler
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import MemoryLinkStore, PgLinkStore
 from adminbot.sync.watcher import PgOrderSource, Watcher
+from adminbot.tg.autocall_cards import (
+    connected_text, manager_text, no_phone_text, rehearsal_text as autocall_rehearsal_text)
 from adminbot.tg.bot import CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router
 from adminbot.tg.calendar_cards import (
     boat_card, calendar_question_card, calendar_summary_text, cancellation_card,
@@ -78,6 +86,7 @@ class App:
     carpet_watcher: Optional[Any] = None
     calendar_watcher: Optional[Any] = None
     calendar_token: Optional[Any] = None
+    autocall_watcher: Optional[Any] = None
 
     async def run(self) -> None:
         """Запустить всё до сигнала остановки."""
@@ -98,6 +107,9 @@ class App:
         if self.calendar_watcher is not None:
             background.append(asyncio.create_task(
                 self.calendar_watcher.run_forever(self.stop), name="calendar"))
+        if self.autocall_watcher is not None:
+            background.append(asyncio.create_task(
+                self.autocall_watcher.run_forever(self.stop), name="autocall"))
         try:
             await self._poll_until_stopped()
         finally:
@@ -223,6 +235,12 @@ async def build_app(settings: Settings) -> App:
     reconciler.calendar_watcher = calendar_watcher
     reconciler.on_calendar = _make_calendar_summary_sender(bot, settings.owner_tg_id)
 
+    # Автозвонок по заявке с сайта: своя цепочка, свой выключатель и своя АТС.
+    # Кривое окно валит старт осознанно (опечатку ловим при запуске); нет
+    # ключей АТС или боевого клиента ещё нет — функция просто не поднимается,
+    # остальные части сервиса работают как ни в чём не бывало.
+    autocall_watcher = _build_autocall(settings, own_pool, bot, live_amo, rehearsal_amo)
+
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(
         OwnerCommands(
@@ -236,6 +254,8 @@ async def build_app(settings: Settings) -> App:
             calendar_watcher=calendar_watcher,
             calendar_enabled=settings.gcal_enabled,
             calendar_dry_run=settings.gcal_dry_run,
+            autocall_enabled=settings.autocall_enabled,
+            autocall_dry_run=settings.autocall_dry_run,
         ),
         OwnerAnswers(owner_tg_id=settings.owner_tg_id, store=store, backlog=backlog),
         CarpetAnswers(owner_tg_id=settings.owner_tg_id, store=carpet_store)
@@ -250,6 +270,7 @@ async def build_app(settings: Settings) -> App:
                carpet_watcher=carpet_watcher,
                calendar_watcher=calendar_watcher,
                calendar_token=calendar_token,
+               autocall_watcher=autocall_watcher,
                stop=asyncio.Event())
 
 
@@ -353,6 +374,69 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
     return watcher, store, token
 
 
+def _build_autocall(settings: Settings, own_pool: Any, bot: Bot,
+                    live_amo: AmoClient, rehearsal_amo: AmoClient):
+    """Собрать автозвонок по заявке с сайта. Возвращает наблюдателя или None.
+
+    Функция выключена, окно звонков задано неверно или АТС не поднимается
+    (нет ключей доступа либо боевого клиента в модуле ещё нет — он появится
+    в Задаче 7) — робот просто не звонит, остальные части сервиса работают
+    как ни в чём не бывало (тот же приём, что у календаря без ключа Google).
+    """
+    if not settings.autocall_enabled:
+        log.info("Автозвонок: функция выключена настройкой AUTOCALL_ENABLED")
+        return None
+
+    # Опечатку в окне ловим при запуске: упавший старт дешевле, чем робот,
+    # который звонит клиенту в три часа ночи (тот же принцип, что у
+    # _service_by_master в config.py). Ошибка уходит наружу осознанно.
+    validate_window(settings.autocall_window_from_hour, settings.autocall_window_to_hour)
+
+    # Та же тонкость, что в уборке, коврах и календаре: в репетиции курсор
+    # опроса и отметки шагов не должны попадать в базу — иначе боевой запуск
+    # решит, что работа уже сделана, и пропустит её.
+    store = (MemoryAutocallStore() if settings.autocall_dry_run
+             else PgAutocallStore(own_pool))
+
+    if settings.autocall_dry_run:
+        # Репетиция не звонит и не оставляет следов — фейковая АТС в памяти.
+        pbx: Any = MemoryPbx()
+    else:
+        if not (settings.pbx_base_url and settings.pbx_api_key
+                and settings.pbx_manager_dial):
+            log.warning("Автозвонок не поднят: не заданы PBX_BASE_URL/PBX_API_KEY/"
+                       "PBX_MANAGER_DIAL")
+            return None
+        OnlinePbx = getattr(autocall_pbx, "OnlinePbx", None)
+        if OnlinePbx is None:
+            log.warning("Автозвонок не поднят: боевой клиент АТС ещё не готов "
+                       "(появится в Задаче 7)")
+            return None
+        pbx = OnlinePbx(base_url=settings.pbx_base_url, api_key=settings.pbx_api_key)
+
+    amo = rehearsal_amo if settings.autocall_dry_run else live_amo
+    engine = AutocallEngine(
+        pbx=pbx, amo=amo, store=store, manager_dial=settings.pbx_manager_dial,
+        window_from_hour=settings.autocall_window_from_hour,
+        window_to_hour=settings.autocall_window_to_hour,
+        notify_manager=_make_autocall_manager_sender(settings, bot, store),
+        notify_owner_rehearsal=_make_autocall_rehearsal_sender(
+            bot, settings.owner_tg_id, settings.amo_base_url),
+        notify_owner_connected=_make_autocall_connected_sender(
+            bot, settings.owner_tg_id, settings.amo_base_url, store),
+        dry_run=settings.autocall_dry_run,
+    )
+    watcher = AutocallWatcher(
+        amo=amo, engine=engine, store=store,
+        poll_interval_sec=settings.autocall_poll_interval_sec,
+        on_no_phone=_make_autocall_no_phone_sender(
+            bot, settings.owner_tg_id, settings.amo_base_url),
+    )
+    log.info("Автозвонок: включён, режим %s",
+             "репетиция" if settings.autocall_dry_run else "БОЕВОЙ")
+    return watcher
+
+
 def _make_calendar_summary_sender(bot: Bot, owner_tg_id: int):
     """Вечерняя строка про календарь — вслед за сводкой по заказам."""
 
@@ -448,6 +532,75 @@ def _make_carpet_report_sender(bot: Bot, owner_tg_id: int):
             await bot.send_message(owner_tg_id, carpet_report_text(letter.subject, report))
         except Exception:                              # noqa: BLE001
             log.exception("Ковры: отчёт по письму отправить не удалось")
+
+    return send
+
+
+def _make_autocall_manager_sender(settings: Settings, bot: Bot, store: Any):
+    """Сообщение менеджеру по исходу попытки дозвона.
+
+    Уходит от рабочего бота, с которым менеджер уже общается, а не от
+    админ-бота владельца (решение Задачи 9). Отдельный `Bot` поднимается один
+    раз здесь и работает только на отправку — polling ему не поручаем, за
+    обновлениями следит сам рабочий бот. Токена или чата менеджера нет —
+    сообщение уходит владельцу с пометкой, что доставить его некому (мягкая
+    деградация вместо тишины).
+    """
+    manager_bot: Optional[Bot] = None
+    if settings.worker_tg_token and settings.manager_tg_chat_id:
+        manager_bot = Bot(token=settings.worker_tg_token,
+                          session=build_session(settings.telegram_api_ips))
+
+    async def send(lead_id: int, kind: str) -> None:
+        link = await store.get(lead_id)
+        phone10 = link.phone10 if link is not None else None
+        text = manager_text(kind, lead_id, base_url=settings.amo_base_url,
+                            phone10=phone10)
+        if manager_bot is not None:
+            await manager_bot.send_message(settings.manager_tg_chat_id, text)
+            return
+        await bot.send_message(
+            settings.owner_tg_id,
+            f"(менеджеру не отправлено: транспорт не настроен)\n{text}",
+        )
+
+    return send
+
+
+def _make_autocall_rehearsal_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+    """Репетиция: что робот сделал бы, если бы дошёл до звонка."""
+
+    async def send(lead_id: int, phone10: Optional[str]) -> None:
+        await bot.send_message(
+            owner_tg_id, autocall_rehearsal_text(lead_id, phone10, base_url=amo_base_url))
+
+    return send
+
+
+def _make_autocall_connected_sender(bot: Bot, owner_tg_id: int, amo_base_url: str,
+                                    store: Any):
+    """Отчёт владельцу о соединении — неделя наблюдения (дизайн §6.5).
+
+    Движок передаёт только lead_id, телефон достаём из хранилища сами. Если
+    записи уже нет или телефон не сохранился, `for_owner` внутри
+    `connected_text` сам покажет «телефон не распознан» — литерала "None"
+    в сообщении не будет.
+    """
+
+    async def send(lead_id: int) -> None:
+        link = await store.get(lead_id)
+        phone10 = link.phone10 if link is not None else None
+        await bot.send_message(
+            owner_tg_id, connected_text(lead_id, phone10, base_url=amo_base_url))
+
+    return send
+
+
+def _make_autocall_no_phone_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+    """Заявка с сайта пришла без телефона — владелец должен посмотреть сам."""
+
+    async def send(lead_id: int) -> None:
+        await bot.send_message(owner_tg_id, no_phone_text(lead_id, base_url=amo_base_url))
 
     return send
 

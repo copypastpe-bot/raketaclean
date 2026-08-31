@@ -87,10 +87,11 @@ class FlakyStore:
 
 
 def make_engine(*, store, pbx, amo, dry_run=False, notify_manager=None,
-                notify_owner_rehearsal=None):
+                notify_owner_rehearsal=None, notify_owner_connected=None):
     return AutocallEngine(
         pbx=pbx, amo=amo, store=store, manager_dial=MANAGER_DIAL,
         notify_manager=notify_manager, notify_owner_rehearsal=notify_owner_rehearsal,
+        notify_owner_connected=notify_owner_connected,
         dry_run=dry_run,
     )
 
@@ -580,3 +581,69 @@ async def test_recover_error_warns_when_lead_missing_from_store(caplog):
 
     assert any("не удалось снять last_error" in record.getMessage()
               for record in caplog.records)
+
+
+# --- Задача 11: отчёт владельцу о соединении (неделя наблюдения, дизайн §6.5) ---
+
+async def test_connected_outcome_notifies_owner():
+    store = MemoryAutocallStore()
+    pbx = MemoryPbx()
+    amo = FakeAmo()
+    notified = []
+
+    async def notify_owner_connected(lead_id):
+        notified.append(lead_id)
+
+    engine = make_engine(store=store, pbx=pbx, amo=amo,
+                         notify_owner_connected=notify_owner_connected)
+    lead_id = 313
+    await store.create(lead_id, phone10=PHONE)
+    now = msk(2026, 8, 31, 14, 0)
+
+    link = await store.get(lead_id)
+    await engine.process_due(link, now)
+    calling = await store.get(lead_id)
+    pbx.set_outcome(calling.call_id, Outcome.CONNECTED)
+    now2 = now + timedelta(seconds=1)
+    link2 = await store.get(lead_id)
+    await engine.process_due(link2, now2)
+
+    done = await store.get(lead_id)
+    assert done.status == "done"
+    assert notified == [lead_id]
+
+    notify_action = next(row for row in await store.actions_for(lead_id)
+                         if row["action"] == "notify")
+    assert notify_action["payload"] == {"kind": "connected"}
+
+
+async def test_failed_owner_connected_notification_does_not_break_chain():
+    """Недоставленный отчёт о соединении не должен отменять сам факт done:
+    цепочка уже завершилась, дело лишь в журнале (см. _notify_manager)."""
+    store = MemoryAutocallStore()
+    pbx = MemoryPbx()
+    amo = FakeAmo()
+
+    async def broken_notify(lead_id):
+        raise RuntimeError("Telegram недоступен")
+
+    engine = make_engine(store=store, pbx=pbx, amo=amo,
+                         notify_owner_connected=broken_notify)
+    lead_id = 314
+    await store.create(lead_id, phone10=PHONE)
+    now = msk(2026, 8, 31, 14, 0)
+
+    link = await store.get(lead_id)
+    await engine.process_due(link, now)
+    calling = await store.get(lead_id)
+    pbx.set_outcome(calling.call_id, Outcome.CONNECTED)
+    now2 = now + timedelta(seconds=1)
+    link2 = await store.get(lead_id)
+    await engine.process_due(link2, now2)
+
+    done = await store.get(lead_id)
+    assert done.status == "done"                     # соединение не отменилось
+
+    failed = next(row for row in await store.actions_for(lead_id)
+                 if row["action"] == "notify_failed")
+    assert failed["payload"]["kind"] == "connected"

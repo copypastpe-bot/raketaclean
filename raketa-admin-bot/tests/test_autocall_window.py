@@ -34,6 +34,13 @@ def test_one_minute_before_open_waits_for_today_morning():
     assert next_call_moment(now, now=now) == msk(2026, 8, 31, 10, 0)
 
 
+def test_exactly_at_open_calls_now():
+    # Граница from_hour ВХОДИТ в окно: ровно в 10:00:00 звонить уже можно
+    # (симметрия с закрытием — граница to_hour в окно не входит).
+    now = msk(2026, 8, 31, 10, 0)
+    assert next_call_moment(now, now=now) == now
+
+
 def test_exactly_at_close_waits_for_tomorrow():
     # Граница to_hour НЕ входит в окно: ровно в 20:00 звонить уже поздно.
     now = msk(2026, 8, 31, 20, 0)

@@ -76,3 +76,79 @@ async def test_calendar_absence_does_not_break_the_service():
     with_key_missing = replace(settings, gcal_enabled=True,
                                gcal_key_file="/nonexistent/gcal.json")
     assert _build_calendar(with_key_missing, None, None, None, None) == (None, None, None)
+
+
+# --- _build_autocall: тот же приём «свой выключатель, мягкая деградация» ---
+
+def _autocall_settings(**overrides):
+    from adminbot.config import Settings
+
+    return Settings(
+        tg_token="t", owner_tg_id=1, bot_db_dsn="postgresql://x", own_db_dsn="postgresql://x",
+        amo_base_url="https://x", amo_token="t", **overrides)
+
+
+def test_autocall_disabled_returns_none():
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(autocall_enabled=False)
+
+    assert _build_autocall(settings, None, None, None, None) is None
+
+
+def test_autocall_dry_run_builds_watcher_with_memory_transport():
+    """Репетиция: хранилище и АТС живут в памяти — правило «репетиция не
+    оставляет следов» распространяется и на автозвонок."""
+    from adminbot.autocall.pbx import MemoryPbx
+    from adminbot.autocall.store import MemoryAutocallStore
+    from adminbot.autocall.watcher import AutocallWatcher
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=True)
+
+    watcher = _build_autocall(settings, None, None, None, object())
+
+    assert isinstance(watcher, AutocallWatcher)
+    assert isinstance(watcher.store, MemoryAutocallStore)
+    assert isinstance(watcher.engine.pbx, MemoryPbx)
+
+
+def test_autocall_live_without_pbx_settings_degrades_softly(caplog):
+    """Боевой режим без ключей АТС — функция просто не поднимается."""
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=False)
+
+    with caplog.at_level("WARNING"):
+        result = _build_autocall(settings, None, None, object(), object())
+
+    assert result is None
+    assert any("PBX" in record.getMessage() for record in caplog.records)
+
+
+def test_autocall_live_without_online_pbx_client_degrades_softly(caplog):
+    """Ключи заданы, но боевого клиента АТС в модуле ещё нет (Задача 7) —
+    тоже мягкая деградация, не падение сервиса."""
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(
+        autocall_enabled=True, autocall_dry_run=False,
+        pbx_base_url="https://pbx.example", pbx_api_key="key", pbx_manager_dial="100")
+
+    with caplog.at_level("WARNING"):
+        result = _build_autocall(settings, None, None, object(), object())
+
+    assert result is None
+    assert any("АТС" in record.getMessage() for record in caplog.records)
+
+
+def test_autocall_bad_window_raises():
+    """Кривое окно валит старт — опечатку ловим при запуске, не в бою."""
+    import pytest
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(
+        autocall_enabled=True, autocall_window_from_hour=20, autocall_window_to_hour=10)
+
+    with pytest.raises(RuntimeError):
+        _build_autocall(settings, None, None, None, None)

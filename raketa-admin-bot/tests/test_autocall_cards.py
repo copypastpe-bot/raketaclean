@@ -16,7 +16,7 @@ import pytest
 
 from adminbot.autocall.chain import NOTIFY_KINDS
 from adminbot.tg.autocall_cards import (
-    connected_text, manager_text, rehearsal_text, stuck_alert_text,
+    connected_text, manager_text, no_phone_text, rehearsal_text, stuck_alert_text,
 )
 
 BASE_URL = "https://example.amocrm.ru"
@@ -129,6 +129,17 @@ def test_connected_text_has_full_phone():
 
     assert "+79001234567" in text
     assert "…" not in text  # не маска
+
+
+# --- no_phone_text ---
+
+def test_no_phone_text_exact():
+    text = no_phone_text(LEAD_ID, base_url=BASE_URL)
+
+    assert text == (
+        "Заявка с сайта без телефона — робот звонить не может, посмотрите сделку.\n"
+        f"{DEAL_URL}"
+    )
 
 
 # --- stuck_alert_text ---

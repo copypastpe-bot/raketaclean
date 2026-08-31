@@ -77,6 +77,7 @@ _ERROR_RETRY = timedelta(seconds=60)
 
 NotifyManagerFn = Callable[[int, str], Awaitable[None]]
 NotifyOwnerRehearsalFn = Callable[[int, Optional[str]], Awaitable[None]]
+NotifyOwnerConnectedFn = Callable[[int], Awaitable[None]]
 
 
 class AutocallEngine:
@@ -93,6 +94,7 @@ class AutocallEngine:
         window_to_hour: int = 20,
         notify_manager: Optional[NotifyManagerFn] = None,
         notify_owner_rehearsal: Optional[NotifyOwnerRehearsalFn] = None,
+        notify_owner_connected: Optional[NotifyOwnerConnectedFn] = None,
         dry_run: bool = True,
     ) -> None:
         self.pbx = pbx
@@ -103,6 +105,10 @@ class AutocallEngine:
         self.window_to_hour = window_to_hour
         self.notify_manager = notify_manager
         self.notify_owner_rehearsal = notify_owner_rehearsal
+        # Отчёт владельцу о состоявшемся соединении — неделя наблюдения
+        # (дизайн §6.5): по каждой доведённой до конца цепочке он видит одно
+        # сообщение со ссылкой на сделку, как и в уборке/календаре.
+        self.notify_owner_connected = notify_owner_connected
         self.dry_run = dry_run
 
     async def process_due(self, link: AutocallLead, now: datetime) -> None:
@@ -286,7 +292,7 @@ class AutocallEngine:
                     payload={"reason": effect.reason},
                 )
             elif isinstance(effect, Done):
-                pass  # статус "done" уже в update_fields — делать больше нечего
+                await self._notify_connected(link.lead_id)
 
         await self.store.update(link.lead_id, **update_fields)
 
@@ -314,4 +320,28 @@ class AutocallEngine:
             return
         await self.store.log_action(
             lead_id, "notify", dry_run=self.dry_run, payload={"kind": kind},
+        )
+
+    async def _notify_connected(self, lead_id: int) -> None:
+        """Отчёт владельцу о соединении — неделя наблюдения (дизайн §6.5).
+
+        Тот же принцип, что и у сообщения менеджеру: недоставленный отчёт не
+        должен ронять цепочку. Цепочка к этому моменту уже закрыта (done),
+        поэтому сбой отчёта не мешает самой работе — только журналу.
+        """
+        if self.notify_owner_connected is None:
+            return
+        try:
+            await self.notify_owner_connected(lead_id)
+        except Exception as exc:  # noqa: BLE001 — недоставленный отчёт не роняет цепочку
+            log.exception(
+                "Автозвонок, сделка %s: отчёт владельцу о соединении не ушёл", lead_id,
+            )
+            await self.store.log_action(
+                lead_id, "notify_failed", dry_run=self.dry_run,
+                payload={"kind": "connected", "error": str(exc)},
+            )
+            return
+        await self.store.log_action(
+            lead_id, "notify", dry_run=self.dry_run, payload={"kind": "connected"},
         )
