@@ -13,7 +13,7 @@ from typing import Any, Optional, Sequence
 
 import asyncpg
 
-from adminbot.models import AmoLink, CalendarLink, CarpetLink, Order
+from adminbot.models import AmoLink, AutocallLead, CalendarLink, CarpetLink, Order
 from adminbot.phone import last10
 
 # Колонки adminbot.amo_links, которые разрешено менять через update_link.
@@ -756,3 +756,152 @@ async def fetch_calendar_actions(own_pool: asyncpg.Pool, event_id: str,
             event_id, limit,
         )
     return [dict(row) for row in rows]
+
+
+# --- автозвонок по заявке с сайта (autocall) ---
+
+# Колонки adminbot.autocall_leads, которые разрешено менять.
+_UPDATABLE_AUTOCALL_FIELDS = frozenset(
+    {"phone10", "status", "attempts_total", "manager_failures", "client_failures",
+     "next_action_at", "call_id", "called_at", "last_error"}
+)
+
+
+def _autocall_from_row(row: Optional[asyncpg.Record]) -> Optional[AutocallLead]:
+    if row is None:
+        return None
+    return AutocallLead(
+        lead_id=row["lead_id"],
+        status=row["status"],
+        phone10=row["phone10"],
+        attempts_total=row["attempts_total"],
+        manager_failures=row["manager_failures"],
+        client_failures=row["client_failures"],
+        next_action_at=row["next_action_at"],
+        call_id=row["call_id"],
+        called_at=row["called_at"],
+        last_error=row["last_error"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def get_autocall_lead(own_pool: asyncpg.Pool, lead_id: int) -> Optional[AutocallLead]:
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM adminbot.autocall_leads WHERE lead_id = $1", lead_id)
+    return _autocall_from_row(row)
+
+
+async def create_autocall_lead(own_pool: asyncpg.Pool, lead_id: int, *,
+                               phone10: Optional[str] = None,
+                               **fields: Any) -> AutocallLead:
+    """Завести цепочку попыток. Повторный проход наблюдателя ничего не портит."""
+    unknown = set(fields) - _UPDATABLE_AUTOCALL_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля цепочки автозвонка: {sorted(unknown)}")
+
+    columns = ["lead_id", "phone10", *fields]
+    values = [lead_id, phone10, *[fields[name] for name in fields]]
+    placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"""
+            INSERT INTO adminbot.autocall_leads ({", ".join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT (lead_id) DO UPDATE SET updated_at = now()
+            RETURNING *
+            """,
+            *values,
+        )
+    return _autocall_from_row(row)
+
+
+async def update_autocall_lead(own_pool: asyncpg.Pool, lead_id: int,
+                               **fields: Any) -> Optional[AutocallLead]:
+    unknown = set(fields) - _UPDATABLE_AUTOCALL_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля цепочки автозвонка: {sorted(unknown)}")
+    if not fields:
+        return await get_autocall_lead(own_pool, lead_id)
+
+    names = list(fields)
+    assignments = ", ".join(f"{name} = ${i + 2}" for i, name in enumerate(names))
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE adminbot.autocall_leads SET {assignments}, updated_at = now() "
+            f"WHERE lead_id = $1 RETURNING *",
+            lead_id, *[fields[name] for name in names],
+        )
+    return _autocall_from_row(row)
+
+
+async def fetch_due_autocall_leads(own_pool: asyncpg.Pool, statuses: Sequence[str],
+                                   now: datetime) -> list[AutocallLead]:
+    """Незаконченные цепочки, у которых срок подошёл. Просроченные — первыми.
+
+    Без срока (next_action_at пуст) — действовать сразу: цепочку только завели.
+    """
+    if not statuses:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM adminbot.autocall_leads
+            WHERE status = ANY($1::text[])
+              AND (next_action_at IS NULL OR next_action_at <= $2)
+            ORDER BY next_action_at NULLS FIRST, lead_id
+            """,
+            list(statuses), now,
+        )
+    return [_autocall_from_row(row) for row in rows]
+
+
+async def log_autocall_action(own_pool: asyncpg.Pool, *, lead_id: int, action: str,
+                              dry_run: bool, payload: Optional[dict] = None) -> None:
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.autocall_actions (lead_id, action, dry_run, payload)
+            VALUES ($1, $2, $3, $4)
+            """,
+            lead_id, action, dry_run, payload,
+        )
+
+
+async def fetch_autocall_actions(own_pool: asyncpg.Pool, lead_id: int,
+                                 limit: int = 20) -> list[dict]:
+    """Что робот делал по заявке — свежее первым, для сообщения владельцу."""
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT action, dry_run, payload, created_at
+            FROM adminbot.autocall_actions WHERE lead_id = $1
+            ORDER BY id DESC LIMIT $2
+            """,
+            lead_id, limit,
+        )
+    return [dict(row) for row in rows]
+
+
+async def get_autocall_cursor(own_pool: asyncpg.Pool) -> Optional[datetime]:
+    """Курсор опроса амо: с какого created_at читать. None — курсора ещё нет."""
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT created_from FROM adminbot.autocall_cursor WHERE id = 1")
+    return None if row is None else row["created_from"]
+
+
+async def save_autocall_cursor(own_pool: asyncpg.Pool, created_from: datetime) -> None:
+    """Сохранить курсор. В репетиции сюда не приходят — там хранилище в памяти."""
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.autocall_cursor (id, created_from)
+            VALUES (1, $1)
+            ON CONFLICT (id) DO UPDATE
+            SET created_from = EXCLUDED.created_from,
+                updated_at = now()
+            """,
+            created_from,
+        )

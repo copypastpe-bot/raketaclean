@@ -102,6 +102,28 @@ class CalendarLink:
 
 
 @dataclass(frozen=True)
+class AutocallLead:
+    """Строка adminbot.autocall_leads: цепочка попыток дозвона по заявке с сайта.
+
+    Ключ — идентификатор сделки амо: наблюдатель видит одну и ту же заявку
+    при каждом опросе, и вторая цепочка по той же сделке недопустима.
+    """
+
+    lead_id: int
+    status: str                       # queued|calling|done|no_contact|gave_up|error
+    phone10: Optional[str] = None
+    attempts_total: int = 0
+    manager_failures: int = 0
+    client_failures: int = 0
+    next_action_at: Optional[datetime] = None   # когда пора действовать; None — сразу
+    call_id: Optional[str] = None     # идентификатор звонка в АТС
+    called_at: Optional[datetime] = None        # когда отдали команду АТС
+    last_error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
 class AmoLink:
     """Строка adminbot.amo_links: что робот знает и уже сделал по заказу."""
 
