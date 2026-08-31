@@ -261,6 +261,26 @@ class AmoClient:
         lead_ids = [lead_id for contact in contacts for lead_id in contact_lead_ids(contact)]
         return await self.get_leads_by_ids(lead_ids)
 
+    async def find_leads_created_since(
+        self, pipeline_id: int, status_id: int, created_from_ts: int
+    ) -> list[dict]:
+        """Сделки этапа воронки, созданные не раньше указанного момента (unix-время).
+
+        Вход наблюдателя autocall: он опрашивает этап «Новый лид» и разбирает
+        заявки в порядке появления (order=asc — старые первыми, чтобы никто не
+        ждал дольше нужного). Конкретные воронку и этап метод не знает —
+        их подставляет вызывающий. with=contacts — чтобы сразу видеть,
+        чей телефон искать, без отдельного похода за сделкой.
+        """
+        params: list[tuple[str, Any]] = [
+            ("filter[statuses][0][pipeline_id]", pipeline_id),
+            ("filter[statuses][0][status_id]", status_id),
+            ("filter[created_at][from]", created_from_ts),
+            ("order[created_at]", "asc"),
+            ("with", "contacts"),
+        ]
+        return await self.get_all("/api/v4/leads", "leads", params=params)
+
     async def get_lead(self, lead_id: int) -> Optional[dict]:
         """Сделка целиком. None — если сделки нет (удалена)."""
         return await self.get(f"/api/v4/leads/{lead_id}", params={"with": "contacts"})

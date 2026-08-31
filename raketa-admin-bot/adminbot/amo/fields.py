@@ -154,6 +154,22 @@ def contact_lead_ids(contact: Optional[Mapping[str, Any]]) -> list[int]:
     return ids_
 
 
+def lead_tag_names(lead: Optional[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Имена тегов сделки из _embedded.tags.
+
+    По тегу «Заявка с сайта» autocall отличает заявки с сайта от остальных.
+    Сделка без тегов — обычное дело: возвращаем пустой кортеж, не ошибку.
+    """
+    if not lead:
+        return ()
+    embedded = lead.get("_embedded") or {}
+    names: list[str] = []
+    for tag in embedded.get("tags") or []:
+        if isinstance(tag, Mapping) and tag.get("name"):
+            names.append(str(tag["name"]))
+    return tuple(names)
+
+
 def lead_contact_ids(lead: Optional[Mapping[str, Any]]) -> list[int]:
     """id контактов, привязанных к сделке (нужен параметр with=contacts)."""
     if not lead:

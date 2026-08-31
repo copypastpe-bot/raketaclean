@@ -9,7 +9,13 @@ from aiohttp.test_utils import TestServer
 
 from adminbot.amo import ids
 from adminbot.amo.client import AmoAuthError, AmoClient, AmoError, AmoRateLimitError
-from adminbot.amo.fields import contact_phones, field_value, order_date_msk, specialist_ids
+from adminbot.amo.fields import (
+    contact_phones,
+    field_value,
+    lead_tag_names,
+    order_date_msk,
+    specialist_ids,
+)
 
 CONTACT_PAGE_1 = {
     "_page": 1,
@@ -243,6 +249,30 @@ async def test_get_lead_tasks_filters_by_lead(amo):
     assert query["filter[is_completed]"] == "0"   # закрытые задачи нас не интересуют
 
 
+async def test_find_leads_created_since_sends_exact_filter(amo):
+    """Наблюдатель autocall просит у амо новые сделки этапа — с контактами и по порядку."""
+    client, fake = amo
+    fake.stub("/api/v4/leads", {"_embedded": {"leads": [{"id": 601}, {"id": 602}]}})
+
+    leads = await client.find_leads_created_since(123, 456, 1756500000)
+
+    assert [lead["id"] for lead in leads] == [601, 602]
+    query = fake.requests[0].query
+    assert query["filter[statuses][0][pipeline_id]"] == "123"
+    assert query["filter[statuses][0][status_id]"] == "456"
+    assert query["filter[created_at][from]"] == "1756500000"
+    assert query["order[created_at]"] == "asc"     # старые заявки — первыми
+    assert query["with"] == "contacts"             # сразу видно, чей телефон искать
+
+
+async def test_find_leads_created_since_without_new_leads(amo):
+    """Ночью новых заявок нет — амо отвечает 204, это не ошибка."""
+    client, fake = amo
+    fake.stub("/api/v4/leads", 204)
+
+    assert await client.find_leads_created_since(123, 456, 1756500000) == []
+
+
 async def test_phone_is_masked_in_logs(amo, caplog):
     client, fake = amo
     fake.stub("/api/v4/contacts", 204)
@@ -303,6 +333,22 @@ def test_specialist_ids_read_from_lead():
     # текстовое поле без enum_id в список не попадает
     assert specialist_ids({"custom_fields_values": [
         {"field_id": ids.FIELD_SPECIALIST, "values": [{"value": "Кто-то"}]}]}) == ()
+
+
+def test_lead_tag_names_read_from_embedded():
+    lead = {"_embedded": {"tags": [
+        {"id": 1, "name": "Заявка с сайта"},
+        {"id": 2, "name": "Повтор"},
+    ]}}
+    assert lead_tag_names(lead) == ("Заявка с сайта", "Повтор")
+
+
+def test_lead_tag_names_survive_missing_keys():
+    """Сделка без тегов — обычное дело, а не авария."""
+    assert lead_tag_names({}) == ()
+    assert lead_tag_names(None) == ()
+    assert lead_tag_names({"_embedded": {}}) == ()
+    assert lead_tag_names({"_embedded": {"tags": [{"id": 3}]}}) == ()   # тег без имени
 
 
 def test_contact_phones_normalized_to_last10():
