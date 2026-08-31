@@ -146,20 +146,23 @@ def test_autocall_live_without_pbx_settings_degrades_softly(caplog):
     assert any("PBX" in record.getMessage() for record in caplog.records)
 
 
-def test_autocall_live_without_online_pbx_client_degrades_softly(caplog):
-    """Ключи заданы, но боевого клиента АТС в модуле ещё нет (Задача 7) —
-    тоже мягкая деградация, не падение сервиса."""
+def test_autocall_live_with_pbx_settings_builds_online_pbx():
+    """Боевой режим с заданными ключами — с Задачи 7 это настоящий клиент
+    OnlinePbx (раньше здесь была временная заглушка через getattr)."""
+    from adminbot.autocall.pbx import OnlinePbx
     from adminbot.main import _build_autocall
 
     settings = _autocall_settings(
         autocall_enabled=True, autocall_dry_run=False,
         pbx_base_url="https://pbx.example", pbx_api_key="key", pbx_manager_dial="100")
 
-    with caplog.at_level("WARNING"):
-        result = _build_autocall(settings, None, None, object(), object())
+    watcher, _manager_bot = _build_autocall(settings, None, None, object(), object())
 
-    assert result == (None, None)
-    assert any("АТС" in record.getMessage() for record in caplog.records)
+    assert watcher is not None
+    assert isinstance(watcher.engine.pbx, OnlinePbx)
+    assert watcher.engine.pbx.base_url == "https://pbx.example"
+    assert watcher.engine.pbx.api_key == "key"
+    assert watcher.engine.manager_dial == "100"
 
 
 def test_autocall_bad_window_raises():
