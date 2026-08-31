@@ -6,9 +6,10 @@
 
 from adminbot.amo import ids
 from scripts.autocall_exam import (
-    MailRow, build_report, delay_sec, describe_delay, find_mail_note,
-    gone_from_stage, mail_row, note_type_counts, site_tag_id, split_by_tag,
-    tags_preview,
+    TAGS_ABSENT, TAGS_HIDDEN, TAGS_VISIBLE, MailRow, build_report, delay_sec,
+    describe_delay, find_mail_note, freshest_lead, gone_from_stage, mail_row,
+    msk_stamp, note_type_counts, probe_tags, site_tag_id, split_by_tag,
+    tags_preview, tags_verdict,
 )
 
 SITE = "Заявка с сайта"
@@ -69,6 +70,48 @@ def test_gone_from_stage_takes_only_tagged_leads_off_the_stage():
     assert [item["id"] for item in gone] == [2, 3]
 
 
+# --- доследование: список против индивидуального ответа ---
+
+def test_probe_tags_compares_list_and_individual():
+    probe = probe_tags(lead(1), lead(1, SITE, "VIP"))
+    assert probe.lead_id == 1
+    assert probe.in_list == ()
+    assert probe.individual == (SITE, "VIP")
+
+
+def test_tags_verdict_hidden_when_individual_has_tags_but_list_does_not():
+    """Самый опасный случай: фильтрованный список прячет теги."""
+    probes = [probe_tags(lead(1), lead(1, SITE)),
+              probe_tags(lead(2), lead(2))]
+    assert tags_verdict(probes) == TAGS_HIDDEN
+
+
+def test_tags_verdict_absent_when_no_tags_anywhere():
+    probes = [probe_tags(lead(1), lead(1)), probe_tags(lead(2), lead(2))]
+    assert tags_verdict(probes) == TAGS_ABSENT
+    assert tags_verdict([]) == TAGS_ABSENT
+
+
+def test_tags_verdict_visible_when_list_shows_the_same_tags():
+    probes = [probe_tags(lead(1, SITE), lead(1, SITE)),
+              probe_tags(lead(2), lead(2))]
+    assert tags_verdict(probes) == TAGS_VISIBLE
+
+
+# --- свежесть потока и московское время ---
+
+def test_freshest_lead_picks_max_created_at():
+    leads = [lead(1, created_at=10), lead(2, created_at=30), lead(3)]
+    assert freshest_lead(leads)["id"] == 2
+    assert freshest_lead([]) is None
+    assert freshest_lead([lead(3)]) is None       # без created_at свежесть неизвестна
+
+
+def test_msk_stamp_converts_unix_to_moscow():
+    assert msk_stamp(1756468800) == "29.08.2025 15:00"   # 12:00 UTC → 15:00 МСК
+    assert msk_stamp(None) == "—"
+
+
 # --- сырой вид тегов ---
 
 def test_site_tag_id_reads_id_of_the_site_tag():
@@ -127,6 +170,17 @@ def test_mail_row_without_mail_note_keeps_the_real_types():
     assert row.types == [("common", 1)]
 
 
+def test_mail_row_carries_created_and_current_stage():
+    """Задержка меряется по заявкам с любых этапов — этап надо показать."""
+    payload = lead(7, SITE, created_at=1756468800,
+                   pipeline=ids.PIPELINE_REALIZATION, status=ids.REAL_STAGE_CREATED)
+    row = mail_row(payload, [note(1, "amomail_message", 1756468740)])
+    assert row.delay == 60
+    assert row.created_msk == "29.08.2025 15:00"
+    assert row.pipeline_id == ids.PIPELINE_REALIZATION
+    assert row.status_id == ids.REAL_STAGE_CREATED
+
+
 # --- отчёт: цифры на месте, телефоны замаскированы ---
 
 def test_report_masks_phones():
@@ -159,10 +213,45 @@ def test_report_tells_when_mail_note_is_missing():
 
 
 def test_report_warns_when_no_tags_seen_at_all():
-    """Ни одного тега в списочном ответе — вероятно, амо их не отдаёт."""
+    """Ни одного тега в списочном ответе и доследования нет — общее предупреждение."""
     text = report(site=[], phones={}, mail_rows=[],
                   tags_raw="", tagged_total=0, gone=[])
     assert "ВНИМАНИЕ" in text
+
+
+def test_report_shouts_when_filtered_list_hides_tags():
+    """Доследование поймало главный риск — отчёт говорит об этом КРУПНО."""
+    text = report(site=[], phones={},
+                  tag_probes=[probe_tags(lead(111), lead(111, SITE))])
+    assert "ПРЯЧЕТ ТЕГИ" in text
+    assert "тегов в списке 0, индивидуально 1" in text
+    assert SITE in text                        # имена тегов из индивидуального ответа
+
+
+def test_report_lifts_warning_when_stage_has_no_site_leads():
+    """Тегов нет и индивидуально — на этапе просто нет сайтовых заявок."""
+    text = report(site=[], phones={}, tags_raw="",
+                  tag_probes=[probe_tags(lead(111), lead(111)),
+                              probe_tags(lead(112), lead(112))])
+    assert "просто нет сайтовых заявок" in text
+    assert "ВНИМАНИЕ" not in text              # общее предупреждение снято
+
+
+def test_report_names_the_freshest_site_lead():
+    text = report(freshest=lead(500, SITE, created_at=1756468800))
+    assert "самая свежая сайтовая заявка: #500" in text
+    assert "29.08.2025 15:00" in text
+
+
+def test_report_shows_stage_and_created_for_mail_rows():
+    row = MailRow(111, 62, [("amomail_message", 1)],
+                  created_msk="29.08.2025 15:00",
+                  pipeline_id=ids.PIPELINE_REALIZATION,
+                  status_id=ids.REAL_STAGE_CREATED)
+    text = report(mail_rows=[row])
+    assert "29.08.2025 15:00" in text
+    assert f"воронка {ids.PIPELINE_REALIZATION}" in text
+    assert f"этап {ids.REAL_STAGE_CREATED}" in text
 
 
 def test_report_warns_when_page_limit_is_reached():

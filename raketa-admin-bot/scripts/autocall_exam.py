@@ -30,11 +30,12 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
 from adminbot.amo import ids
 from adminbot.amo.client import MAX_PAGES, PAGE_LIMIT, AmoClient
-from adminbot.amo.fields import lead_contact_ids
+from adminbot.amo.fields import MOSCOW_TZ, lead_contact_ids, lead_tag_names
 from adminbot.autocall.leads import SITE_TAG, is_site_lead, lead_phone10
 from adminbot.config import Settings
 from adminbot.phone import mask
@@ -43,6 +44,12 @@ DAYS = 60                    # окно экзамена — последние 
 FRESH_FOR_MAIL = 5           # у скольких свежих заявок замеряем «письмо → сделка»
 PHONE_EXAMPLES = 10          # сколько замаскированных примеров показать
 TAGS_PREVIEW_LIMIT = 300     # сырой repr тегов длиннее не нужен
+TAG_PROBE_LIMIT = 10         # сколько сделок этапа дотягиваем индивидуально
+
+# Вердикты доследования «список против индивидуального ответа».
+TAGS_HIDDEN = "hidden"       # индивидуально теги есть, в списке нет — список их прячет
+TAGS_ABSENT = "absent"       # тегов нет нигде — на этапе просто нет сайтовых заявок
+TAGS_VISIBLE = "visible"     # список показывает те же теги, что и индивидуальный ответ
 
 
 # --- разборная часть: работает над уже полученными ответами амо ---
@@ -69,6 +76,56 @@ def gone_from_stage(leads: Iterable[Mapping[str, Any]]) -> list[dict]:
         and not (int(lead.get("pipeline_id") or 0) == ids.PIPELINE_PRIMARY
                  and int(lead.get("status_id") or 0) == ids.PRIM_STAGE_NEW_LEAD)
     ]
+
+
+@dataclass(frozen=True)
+class TagProbe:
+    """Одна сделка этапа: теги в списочном ответе против индивидуального."""
+
+    lead_id: int
+    in_list: tuple[str, ...]        # имена тегов в ответе списка по этапу
+    individual: tuple[str, ...]     # имена тегов в ответе GET /leads/{id}
+
+
+def probe_tags(list_lead: Mapping[str, Any],
+               full_lead: Optional[Mapping[str, Any]]) -> TagProbe:
+    """Сравнить теги одной сделки: как их видит список и как — прямой запрос."""
+    return TagProbe(
+        lead_id=int(list_lead["id"]),
+        in_list=lead_tag_names(list_lead),
+        individual=lead_tag_names(full_lead),
+    )
+
+
+def tags_verdict(probes: Iterable[TagProbe]) -> str:
+    """Итог доследования: прячет ли фильтрованный список теги.
+
+    hidden — хоть у одной сделки теги видны индивидуально, но не в списке;
+    absent — тегов нет нигде: на этапе просто нет сайтовых заявок;
+    visible — список показывает то же, что и индивидуальные ответы.
+    """
+    probes = list(probes)
+    if any(probe.individual and not probe.in_list for probe in probes):
+        return TAGS_HIDDEN
+    if all(not probe.individual and not probe.in_list for probe in probes):
+        return TAGS_ABSENT
+    return TAGS_VISIBLE
+
+
+def freshest_lead(leads: Iterable[Mapping[str, Any]]) -> Optional[dict]:
+    """Самая свежая сделка по created_at. Без created_at свежесть неизвестна."""
+    dated = [lead for lead in leads if lead.get("created_at") is not None]
+    if not dated:
+        return None
+    return dict(max(dated, key=lambda lead: int(lead["created_at"])))
+
+
+def msk_stamp(ts: Optional[int]) -> str:
+    """Unix-время → московское, как его видит владелец в амо."""
+    if not ts:
+        return "—"
+    moment = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone(MOSCOW_TZ)
+    return moment.strftime("%d.%m.%Y %H:%M")
 
 
 def site_tag_id(lead: Optional[Mapping[str, Any]]) -> Optional[int]:
@@ -142,11 +199,14 @@ def describe_delay(sec: int) -> str:
 
 @dataclass(frozen=True)
 class MailRow:
-    """Итог замера по одной свежей заявке."""
+    """Итог замера по одной свежей сайтовой заявке (этап у неё может быть любой)."""
 
     lead_id: int
     delay: Optional[int]              # None — письмо в ленте не нашлось
     types: list[tuple[str, int]]      # реальные типы примечаний с количеством
+    created_msk: str = ""             # когда создана сделка, по Москве
+    pipeline_id: int = 0              # где сделка СЕЙЧАС — воронка
+    status_id: int = 0                # и этап
 
 
 def mail_row(lead: Mapping[str, Any], notes: list[dict]) -> MailRow:
@@ -155,6 +215,9 @@ def mail_row(lead: Mapping[str, Any], notes: list[dict]) -> MailRow:
         lead_id=int(lead["id"]),
         delay=None if note is None else delay_sec(lead, note),
         types=note_type_counts(notes),
+        created_msk=msk_stamp(lead.get("created_at")),
+        pipeline_id=int(lead.get("pipeline_id") or 0),
+        status_id=int(lead.get("status_id") or 0),
     )
 
 
@@ -162,7 +225,9 @@ def build_report(*, days: int, observer_total: int,
                  site: list[dict], others: list[dict],
                  tagged_total: int, gone: list[dict], all_total: int,
                  phones: dict[int, Optional[str]], tags_raw: str,
-                 mail_rows: list[MailRow]) -> str:
+                 mail_rows: list[MailRow],
+                 tag_probes: Optional[list[TagProbe]] = None,
+                 freshest: Optional[Mapping[str, Any]] = None) -> str:
     """Отчёт владельцу: русский, цифры с пояснениями, телефоны замаскированы."""
     lines = [
         f"=== Экзамен autocall: заявки с сайта за последние {days} дней ===",
@@ -172,7 +237,30 @@ def build_report(*, days: int, observer_total: int,
         f"   с тегом «{SITE_TAG}» — их робот возьмёт в работу: {len(site)}",
         f"   без тега — их робот не тронет: {len(others)}",
     ]
-    if not site and others:
+    if tag_probes:
+        lines += ["", "   Доследование: теги в списке против индивидуального ответа"]
+        for probe in tag_probes:
+            names = f" ({', '.join(probe.individual)})" if probe.individual else ""
+            lines.append(f"   сделка {probe.lead_id}: тегов в списке {len(probe.in_list)}, "
+                         f"индивидуально {len(probe.individual)}{names}")
+        verdict = tags_verdict(tag_probes)
+        if verdict == TAGS_HIDDEN:
+            lines += [
+                "",
+                "   " + "!" * 60,
+                "   !!! ФИЛЬТРОВАННЫЙ СПИСОК ПРЯЧЕТ ТЕГИ: индивидуальный ответ",
+                "   !!! показывает теги, а список по этапу — нет. Наблюдателю",
+                "   !!! нельзя верить тегам из списочного ответа — фильтр autocall",
+                "   !!! в таком виде не увидит НИ ОДНОЙ заявки с сайта.",
+                "   " + "!" * 60,
+            ]
+        elif verdict == TAGS_ABSENT:
+            lines.append("   Предупреждение снимается: тегов нет и в индивидуальных "
+                         "ответах — на этапе просто нет сайтовых заявок.")
+        else:
+            lines.append("   Список показывает те же теги, что и индивидуальные "
+                         "ответы, — фильтр их не прячет.")
+    elif not site and others:
         lines += [
             "   ВНИМАНИЕ: на этапе есть сделки, но ни одного тега не видно —",
             "   проверить, отдаёт ли списочный ответ _embedded.tags.",
@@ -185,6 +273,9 @@ def build_report(*, days: int, observer_total: int,
         f"   ушли с этапа «Новый лид»: {len(gone)} — наблюдатель их уже не увидит;",
         "   для старых, давно разобранных заявок это норма.",
     ]
+    if freshest is not None:
+        lines.append(f"   самая свежая сайтовая заявка: #{int(freshest['id'])}, "
+                     f"создана {msk_stamp(freshest.get('created_at'))} МСК")
     if all_total >= PAGE_LIMIT * MAX_PAGES:
         lines.append(
             f"   ВНИМАНИЕ: достигнут предел выборки в {PAGE_LIMIT * MAX_PAGES} "
@@ -210,18 +301,19 @@ def build_report(*, days: int, observer_total: int,
         "4. Сырой вид _embedded.tags в списочном ответе",
         f"   {tags_raw or '—'}",
         "",
-        f"5. Задержка «письмо → сделка» ({len(mail_rows)} свежих заявок)",
+        f"5. Задержка «письмо → сделка» ({len(mail_rows)} самых свежих сайтовых "
+        "заявок из обратной проверки, любые воронки и этапы)",
     ]
     for row in mail_rows:
         types = ", ".join(f"{name}×{count}" for name, count in row.types) or "лента пуста"
+        head = (f"   #{row.lead_id} · создана {row.created_msk or '—'} МСК · "
+                f"воронка {row.pipeline_id}, этап {row.status_id}")
         if row.delay is None:
-            lines.append(f"   #{row.lead_id}: письмо в примечаниях не видно, "
-                         f"типы такие: {types}")
+            lines.append(f"{head}: письмо в примечаниях не видно, типы такие: {types}")
         else:
-            lines.append(f"   #{row.lead_id}: {describe_delay(row.delay)} "
-                         f"(типы примечаний: {types})")
+            lines.append(f"{head}: {describe_delay(row.delay)} (типы примечаний: {types})")
     if not mail_rows:
-        lines.append("   свежих сайтовых заявок нет — замерять не на чем")
+        lines.append("   сайтовых заявок за период нет — замерять не на чем")
 
     lines += ["", "Телефоны в отчёте маскированы до последних 4 цифр."]
     return "\n".join(lines)
@@ -240,13 +332,25 @@ async def main() -> int:
             ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NEW_LEAD, since)
         site, others = split_by_tag(observer)
 
+        # Доследование: каждую сделку этапа дотягиваем индивидуально и сравниваем
+        # теги с тем, что показал фильтрованный список.
+        to_probe = observer[:TAG_PROBE_LIMIT]
+        print(f"Доследование тегов: дотягиваю {len(to_probe)} сделок этапа "
+              "по одной…", flush=True)
+        tag_probes = []
+        for lead in to_probe:
+            full = await amo.get_lead(int(lead["id"]))
+            tag_probes.append(probe_tags(lead, full))
+
         print("Обратная проверка: все сделки за период, по всем воронкам…", flush=True)
         everything = await amo.get_all(
             "/api/v4/leads", "leads",
             params=[("filter[created_at][from]", since), ("with", "contacts")],
         )
-        tagged_total = sum(1 for lead in everything if is_site_lead(lead))
+        tagged_all = [lead for lead in everything if is_site_lead(lead)]
+        tagged_total = len(tagged_all)
         gone = gone_from_stage(everything)
+        freshest = freshest_lead(tagged_all)
 
         print(f"Достаю контакты {len(site)} сайтовых заявок…", flush=True)
         phones: dict[int, Optional[str]] = {}
@@ -260,13 +364,22 @@ async def main() -> int:
                     contacts.append(contact_cache[contact_id])
             phones[int(lead["id"])] = lead_phone10(lead, contacts)
 
-        tag_id = next((tid for lead in site
+        # id тега и сырой вид тегов: сначала из списка по этапу, а если этап пуст —
+        # из списка обратной проверки (это тоже списочный ответ амо).
+        tag_id = next((tid for lead in site + tagged_all
                        if (tid := site_tag_id(lead)) is not None), None)
-        tags_raw = tags_preview(site[0]) if site else ""
+        if site:
+            tags_raw = tags_preview(site[0])
+        elif tagged_all:
+            tags_raw = "(из списка обратной проверки) " + tags_preview(tagged_all[0])
+        else:
+            tags_raw = ""
 
-        fresh = sorted(site, key=lambda lead: int(lead.get("created_at") or 0))
+        # Задержку меряем по самым свежим сайтовым заявкам обратной проверки:
+        # на этапе их может уже не быть, а поток письма→сделки виден и так.
+        fresh = sorted(tagged_all, key=lambda lead: int(lead.get("created_at") or 0))
         fresh = list(reversed(fresh[-FRESH_FOR_MAIL:]))          # свежие первыми
-        print(f"Читаю примечания {len(fresh)} свежих заявок…", flush=True)
+        print(f"Читаю примечания {len(fresh)} свежих сайтовых заявок…", flush=True)
         mail_rows = []
         for lead in fresh:
             notes = await amo.get_all(f"/api/v4/leads/{int(lead['id'])}/notes", "notes")
@@ -279,7 +392,8 @@ async def main() -> int:
                        site=site, others=others,
                        tagged_total=tagged_total, gone=gone,
                        all_total=len(everything), phones=phones,
-                       tags_raw=tags_raw, mail_rows=mail_rows))
+                       tags_raw=tags_raw, mail_rows=mail_rows,
+                       tag_probes=tag_probes, freshest=freshest))
     if tag_id is not None:
         print(f"\nid тега «{SITE_TAG}»: {tag_id}")
     return 0
