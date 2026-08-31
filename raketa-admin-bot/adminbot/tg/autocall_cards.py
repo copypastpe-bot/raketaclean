@@ -61,31 +61,38 @@ def manager_text(kind: str, lead_id: int, *, base_url: str,
     return "\n".join(lines)
 
 
-def rehearsal_text(lead_id: int, phone10: str, *, base_url: str) -> str:
+def rehearsal_text(lead_id: int, phone10: Optional[str], *, base_url: str) -> str:
     """Владельцу в репетиции: что робот сделал бы, но не сделал.
 
     В репетиции робот не звонит и не пишет в амо — молчать об этом решении
     нельзя, иначе прогон покажет владельцу пустоту вместо того, что нужно
     проверить (тот же принцип, что и у rehearsal_text календаря).
+
+    phone10 бывает None (запись пропала из хранилища или телефон не
+    сохранился) — тогда строку телефона просто пропускаем, как в
+    manager_text, а не печатаем «телефон не распознан» на ровном месте.
     """
-    return "\n".join([
-        "Репетиция: позвонил бы сейчас менеджеру по заявке с сайта.",
-        f"Телефон клиента: {for_owner(phone10)}",
-        _deal_url(base_url, lead_id),
-    ])
+    lines = ["Репетиция: позвонил бы сейчас менеджеру по заявке с сайта."]
+    if phone10:
+        lines.append(f"Телефон клиента: {for_owner(phone10)}")
+    lines.append(_deal_url(base_url, lead_id))
+    return "\n".join(lines)
 
 
-def connected_text(lead_id: int, phone10: str, *, base_url: str) -> str:
+def connected_text(lead_id: int, phone10: Optional[str], *, base_url: str) -> str:
     """Владельцу при соединении менеджера с клиентом — неделя наблюдения.
 
     Одно сообщение на одну доведённую до конца цепочку: владелец проверяет
     по горячим следам, промежуточные шаги ему не нужны.
+
+    phone10 — тот же случай, что и в rehearsal_text: None пропускает строку
+    телефона целиком, а не подставляет заглушку «телефон не распознан».
     """
-    return "\n".join([
-        "Автозвонок: соединил менеджера с клиентом по заявке с сайта.",
-        f"Телефон клиента: {for_owner(phone10)}",
-        _deal_url(base_url, lead_id),
-    ])
+    lines = ["Автозвонок: соединил менеджера с клиентом по заявке с сайта."]
+    if phone10:
+        lines.append(f"Телефон клиента: {for_owner(phone10)}")
+    lines.append(_deal_url(base_url, lead_id))
+    return "\n".join(lines)
 
 
 def no_phone_text(lead_id: int, *, base_url: str) -> str:

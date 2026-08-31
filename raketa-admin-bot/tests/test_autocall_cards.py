@@ -112,6 +112,20 @@ def test_rehearsal_text_has_full_phone():
     assert "…" not in text  # не маска
 
 
+def test_rehearsal_text_without_phone_skips_the_line():
+    """phone10=None (записи уже нет или телефон не сохранился) — строку
+    телефона пропускаем, а не печатаем «телефон не распознан» на ровном
+    месте (ревью Задачи 11)."""
+    text = rehearsal_text(LEAD_ID, None, base_url=BASE_URL)
+
+    assert text == (
+        "Репетиция: позвонил бы сейчас менеджеру по заявке с сайта.\n"
+        f"{DEAL_URL}"
+    )
+    assert "Телефон клиента" not in text
+    assert "None" not in text
+
+
 # --- connected_text ---
 
 def test_connected_text_exact():
@@ -129,6 +143,18 @@ def test_connected_text_has_full_phone():
 
     assert "+79001234567" in text
     assert "…" not in text  # не маска
+
+
+def test_connected_text_without_phone_skips_the_line():
+    """Тот же случай, что и у rehearsal_text: None не печатает заглушку."""
+    text = connected_text(LEAD_ID, None, base_url=BASE_URL)
+
+    assert text == (
+        "Автозвонок: соединил менеджера с клиентом по заявке с сайта.\n"
+        f"{DEAL_URL}"
+    )
+    assert "Телефон клиента" not in text
+    assert "None" not in text
 
 
 # --- no_phone_text ---

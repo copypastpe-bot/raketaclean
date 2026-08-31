@@ -93,12 +93,13 @@ def test_autocall_disabled_returns_none():
 
     settings = _autocall_settings(autocall_enabled=False)
 
-    assert _build_autocall(settings, None, None, None, None) is None
+    assert _build_autocall(settings, None, None, None, None) == (None, None)
 
 
 def test_autocall_dry_run_builds_watcher_with_memory_transport():
     """Репетиция: хранилище и АТС живут в памяти — правило «репетиция не
-    оставляет следов» распространяется и на автозвонок."""
+    оставляет следов» распространяется и на автозвонок. Токен рабочего бота
+    не задан — второй элемент (бот менеджера) отсутствует."""
     from adminbot.autocall.pbx import MemoryPbx
     from adminbot.autocall.store import MemoryAutocallStore
     from adminbot.autocall.watcher import AutocallWatcher
@@ -106,11 +107,30 @@ def test_autocall_dry_run_builds_watcher_with_memory_transport():
 
     settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=True)
 
-    watcher = _build_autocall(settings, None, None, None, object())
+    watcher, manager_bot = _build_autocall(settings, None, None, None, object())
 
     assert isinstance(watcher, AutocallWatcher)
     assert isinstance(watcher.store, MemoryAutocallStore)
     assert isinstance(watcher.engine.pbx, MemoryPbx)
+    assert manager_bot is None
+
+
+def test_autocall_dry_run_with_worker_settings_exposes_manager_bot():
+    """Заданы WORKER_TG_TOKEN/MANAGER_TG_CHAT_ID — _build_autocall отдаёт
+    бота менеджера наружу (не прячет его в замыкании отправителя), чтобы
+    App мог закрыть его сессию при остановке сервиса (ревью Задачи 11)."""
+    from aiogram import Bot
+
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(
+        autocall_enabled=True, autocall_dry_run=True,
+        worker_tg_token="123456:ABCDEF-fake-token-value", manager_tg_chat_id=999)
+
+    watcher, manager_bot = _build_autocall(settings, None, None, None, object())
+
+    assert watcher is not None
+    assert isinstance(manager_bot, Bot)
 
 
 def test_autocall_live_without_pbx_settings_degrades_softly(caplog):
@@ -122,7 +142,7 @@ def test_autocall_live_without_pbx_settings_degrades_softly(caplog):
     with caplog.at_level("WARNING"):
         result = _build_autocall(settings, None, None, object(), object())
 
-    assert result is None
+    assert result == (None, None)
     assert any("PBX" in record.getMessage() for record in caplog.records)
 
 
@@ -138,7 +158,7 @@ def test_autocall_live_without_online_pbx_client_degrades_softly(caplog):
     with caplog.at_level("WARNING"):
         result = _build_autocall(settings, None, None, object(), object())
 
-    assert result is None
+    assert result == (None, None)
     assert any("АТС" in record.getMessage() for record in caplog.records)
 
 
@@ -152,3 +172,50 @@ def test_autocall_bad_window_raises():
 
     with pytest.raises(RuntimeError):
         _build_autocall(settings, None, None, None, None)
+
+
+# --- App.close(): сессия менеджерского бота закрывается вместе с сервисом ---
+
+class FakeBotSession:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeBot:
+    def __init__(self):
+        self.session = FakeBotSession()
+
+
+class FakePool:
+    async def close(self):
+        pass
+
+
+async def test_close_closes_autocall_manager_bot_session():
+    """App.close() должен закрыть сессию отдельного send-only бота менеджера —
+    иначе после systemctl restart она остаётся висеть (ревью Задачи 11):
+    aiogram открывает aiohttp-сессию лениво при первой отправке, и её никто,
+    кроме App, не знает как закрыть."""
+    main_bot = FakeBot()
+    manager_bot = FakeBot()
+    app = App(settings=None, bot_pool=FakePool(), own_pool=FakePool(), amo_clients=(),
+              bot=main_bot, dispatcher=None, watcher=None, reconciler=None,
+              stop=asyncio.Event(), autocall_manager_bot=manager_bot)
+
+    await app.close()
+
+    assert main_bot.session.closed is True
+    assert manager_bot.session.closed is True
+
+
+async def test_close_without_autocall_manager_bot_does_not_break():
+    """Транспорт менеджеру не настроен (autocall_manager_bot=None по умолчанию) —
+    close() не должен спотыкаться об отсутствующего бота."""
+    app = App(settings=None, bot_pool=FakePool(), own_pool=FakePool(), amo_clients=(),
+              bot=FakeBot(), dispatcher=None, watcher=None, reconciler=None,
+              stop=asyncio.Event())
+
+    await app.close()                                  # не падает

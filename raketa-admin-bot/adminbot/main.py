@@ -87,6 +87,10 @@ class App:
     calendar_watcher: Optional[Any] = None
     calendar_token: Optional[Any] = None
     autocall_watcher: Optional[Any] = None
+    # Отдельный send-only бот для сообщений менеджеру (WORKER_TG_TOKEN) — не участвует
+    # в опросе, но его aiohttp-сессия открывается лениво при первой отправке и должна
+    # закрыться вместе с сервисом, как и сессия self.bot.
+    autocall_manager_bot: Optional[Bot] = None
 
     async def run(self) -> None:
         """Запустить всё до сигнала остановки."""
@@ -147,6 +151,8 @@ class App:
         for client in self.amo_clients:
             await client.close()
         await self.bot.session.close()
+        if self.autocall_manager_bot is not None:
+            await self.autocall_manager_bot.session.close()
         await self.bot_pool.close()
         if self.own_pool is not self.bot_pool:
             await self.own_pool.close()
@@ -238,8 +244,11 @@ async def build_app(settings: Settings) -> App:
     # Автозвонок по заявке с сайта: своя цепочка, свой выключатель и своя АТС.
     # Кривое окно валит старт осознанно (опечатку ловим при запуске); нет
     # ключей АТС или боевого клиента ещё нет — функция просто не поднимается,
-    # остальные части сервиса работают как ни в чём не бывало.
-    autocall_watcher = _build_autocall(settings, own_pool, bot, live_amo, rehearsal_amo)
+    # остальные части сервиса работают как ни в чём не бывало. manager_bot —
+    # отдельный send-only бот для сообщений менеджеру (или None, если транспорт
+    # не настроен); App должен закрыть его сессию при остановке сервиса.
+    autocall_watcher, autocall_manager_bot = _build_autocall(
+        settings, own_pool, bot, live_amo, rehearsal_amo)
 
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(
@@ -271,6 +280,7 @@ async def build_app(settings: Settings) -> App:
                calendar_watcher=calendar_watcher,
                calendar_token=calendar_token,
                autocall_watcher=autocall_watcher,
+               autocall_manager_bot=autocall_manager_bot,
                stop=asyncio.Event())
 
 
@@ -376,16 +386,21 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
 
 def _build_autocall(settings: Settings, own_pool: Any, bot: Bot,
                     live_amo: AmoClient, rehearsal_amo: AmoClient):
-    """Собрать автозвонок по заявке с сайта. Возвращает наблюдателя или None.
+    """Собрать автозвонок по заявке с сайта. Возвращает (наблюдатель, бот менеджера).
 
     Функция выключена, окно звонков задано неверно или АТС не поднимается
     (нет ключей доступа либо боевого клиента в модуле ещё нет — он появится
     в Задаче 7) — робот просто не звонит, остальные части сервиса работают
-    как ни в чём не бывало (тот же приём, что у календаря без ключа Google).
+    как ни в чём не бывало (тот же приём, что у календаря без ключа Google);
+    оба значения тогда — (None, None).
+
+    Второй элемент — отдельный send-only бот для сообщений менеджеру (или
+    None, если транспорт не настроен): его сессию должен закрыть App.close(),
+    поэтому наружу он выходит вместе с наблюдателем, а не прячется в замыкании.
     """
     if not settings.autocall_enabled:
         log.info("Автозвонок: функция выключена настройкой AUTOCALL_ENABLED")
-        return None
+        return None, None
 
     # Опечатку в окне ловим при запуске: упавший старт дешевле, чем робот,
     # который звонит клиенту в три часа ночи (тот же принцип, что у
@@ -406,20 +421,21 @@ def _build_autocall(settings: Settings, own_pool: Any, bot: Bot,
                 and settings.pbx_manager_dial):
             log.warning("Автозвонок не поднят: не заданы PBX_BASE_URL/PBX_API_KEY/"
                        "PBX_MANAGER_DIAL")
-            return None
+            return None, None
         OnlinePbx = getattr(autocall_pbx, "OnlinePbx", None)
         if OnlinePbx is None:
             log.warning("Автозвонок не поднят: боевой клиент АТС ещё не готов "
                        "(появится в Задаче 7)")
-            return None
+            return None, None
         pbx = OnlinePbx(base_url=settings.pbx_base_url, api_key=settings.pbx_api_key)
 
     amo = rehearsal_amo if settings.autocall_dry_run else live_amo
+    manager_sender, manager_bot = _make_autocall_manager_sender(settings, bot, store)
     engine = AutocallEngine(
         pbx=pbx, amo=amo, store=store, manager_dial=settings.pbx_manager_dial,
         window_from_hour=settings.autocall_window_from_hour,
         window_to_hour=settings.autocall_window_to_hour,
-        notify_manager=_make_autocall_manager_sender(settings, bot, store),
+        notify_manager=manager_sender,
         notify_owner_rehearsal=_make_autocall_rehearsal_sender(
             bot, settings.owner_tg_id, settings.amo_base_url),
         notify_owner_connected=_make_autocall_connected_sender(
@@ -434,7 +450,7 @@ def _build_autocall(settings: Settings, own_pool: Any, bot: Bot,
     )
     log.info("Автозвонок: включён, режим %s",
              "репетиция" if settings.autocall_dry_run else "БОЕВОЙ")
-    return watcher
+    return watcher, manager_bot
 
 
 def _make_calendar_summary_sender(bot: Bot, owner_tg_id: int):
@@ -539,12 +555,17 @@ def _make_carpet_report_sender(bot: Bot, owner_tg_id: int):
 def _make_autocall_manager_sender(settings: Settings, bot: Bot, store: Any):
     """Сообщение менеджеру по исходу попытки дозвона.
 
+    Возвращает (отправитель, бот менеджера). Второй элемент нужен вызывающему
+    (`_build_autocall`) только затем, чтобы отдать его наружу в `App` — сессию
+    этого бота открывает aiogram лениво при первой отправке, и закрыть её
+    должен `App.close()`, а не это замыкание, которое переживает сам процесс.
+
     Уходит от рабочего бота, с которым менеджер уже общается, а не от
     админ-бота владельца (решение Задачи 9). Отдельный `Bot` поднимается один
     раз здесь и работает только на отправку — polling ему не поручаем, за
     обновлениями следит сам рабочий бот. Токена или чата менеджера нет —
     сообщение уходит владельцу с пометкой, что доставить его некому (мягкая
-    деградация вместо тишины).
+    деградация вместо тишины), а бот менеджера тогда не создаётся вовсе.
     """
     manager_bot: Optional[Bot] = None
     if settings.worker_tg_token and settings.manager_tg_chat_id:
@@ -564,7 +585,7 @@ def _make_autocall_manager_sender(settings: Settings, bot: Bot, store: Any):
             f"(менеджеру не отправлено: транспорт не настроен)\n{text}",
         )
 
-    return send
+    return send, manager_bot
 
 
 def _make_autocall_rehearsal_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
@@ -582,9 +603,9 @@ def _make_autocall_connected_sender(bot: Bot, owner_tg_id: int, amo_base_url: st
     """Отчёт владельцу о соединении — неделя наблюдения (дизайн §6.5).
 
     Движок передаёт только lead_id, телефон достаём из хранилища сами. Если
-    записи уже нет или телефон не сохранился, `for_owner` внутри
-    `connected_text` сам покажет «телефон не распознан» — литерала "None"
-    в сообщении не будет.
+    записи уже нет или телефон не сохранился, `connected_text` сам пропускает
+    строку телефона (phone10=None) — ни заглушки, ни литерала "None" в
+    сообщении не будет.
     """
 
     async def send(lead_id: int) -> None:
