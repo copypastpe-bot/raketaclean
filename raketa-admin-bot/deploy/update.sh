@@ -15,6 +15,9 @@
 #   sudo raketa-admin-bot-update --gcal-run=ID[,ID]                 провести эти записи календаря
 #   sudo raketa-admin-bot-update --gcal-run=ID --gcal-preview       то же, но без записи в CRM
 #   sudo raketa-admin-bot-update --autocall-exam   экзамен фильтра заявок с сайта (читает CRM, ничего не меняет)
+#   sudo raketa-admin-bot-update --autocall-on --autocall-rehearsal   автозвонок: репетиция
+#   sudo raketa-admin-bot-update --autocall-live                      автозвонок: боевой режим
+#   sudo raketa-admin-bot-update --autocall-off                       автозвонок: выключить
 #
 # Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
 # меняются только два выключателя, и каждый раз печатается итоговое состояние.
@@ -36,6 +39,8 @@ GCAL_RESET=""
 SHOW_LEADS=""
 SHOW_LEAD_IDS=""
 AUTOCALL_EXAM=""
+AUTOCALL=""
+AUTOCALL_DRY=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
@@ -59,6 +64,10 @@ for arg in "$@"; do
         --leads=*)        SHOW_LEADS="${arg#*=}" ;;
         --lead-ids=*)     SHOW_LEAD_IDS="${arg#*=}" ;;
         --autocall-exam)  AUTOCALL_EXAM=1 ;;
+        --autocall-on)        AUTOCALL=1 ;;
+        --autocall-off)       AUTOCALL=0 ;;
+        --autocall-live)      AUTOCALL_DRY=0 ;;
+        --autocall-rehearsal) AUTOCALL_DRY=1 ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -155,6 +164,8 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
 [ -n "$GCAL" ] && set_flag GCAL_ENABLED "$GCAL"
 [ -n "$GCAL_DRY" ] && set_flag GCAL_DRY_RUN "$GCAL_DRY"
+[ -n "$AUTOCALL" ] && set_flag AUTOCALL_ENABLED "$AUTOCALL"
+[ -n "$AUTOCALL_DRY" ] && set_flag AUTOCALL_DRY_RUN "$AUTOCALL_DRY"
 
 # Доступы к почте робота лежат отдельным файлом у admin. Переносим их в настройки
 # службы один раз: сама служба читает только свой .env.
@@ -172,6 +183,13 @@ if [ ! -f "$GCAL_KEY" ] && [ -f /home/admin/.gcal.json ]; then
     echo "ключ служебного аккаунта Google перенесён в настройки службы"
 fi
 
+# Ключ АТС и токен рабочего бота владелец кладёт себе в /home/admin/.pbx.env.
+# Служба работает от другого пользователя, поэтому переносим их один раз.
+if ! grep -q "^PBX_API_KEY=" "$ENV_FILE" && [ -f /home/admin/.pbx.env ]; then
+    grep -E "^(PBX_|WORKER_TG_|MANAGER_TG_)" /home/admin/.pbx.env >> "$ENV_FILE"
+    echo "доступы к АТС и токен рабочего бота перенесены в настройки службы"
+fi
+
 flag_of() { grep "^$1=" "$ENV_FILE" | cut -d= -f2- || true; }
 now_enabled=$(flag_of AMO_SYNC_ENABLED)
 now_dry=$(flag_of AMO_SYNC_DRY_RUN)
@@ -184,6 +202,9 @@ echo "ковры:   $([ "$now_carpets" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$no
 now_gcal=$(flag_of GCAL_ENABLED)
 now_gcal_dry=$(flag_of GCAL_DRY_RUN)
 echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
+now_autocall=$(flag_of AUTOCALL_ENABLED)
+now_autocall_dry=$(flag_of AUTOCALL_DRY_RUN)
+echo "автозвонок: $([ "$now_autocall" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_autocall_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
 
 # Проверка доступа к календарю: читает три ближайшие записи и ничего не меняет.
 if [ -n "$GCAL_CHECK" ]; then
@@ -227,7 +248,7 @@ fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
 if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM" ] && [ -z "$GCAL_RUN" ] \
-        && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM" ]; then
+        && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
     exit 0
