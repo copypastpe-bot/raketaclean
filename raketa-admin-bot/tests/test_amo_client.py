@@ -312,18 +312,18 @@ async def test_get_lead_field_enums(amo):
     client, fake = amo
     fake.stub("/api/v4/leads/custom_fields/39243", {
         "id": 39243, "name": "Специалист",
-        "enums": [{"id": 951507, "value": "Дмитрий Козлов +79306858534"}],
+        "enums": [{"id": 951507, "value": "Мастер Тестовый +79001234502"}],
     })
 
     enums = await client.get_lead_field_enums(ids.FIELD_SPECIALIST)
-    assert enums == [{"id": 951507, "value": "Дмитрий Козлов +79306858534"}]
+    assert enums == [{"id": 951507, "value": "Мастер Тестовый +79001234502"}]
 
 
 def test_specialist_ids_read_from_lead():
     lead = {
         "custom_fields_values": [
             {"field_id": ids.FIELD_SPECIALIST, "values": [
-                {"value": "Дмитрий Козлов +79306858534", "enum_id": 951507}]},
+                {"value": "Мастер Тестовый +79001234502", "enum_id": 951507}]},
             {"field_id": ids.FIELD_SERVICE, "values": [
                 {"value": "Чистка мебели", "enum_id": 933165}]},
         ]
@@ -355,9 +355,9 @@ def test_contact_phones_normalized_to_last10():
     contact = {
         "custom_fields_values": [
             {"field_code": "PHONE", "values": [
-                {"value": "+7 960 186-10-67"}, {"value": "89159496642"}]},
+                {"value": "+7 900 123-45-01"}, {"value": "89001234503"}]},
             {"field_code": "EMAIL", "values": [{"value": "a@b.ru"}]},
         ]
     }
-    assert contact_phones(contact) == ["9601861067", "9159496642"]
+    assert contact_phones(contact) == ["9001234501", "9001234503"]
     assert contact_phones({}) == []
