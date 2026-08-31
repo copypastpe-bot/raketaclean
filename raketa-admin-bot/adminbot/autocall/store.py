@@ -25,6 +25,17 @@ from adminbot.models import AutocallLead
 ACTIVE_STATUSES: tuple[str, ...] = ("queued", "calling", "error")
 
 
+def _reject_unknown_fields(fields: dict) -> None:
+    """Память отвергает те же поля, что база: источник один — db.py.
+
+    На памяти держится репетиция; будь она добрее боевого хранилища,
+    ошибка в имени поля всплыла бы только при боевом запуске.
+    """
+    unknown = set(fields) - db._UPDATABLE_AUTOCALL_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля цепочки автозвонка: {sorted(unknown)}")
+
+
 class AutocallStore(Protocol):
     """Что движку и наблюдателю нужно от хранилища — и ничего сверх того."""
 
@@ -65,6 +76,7 @@ class MemoryAutocallStore:
 
     async def create(self, lead_id: int, *, phone10: Optional[str] = None,
                      **fields: Any) -> AutocallLead:
+        _reject_unknown_fields(fields)
         lead = self.leads.get(lead_id)
         if lead is None:
             lead = AutocallLead(lead_id=lead_id, status="queued", phone10=phone10,
@@ -73,6 +85,7 @@ class MemoryAutocallStore:
         return lead
 
     async def update(self, lead_id: int, **fields: Any) -> Optional[AutocallLead]:
+        _reject_unknown_fields(fields)
         lead = self.leads.get(lead_id)
         if lead is None:
             return None

@@ -105,6 +105,23 @@ async def test_due_returns_only_chains_whose_time_has_come(store):
     assert [lead.lead_id for lead in due] == [101, 105, 102]
 
 
+async def test_foreign_fields_are_rejected_like_in_pg(store):
+    """Память отвергает те же поля, что база: репетиция не добрее боя.
+
+    Иначе опечатка в имени поля прошла бы репетицию и всплыла только
+    при боевом запуске.
+    """
+    await store.create(41500001, phone10="9601861067")
+
+    with pytest.raises(ValueError):
+        await store.update(41500001, created_at=NOW)
+    with pytest.raises(ValueError):
+        await store.create(41500002, phone10=None, question_msg_id=5)
+
+    lead = await store.get(41500001)
+    assert lead.status == "queued"               # отвергнутое ничего не поменяло
+
+
 async def test_cursor_bookmark_is_upserted(store):
     """Курсор — одна строка на весь сервис; повторное сохранение её обновляет."""
     assert await store.cursor() is None
