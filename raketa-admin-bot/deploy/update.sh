@@ -14,6 +14,7 @@
 #   sudo raketa-admin-bot-update --gcal-check                       проверить доступ к календарю
 #   sudo raketa-admin-bot-update --gcal-run=ID[,ID]                 провести эти записи календаря
 #   sudo raketa-admin-bot-update --gcal-run=ID --gcal-preview       то же, но без записи в CRM
+#   sudo raketa-admin-bot-update --autocall-exam   экзамен фильтра заявок с сайта (читает CRM, ничего не меняет)
 #
 # Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
 # меняются только два выключателя, и каждый раз печатается итоговое состояние.
@@ -34,6 +35,7 @@ GCAL_PREVIEW=""
 GCAL_RESET=""
 SHOW_LEADS=""
 SHOW_LEAD_IDS=""
+AUTOCALL_EXAM=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
@@ -56,6 +58,7 @@ for arg in "$@"; do
         --gcal-reset)     GCAL_RESET=1 ;;
         --leads=*)        SHOW_LEADS="${arg#*=}" ;;
         --lead-ids=*)     SHOW_LEAD_IDS="${arg#*=}" ;;
+        --autocall-exam)  AUTOCALL_EXAM=1 ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -213,8 +216,17 @@ if [ -n "$SHOW_LEADS" ] || [ -n "$SHOW_LEAD_IDS" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.show_leads || true
 fi
 
+# Экзамен фильтра заявок с сайта: читает CRM, ничего не меняет.
+if [ -n "$AUTOCALL_EXAM" ]; then
+    say "Экзамен заявок с сайта"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS \
+        "$HOME_DIR/.venv/bin/python" -m scripts.autocall_exam || true
+fi
+
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
