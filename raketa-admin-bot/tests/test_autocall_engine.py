@@ -19,6 +19,7 @@ from adminbot.autocall.chain import Outcome
 from adminbot.autocall.engine import CALL_OUTCOME_TIMEOUT_SEC, AutocallEngine
 from adminbot.autocall.pbx import MemoryPbx
 from adminbot.autocall.store import MemoryAutocallStore
+from adminbot.models import AutocallLead
 from tests.fakes import FakeAmo
 
 PHONE = "9601861067"
@@ -41,6 +42,48 @@ class BrokenPbx:
 
     async def call_outcome(self, call_id: str, *, called_at):
         return None  # не должен вызываться в этом сценарии: call_id так и не появился
+
+
+class FlakyStore:
+    """Оборачивает MemoryAutocallStore и один раз роняет ИМЕННО запись намерения.
+
+    Условие срабатывания — update(status="calling", attempts_total=2): это и
+    есть «запись намерения второй попытки» из регрессии ревью. Остальные
+    вызовы (log_action, due, любые другие update) идут в настоящее хранилище
+    без изменений — фейк точечный, а не общая порча стораджа.
+    """
+
+    def __init__(self, inner: MemoryAutocallStore) -> None:
+        self._inner = inner
+        self.failed_once = False
+
+    async def get(self, lead_id):
+        return await self._inner.get(lead_id)
+
+    async def create(self, lead_id, *, phone10=None, **fields):
+        return await self._inner.create(lead_id, phone10=phone10, **fields)
+
+    async def update(self, lead_id, **fields):
+        if (not self.failed_once and fields.get("status") == "calling"
+                and fields.get("attempts_total") == 2):
+            self.failed_once = True
+            raise OSError("сеть моргнула на записи намерения второй попытки")
+        return await self._inner.update(lead_id, **fields)
+
+    async def due(self, now):
+        return await self._inner.due(now)
+
+    async def cursor(self):
+        return await self._inner.cursor()
+
+    async def save_cursor(self, created_from):
+        await self._inner.save_cursor(created_from)
+
+    async def log_action(self, lead_id, action, *, dry_run, payload=None):
+        await self._inner.log_action(lead_id, action, dry_run=dry_run, payload=payload)
+
+    async def actions_for(self, lead_id):
+        return await self._inner.actions_for(lead_id)
 
 
 def make_engine(*, store, pbx, amo, dry_run=False, notify_manager=None,
@@ -394,3 +437,120 @@ async def test_final_status_input_is_a_silent_noop():
     assert pbx.calls == []
     assert amo.calls == []
     assert await store.actions_for(lead_id) == []
+
+
+# --- Регрессия ревью: Retry обязан сбросить called_at/call_id ---
+
+async def test_retry_clears_called_at_and_call_id_so_recovery_never_reasks_old_outcome():
+    """Баг из ревью: Retry не сбрасывал called_at/call_id → сбой ровно на записи
+    намерения ВТОРОЙ попытки оставлял строку в "error" со СТАРЫМ call_id;
+    _recover_error принимал его за «попытка ещё идёт», переспрашивал АТС по
+    этому call_id и засчитывал уже разобранный исход менеджера второй раз —
+    без единого нового звонка (manager_failures доезжал до 2 и до
+    "manager_unreachable" за один реальный звонок).
+
+    С фиксом после Retry called_at/call_id всегда None, поэтому такое же
+    падение на записи намерения второй попытки восстанавливается как "queued"
+    и реально перезванивает, а не пересчитывает прошлый исход.
+    """
+    inner = MemoryAutocallStore()
+    store = FlakyStore(inner)
+    pbx = MemoryPbx()
+    amo = FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo)
+    lead_id = 311
+    await store.create(lead_id, phone10=PHONE)
+    now = msk(2026, 8, 31, 14, 0)
+
+    # Первая попытка: реальный звонок, менеджер не берёт → Retry в queued.
+    link = await store.get(lead_id)
+    await engine.process_due(link, now)
+    calling = await store.get(lead_id)
+    call_id_1 = calling.call_id
+    pbx.set_outcome(call_id_1, Outcome.MANAGER_NO_ANSWER)
+    now2 = now + timedelta(seconds=1)
+    link2 = await store.get(lead_id)
+    await engine.process_due(link2, now2)
+
+    retried = await store.get(lead_id)
+    assert retried.status == "queued"
+    assert retried.manager_failures == 1
+    assert retried.called_at is None            # фикс: попытка не «висит» после Retry
+    assert retried.call_id is None
+
+    # Вторая попытка: запись намерения падает — цепочка уходит в error,
+    # а не в повторный разбор старого исхода.
+    now3 = retried.next_action_at
+    link3 = await store.get(lead_id)
+    await engine.process_due(link3, now3)
+
+    failed = await store.get(lead_id)
+    assert failed.status == "error"
+    assert failed.attempts_total == 1            # вторая попытка не засчиталась
+    assert failed.manager_failures == 1           # старый исход НЕ пересчитан
+    assert len(pbx.calls) == 1                    # второго реального звонка ещё не было
+
+    # Восстановление: запись намерения проходит нормально, звонок — реальный второй.
+    now4 = now3 + timedelta(seconds=1)
+    link4 = await store.get(lead_id)
+    await engine.process_due(link4, now4)
+
+    recovered = await store.get(lead_id)
+    assert recovered.status == "calling"
+    assert recovered.attempts_total == 2
+    assert recovered.manager_failures == 1        # НЕ 2 — старый исход не переспрошен
+    assert recovered.call_id != call_id_1
+    assert len(pbx.calls) == 2                    # ровно один новый реальный звонок
+
+
+# --- Восстановление error без called_at ---
+
+async def test_error_without_called_at_recovers_as_queued():
+    """Сбой ДО первой команды АТС (called_at ещё не проставлен) — восстановление
+    ведётся как "queued": окно, затем звонок с нуля, а не переспрос несуществующего
+    исхода несуществующего звонка.
+    """
+    store = MemoryAutocallStore()
+    pbx = MemoryPbx()
+    amo = FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo)
+    lead_id = 312
+    await store.create(lead_id, phone10=PHONE)
+    now = msk(2026, 8, 31, 14, 0)
+    # Сбой смоделирован напрямую: цепочка в error, called_at ещё ни разу не
+    # проставлялся (сбой случился раньше самой команды АТС).
+    await store.update(lead_id, status="error", last_error="сеть моргнула",
+                       next_action_at=now - timedelta(seconds=1))
+
+    link = await store.get(lead_id)
+    await engine.process_due(link, now)
+
+    recovered = await store.get(lead_id)
+    assert recovered.status == "calling"
+    assert recovered.attempts_total == 1
+    assert recovered.call_id == "fake-1"
+    assert recovered.last_error is None
+    assert pbx.calls == [(MANAGER_DIAL, PHONE)]
+
+
+# --- Минор: симметричный warning, если запись пропала из хранилища ---
+
+async def test_recover_error_warns_when_lead_missing_from_store(caplog):
+    """Симметрия с другими аномалиями (финальный/незнакомый статус — тоже log.warning):
+
+    если store.update(last_error=None) не нашёл запись, движок не падает и
+    не выдумывает состояние — предупреждает и по-прежнему пытается довести
+    цепочку по данным из переданного `link`.
+    """
+    store = MemoryAutocallStore()               # запись НЕ создаём — её нет в хранилище
+    pbx = MemoryPbx()
+    amo = FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo)
+    ghost = AutocallLead(lead_id=999, status="error", phone10=PHONE,
+                         attempts_total=0, called_at=None)
+
+    with caplog.at_level("WARNING"):
+        await engine.process_due(ghost, msk(2026, 8, 31, 14, 0))
+
+    assert any("не удалось снять last_error" in record.getMessage()
+              for record in caplog.records)

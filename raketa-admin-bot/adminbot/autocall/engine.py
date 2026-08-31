@@ -151,6 +151,13 @@ class AutocallEngine:
         восстановление снова упадёт, ошибку запишет заново тот же обработчик.
         """
         cleared = await self.store.update(link.lead_id, last_error=None)
+        if cleared is None:
+            # Симметрично с другими аномалиями (финальный/незнакомый статус):
+            # запись пропала из хранилища — не падаем, но не молчим об этом.
+            log.warning(
+                "Автозвонок, сделка %s: не удалось снять last_error — "
+                "записи нет в хранилище", link.lead_id,
+            )
         recovered = cleared if cleared is not None else link
         if recovered.called_at is not None:
             await self._process_calling(recovered, now)
@@ -237,6 +244,16 @@ class AutocallEngine:
                     effect.at, now=now,
                     from_hour=self.window_from_hour, to_hour=self.window_to_hour,
                 )
+                # called_at/call_id от только что разобранной попытки не должны
+                # пережить возврат в очередь (по образцу боевой ветки
+                # _process_queued, которая всегда сбрасывает их перед новым
+                # звонком). Иначе сбой ровно на записи намерения следующей
+                # попытки оставит в строке status=error со СТАРЫМ call_id —
+                # и _recover_error примет его за «попытка ещё идёт», переспросит
+                # АТС по этому call_id и засчитает один и тот же исход дважды,
+                # не сделав ни одного нового звонка.
+                update_fields["called_at"] = None
+                update_fields["call_id"] = None
             elif isinstance(effect, NotifyManager):
                 await self._notify_manager(link.lead_id, effect.kind)
             elif isinstance(effect, MoveLeadNoContact):
