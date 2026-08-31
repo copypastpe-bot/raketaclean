@@ -43,6 +43,7 @@ from adminbot.phone import mask
 DAYS = 60                    # окно экзамена — последние два месяца истории
 FRESH_FOR_MAIL = 5           # у скольких свежих заявок замеряем «письмо → сделка»
 PHONE_EXAMPLES = 10          # сколько замаскированных примеров показать
+PHONE_FALLBACK_COUNT = 10    # этап пуст → телефоны меряем по стольким свежим заявкам
 TAGS_PREVIEW_LIMIT = 300     # сырой repr тегов длиннее не нужен
 TAG_PROBE_LIMIT = 10         # сколько сделок этапа дотягиваем индивидуально
 
@@ -118,6 +119,27 @@ def freshest_lead(leads: Iterable[Mapping[str, Any]]) -> Optional[dict]:
     if not dated:
         return None
     return dict(max(dated, key=lambda lead: int(lead["created_at"])))
+
+
+def freshest_n(leads: Iterable[Mapping[str, Any]], count: int) -> list[dict]:
+    """count самых свежих сделок по created_at, свежие первыми."""
+    ordered = sorted(leads, key=lambda lead: int(lead.get("created_at") or 0))
+    return [dict(lead) for lead in reversed(ordered[-count:] if count else [])]
+
+
+def contacts_missing(leads: Iterable[Mapping[str, Any]]) -> list[int]:
+    """id сделок, у которых в _embedded вовсе нет ключа contacts.
+
+    Обратная проверка запрашивается с with=contacts: ключ должен быть даже
+    пустым списком. Ключа нет — амо параметр не применила, и телефоны по
+    таким сделкам честно не проверить (это не то же, что «нет телефона»).
+    """
+    missing: list[int] = []
+    for lead in leads:
+        embedded = lead.get("_embedded")
+        if not isinstance(embedded, Mapping) or "contacts" not in embedded:
+            missing.append(int(lead.get("id") or 0))
+    return missing
 
 
 def msk_stamp(ts: Optional[int]) -> str:
@@ -227,7 +249,9 @@ def build_report(*, days: int, observer_total: int,
                  phones: dict[int, Optional[str]], tags_raw: str,
                  mail_rows: list[MailRow],
                  tag_probes: Optional[list[TagProbe]] = None,
-                 freshest: Optional[Mapping[str, Any]] = None) -> str:
+                 freshest: Optional[Mapping[str, Any]] = None,
+                 phones_from_reverse: bool = False,
+                 phones_no_contacts: Optional[list[int]] = None) -> str:
     """Отчёт владельцу: русский, цифры с пояснениями, телефоны замаскированы."""
     lines = [
         f"=== Экзамен autocall: заявки с сайта за последние {days} дней ===",
@@ -284,17 +308,41 @@ def build_report(*, days: int, observer_total: int,
 
     with_phone = [(lead_id, phone) for lead_id, phone in sorted(phones.items()) if phone]
     without_phone = [lead_id for lead_id, phone in sorted(phones.items()) if not phone]
-    lines += [
-        "",
-        "3. Телефон по сайтовым заявкам с этапа",
-        f"   извлёкся: {len(with_phone)} из {len(phones)} (цель 100%)",
-    ]
-    for lead_id in without_phone:
-        lines.append(f"   без телефона: #{lead_id} — робот по ней не позвонит")
-    if with_phone:
-        examples = ", ".join(f"#{lead_id} {mask(phone)}"
-                             for lead_id, phone in with_phone[:PHONE_EXAMPLES])
-        lines.append(f"   примеры (телефон — последние 4 цифры): {examples}")
+    no_contacts = set(phones_no_contacts or [])
+    if phones_from_reverse:
+        # На этапе сайтовых заявок нет — метрика по самым свежим из обратной
+        # проверки: телефон должен извлекаться у заявки с любого этапа одинаково.
+        extracted = len(with_phone)
+        lines += [
+            "",
+            "3. Телефон по сайтовым заявкам (на этапе их нет — взяты самые "
+            "свежие из обратной проверки, любые этапы)",
+            f"   извлёкся: {extracted} из {len(phones)} "
+            "(по свежим из обратной проверки; цель 100%)",
+        ]
+        if no_contacts:
+            lines.append(f"   ВНИМАНИЕ: у {len(no_contacts)} сделок в ответе "
+                         "обратной проверки нет _embedded.contacts — параметр "
+                         "with=contacts не сработал, телефон по ним не проверить.")
+        for lead_id, phone in sorted(phones.items()):
+            if lead_id in no_contacts:
+                lines.append(f"   #{lead_id}: в ответе нет _embedded.contacts")
+            elif phone:
+                lines.append(f"   #{lead_id}: {mask(phone)}")
+            else:
+                lines.append(f"   #{lead_id}: НЕТ ТЕЛЕФОНА")
+    else:
+        lines += [
+            "",
+            "3. Телефон по сайтовым заявкам с этапа",
+            f"   извлёкся: {len(with_phone)} из {len(phones)} (цель 100%)",
+        ]
+        for lead_id in without_phone:
+            lines.append(f"   без телефона: #{lead_id} — робот по ней не позвонит")
+        if with_phone:
+            examples = ", ".join(f"#{lead_id} {mask(phone)}"
+                                 for lead_id, phone in with_phone[:PHONE_EXAMPLES])
+            lines.append(f"   примеры (телефон — последние 4 цифры): {examples}")
 
     lines += [
         "",
@@ -320,6 +368,22 @@ def build_report(*, days: int, observer_total: int,
 
 
 # --- сетевая часть: проверяется запуском на VPS, тестами не покрывается ---
+
+async def _lead_phones(amo: AmoClient, leads: list[dict],
+                       contact_cache: dict[int, Optional[dict]]
+                       ) -> dict[int, Optional[str]]:
+    """Телефон по каждой сделке: дотягивает контакты по id, кэш общий на вызов."""
+    phones: dict[int, Optional[str]] = {}
+    for lead in leads:
+        contacts = []
+        for contact_id in lead_contact_ids(lead):
+            if contact_id not in contact_cache:
+                contact_cache[contact_id] = await amo.get_contact(contact_id)
+            if contact_cache[contact_id]:
+                contacts.append(contact_cache[contact_id])
+        phones[int(lead["id"])] = lead_phone10(lead, contacts)
+    return phones
+
 
 async def main() -> int:
     settings = Settings.from_env()
@@ -352,17 +416,22 @@ async def main() -> int:
         gone = gone_from_stage(everything)
         freshest = freshest_lead(tagged_all)
 
-        print(f"Достаю контакты {len(site)} сайтовых заявок…", flush=True)
-        phones: dict[int, Optional[str]] = {}
         contact_cache: dict[int, Optional[dict]] = {}
-        for lead in site:
-            contacts = []
-            for contact_id in lead_contact_ids(lead):
-                if contact_id not in contact_cache:
-                    contact_cache[contact_id] = await amo.get_contact(contact_id)
-                if contact_cache[contact_id]:
-                    contacts.append(contact_cache[contact_id])
-            phones[int(lead["id"])] = lead_phone10(lead, contacts)
+        phones_from_reverse = False
+        phones_no_contacts: list[int] = []
+        if site:
+            print(f"Достаю контакты {len(site)} сайтовых заявок…", flush=True)
+            phones = await _lead_phones(amo, site, contact_cache)
+        else:
+            # На этапе сайтовых заявок нет — метрику телефона меряем по самым
+            # свежим сделкам с тегом из обратной проверки (любые воронки/этапы).
+            phones_from_reverse = True
+            fallback_leads = freshest_n(tagged_all, PHONE_FALLBACK_COUNT)
+            phones_no_contacts = contacts_missing(fallback_leads)
+            print(f"На этапе нет сайтовых заявок — достаю контакты "
+                  f"{len(fallback_leads)} самых свежих из обратной проверки…",
+                  flush=True)
+            phones = await _lead_phones(amo, fallback_leads, contact_cache)
 
         # id тега и сырой вид тегов: сначала из списка по этапу, а если этап пуст —
         # из списка обратной проверки (это тоже списочный ответ амо).
@@ -393,7 +462,9 @@ async def main() -> int:
                        tagged_total=tagged_total, gone=gone,
                        all_total=len(everything), phones=phones,
                        tags_raw=tags_raw, mail_rows=mail_rows,
-                       tag_probes=tag_probes, freshest=freshest))
+                       tag_probes=tag_probes, freshest=freshest,
+                       phones_from_reverse=phones_from_reverse,
+                       phones_no_contacts=phones_no_contacts))
     if tag_id is not None:
         print(f"\nid тега «{SITE_TAG}»: {tag_id}")
     return 0
