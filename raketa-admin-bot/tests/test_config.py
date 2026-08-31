@@ -59,3 +59,66 @@ def test_unknown_service_name_is_rejected_at_start(monkeypatch):
 
     with pytest.raises(RuntimeError, match="SERVICE_BY_MASTER"):
         Settings.from_env()
+
+
+# --- автозвонок по заявке с сайта (autocall) ---
+
+_AUTOCALL_ENV = (
+    "AUTOCALL_ENABLED",
+    "AUTOCALL_DRY_RUN",
+    "AUTOCALL_POLL_INTERVAL_SEC",
+    "AUTOCALL_WINDOW_FROM",
+    "AUTOCALL_WINDOW_TO",
+    "PBX_BASE_URL",
+    "PBX_API_KEY",
+    "PBX_MANAGER_DIAL",
+    "WORKER_TG_TOKEN",
+    "MANAGER_TG_CHAT_ID",
+)
+
+
+def test_autocall_defaults(monkeypatch):
+    """Функция выключена, репетиция включена; АТС и рабочий бот не настроены."""
+    _minimal_env(monkeypatch)
+    for name in _AUTOCALL_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    s = Settings.from_env()
+
+    assert s.autocall_enabled is False      # kill switch: по умолчанию ВЫКЛЮЧЕНО
+    assert s.autocall_dry_run is True       # по умолчанию репетиция, не звонок
+    assert s.autocall_poll_interval_sec == 30
+    assert s.autocall_window_from_hour == 10
+    assert s.autocall_window_to_hour == 20
+    assert s.pbx_base_url == ""
+    assert s.pbx_api_key == ""
+    assert s.pbx_manager_dial == ""
+    assert s.worker_tg_token == ""
+    assert s.manager_tg_chat_id == 0
+
+
+def test_autocall_env_overrides(monkeypatch):
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("AUTOCALL_ENABLED", "1")
+    monkeypatch.setenv("AUTOCALL_DRY_RUN", "0")
+    monkeypatch.setenv("AUTOCALL_POLL_INTERVAL_SEC", "15")
+    monkeypatch.setenv("AUTOCALL_WINDOW_FROM", "9")
+    monkeypatch.setenv("AUTOCALL_WINDOW_TO", "21")
+    monkeypatch.setenv("PBX_BASE_URL", "https://pbx.example.com")
+    monkeypatch.setenv("PBX_API_KEY", "pbx-key")
+    monkeypatch.setenv("PBX_MANAGER_DIAL", "101")
+    monkeypatch.setenv("WORKER_TG_TOKEN", "456:def")
+    monkeypatch.setenv("MANAGER_TG_CHAT_ID", "777")
+
+    s = Settings.from_env()
+
+    assert s.autocall_enabled is True
+    assert s.autocall_dry_run is False
+    assert s.autocall_poll_interval_sec == 15
+    assert s.autocall_window_from_hour == 9
+    assert s.autocall_window_to_hour == 21
+    assert s.pbx_base_url == "https://pbx.example.com"
+    assert s.pbx_api_key == "pbx-key"
+    assert s.pbx_manager_dial == "101"
+    assert s.worker_tg_token == "456:def"
+    assert s.manager_tg_chat_id == 777

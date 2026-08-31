@@ -166,6 +166,24 @@ class Settings:
     # там раньше, владелец ведёт сам (его решение 8).
     gcal_sync_from: Optional[date] = None
 
+    # Автозвонок по заявке с сайта: свой выключатель и своя репетиция.
+    # Опрос раз в полминуты: заявка остывает за минуты, тянуть нельзя.
+    autocall_enabled: bool = False
+    autocall_dry_run: bool = True
+    autocall_poll_interval_sec: int = 30
+    # Окно, когда можно звонить клиенту (часы по Москве): вне окна заявка ждёт.
+    autocall_window_from_hour: int = 10
+    autocall_window_to_hour: int = 20
+    # АТС: адрес, ключ и внутренний номер (цепочка) менеджера.
+    # Не в REQUIRED_ENV: нужны только при включённой функции autocall.
+    pbx_base_url: str = ""
+    pbx_api_key: str = ""
+    pbx_manager_dial: str = ""
+    # Токен рабочего бота и чат менеджера: уведомление уходит от имени бота,
+    # с которым менеджер уже работает, а не от админ-бота владельца.
+    worker_tg_token: str = ""
+    manager_tg_chat_id: int = 0
+
     # Прямые адреса Telegram: на российском сервере имя api.telegram.org
     # не разрешается, хотя сами адреса доступны. Пусто — обычный путь.
     telegram_api_ips: tuple[str, ...] = ()
@@ -215,4 +233,14 @@ class Settings:
             gcal_key_file=(os.environ.get("GCAL_SERVICE_ACCOUNT_FILE", "").strip()
                            or DEFAULT_GCAL_KEY_FILE),
             gcal_sync_from=_optional_date("GCAL_SYNC_FROM"),
+            autocall_enabled=_flag("AUTOCALL_ENABLED", False),
+            autocall_dry_run=_flag("AUTOCALL_DRY_RUN", True),
+            autocall_poll_interval_sec=_int("AUTOCALL_POLL_INTERVAL_SEC", 30),
+            autocall_window_from_hour=_int("AUTOCALL_WINDOW_FROM", 10),
+            autocall_window_to_hour=_int("AUTOCALL_WINDOW_TO", 20),
+            pbx_base_url=os.environ.get("PBX_BASE_URL", "").strip(),
+            pbx_api_key=os.environ.get("PBX_API_KEY", "").strip(),
+            pbx_manager_dial=os.environ.get("PBX_MANAGER_DIAL", "").strip(),
+            worker_tg_token=os.environ.get("WORKER_TG_TOKEN", "").strip(),
+            manager_tg_chat_id=_int("MANAGER_TG_CHAT_ID", 0),
         )
