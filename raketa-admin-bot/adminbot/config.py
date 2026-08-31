@@ -238,7 +238,7 @@ class Settings:
             autocall_poll_interval_sec=_int("AUTOCALL_POLL_INTERVAL_SEC", 30),
             autocall_window_from_hour=_int("AUTOCALL_WINDOW_FROM", 10),
             autocall_window_to_hour=_int("AUTOCALL_WINDOW_TO", 20),
-            pbx_base_url=os.environ.get("PBX_BASE_URL", "").strip(),
+            pbx_base_url=os.environ.get("PBX_BASE_URL", "").strip().rstrip("/"),
             pbx_api_key=os.environ.get("PBX_API_KEY", "").strip(),
             pbx_manager_dial=os.environ.get("PBX_MANAGER_DIAL", "").strip(),
             worker_tg_token=os.environ.get("WORKER_TG_TOKEN", "").strip(),

@@ -104,7 +104,8 @@ def test_autocall_env_overrides(monkeypatch):
     monkeypatch.setenv("AUTOCALL_POLL_INTERVAL_SEC", "15")
     monkeypatch.setenv("AUTOCALL_WINDOW_FROM", "9")
     monkeypatch.setenv("AUTOCALL_WINDOW_TO", "21")
-    monkeypatch.setenv("PBX_BASE_URL", "https://pbx.example.com")
+    # Хвостовой слэш в .env срезается: иначе при склейке путей выйдет «//».
+    monkeypatch.setenv("PBX_BASE_URL", "https://pbx.example.com/")
     monkeypatch.setenv("PBX_API_KEY", "pbx-key")
     monkeypatch.setenv("PBX_MANAGER_DIAL", "101")
     monkeypatch.setenv("WORKER_TG_TOKEN", "456:def")
