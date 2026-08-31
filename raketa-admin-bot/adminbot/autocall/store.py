@@ -18,11 +18,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Protocol
 
 from adminbot import db
+from adminbot.autocall.chain import ACTIVE_STATUSES  # словарь статусов живёт в chain.py
 from adminbot.models import AutocallLead
-
-# Статусы, по которым цепочка ещё не закончена: их наблюдатель добирает
-# из базы. `error` тоже здесь — после сбоя цепочку нужно довести.
-ACTIVE_STATUSES: tuple[str, ...] = ("queued", "calling", "error")
 
 
 def _reject_unknown_fields(fields: dict) -> None:

@@ -36,8 +36,26 @@ NOTIFY_KINDS: tuple[str, ...] = (
     "attempts_exhausted",    # предохранитель §4.5: попытки израсходованы
 )
 
+# --- Словарь статусов цепочки: chain.py — единственный владелец ---
+# store.py и движок импортируют константы отсюда, чтобы два списка
+# статусов не разъехались молча.
+
+STATUS_QUEUED = "queued"          # ждёт своего момента (next_action_at)
+STATUS_CALLING = "calling"        # команда АТС отдана, попытка идёт
+STATUS_DONE = "done"              # соединились — готово
+STATUS_NO_CONTACT = "no_contact"  # сделка ушла на этап «Не было первого контакта»
+STATUS_GAVE_UP = "gave_up"        # робот остановился (решение №3 или §4.5)
+#: Попытка упала технически (АТС/сеть), исхода нет — движок повторит сам.
+#: Машина переходов этот статус не обрабатывает, и в FINAL_STATUSES он
+#: не входит: цепочка ещё жива, наблюдатель должен её довести.
+STATUS_ERROR = "error"
+
 #: Статусы, после которых цепочка закрыта и попыток больше не будет.
-FINAL_STATUSES: tuple[str, ...] = ("done", "no_contact", "gave_up")
+FINAL_STATUSES: tuple[str, ...] = (STATUS_DONE, STATUS_NO_CONTACT, STATUS_GAVE_UP)
+
+#: Статусы, по которым цепочка ещё не закончена: их наблюдатель добирает
+#: из базы. `error` тоже здесь — после сбоя цепочку нужно довести.
+ACTIVE_STATUSES: tuple[str, ...] = (STATUS_QUEUED, STATUS_CALLING, STATUS_ERROR)
 
 
 class Outcome(str, Enum):
@@ -58,7 +76,8 @@ class Chain:
     """
 
     lead_id: int
-    status: str                        # queued|calling|done|no_contact|gave_up
+    status: str                        # словарь STATUS_* выше; машина переходов
+                                       # работает с queued|calling, `error` чинит движок
     attempts_total: int
     manager_failures: int
     client_failures: int
@@ -140,19 +159,14 @@ def advance(chain: Chain, outcome: Outcome, now: datetime) -> tuple[Chain, list[
         )
 
     if outcome is Outcome.CONNECTED:
-        return replace(chain, status="done", next_action_at=None), [Done()]
+        return replace(chain, status=STATUS_DONE, next_action_at=None), [Done()]
 
     if outcome in (Outcome.MANAGER_NO_ANSWER, Outcome.UNKNOWN):
-        failures = chain.manager_failures + 1
-        if failures >= 2:
+        updated = replace(chain, manager_failures=chain.manager_failures + 1)
+        if updated.manager_failures >= 2:
             # Решение №3: после второй неудачи менеджера — сообщение и стоп.
-            return (
-                replace(chain, status="gave_up",
-                        manager_failures=failures, next_action_at=None),
-                [NotifyManager("manager_unreachable"), GaveUp("manager_unreachable")],
-            )
-        return _retry(replace(chain, manager_failures=failures),
-                      now + RETRY_MANAGER)
+            return _gave_up(updated, "manager_unreachable")
+        return _retry(updated, now + RETRY_MANAGER)
 
     if outcome is Outcome.CLIENT_NO_ANSWER:
         failures = chain.client_failures + 1
@@ -160,7 +174,7 @@ def advance(chain: Chain, outcome: Outcome, now: datetime) -> tuple[Chain, list[
             # Решение №4: после второй неудачи клиента — этап «Не было
             # первого контакта»; повтора нет, поэтому лимит здесь ни при чём.
             return (
-                replace(chain, status="no_contact",
+                replace(chain, status=STATUS_NO_CONTACT,
                         client_failures=failures, next_action_at=None),
                 [MoveLeadNoContact(), NotifyManager("no_contact_final")],
             )
@@ -177,16 +191,20 @@ def _retry(chain: Chain, at: datetime,
            before: Optional[list[Effect]] = None) -> tuple[Chain, list[Effect]]:
     """Назначить повтор, если предохранитель §4.5 ещё позволяет попытки."""
     if chain.attempts_total >= MAX_ATTEMPTS:
-        return _exhausted(chain)
+        return _gave_up(chain, "attempts_exhausted")
     return (
-        replace(chain, status="queued", next_action_at=at),
+        replace(chain, status=STATUS_QUEUED, next_action_at=at),
         [*(before or []), Retry(at=at)],
     )
 
 
-def _exhausted(chain: Chain) -> tuple[Chain, list[Effect]]:
-    """Предохранитель §4.5: попытки израсходованы — сообщение и остановка."""
+def _gave_up(chain: Chain, kind: str) -> tuple[Chain, list[Effect]]:
+    """Единый финал остановки: kind уведомления == причина GaveUp — по устройству.
+
+    Так сообщение менеджеру и причина в логе не могут разъехаться, какой бы
+    веткой (решение №3 или предохранитель §4.5) остановка ни случилась.
+    """
     return (
-        replace(chain, status="gave_up", next_action_at=None),
-        [NotifyManager("attempts_exhausted"), GaveUp("attempts_exhausted")],
+        replace(chain, status=STATUS_GAVE_UP, next_action_at=None),
+        [NotifyManager(kind), GaveUp(kind)],
     )

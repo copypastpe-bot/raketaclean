@@ -5,6 +5,7 @@
 уже посчитана. Тесты конструируют такие состояния напрямую.
 """
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -256,10 +257,10 @@ def test_advance_does_not_mutate_input():
 
 def test_chain_is_frozen():
     c = chain()
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         c.status = "done"
 
 
 def test_effects_are_frozen():
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         NotifyManager("client_retry_10").kind = "no_contact_final"
