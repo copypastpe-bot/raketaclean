@@ -87,3 +87,25 @@ def test_no_phone_or_no_contact_gives_none():
     assert lead_phone10(lead, []) is None                        # контакт не подгружен
     assert lead_phone10({}, [_contact(11, "79001111111")]) is None   # сделка без контактов
     assert lead_phone10(None, []) is None
+
+
+def test_non_numeric_contact_id_does_not_break_parsing():
+    """Мусорный id в _embedded сделки не роняет разбор — просто телефона нет."""
+    lead = {"id": 601, "_embedded": {"contacts": [{"id": "abc"}]}}
+
+    assert lead_phone10(lead, [_contact(11, "79001111111")]) is None
+
+
+def test_missing_main_contact_is_not_substituted():
+    """Главный контакт не подгружен — None, а не телефон соседнего контакта.
+
+    Осознанное решение: раз в сделке назначен главный контакт, звонить надо
+    ему, а не «кому дозвонимся». Подмена первым попавшимся отправит робота
+    к другому человеку — пусть лучше наблюдатель спросит владельца.
+    """
+    lead = {"id": 601, "_embedded": {"contacts": [
+        {"id": 11, "is_main": False},
+        {"id": 22, "is_main": True},
+    ]}}
+
+    assert lead_phone10(lead, [_contact(11, "79001111111")]) is None
