@@ -73,11 +73,21 @@ class MemoryAutocallStore:
 
     async def create(self, lead_id: int, *, phone10: Optional[str] = None,
                      **fields: Any) -> AutocallLead:
+        """Завести цепочку — при желании сразу с готовым статусом.
+
+        Наблюдатель заводит заявку без телефона сразу финалом (status="gave_up")
+        одной командой, а не create → update: так сбой хранилища между шагами
+        не оставляет "queued"-запись без номера, которую due() отдавал бы
+        движку вечно. "queued" по умолчанию, но fields может его переопределить —
+        отсюда словарь, а не keyword status="queued" вперемешку с **fields
+        (то же имя дважды было бы TypeError).
+        """
         _reject_unknown_fields(fields)
         lead = self.leads.get(lead_id)
         if lead is None:
-            lead = AutocallLead(lead_id=lead_id, status="queued", phone10=phone10,
-                                created_at=self._now(), updated_at=self._now(), **fields)
+            lead = AutocallLead(lead_id=lead_id, phone10=phone10,
+                                created_at=self._now(), updated_at=self._now(),
+                                **{"status": "queued", **fields})
             self.leads[lead_id] = lead
         return lead
 

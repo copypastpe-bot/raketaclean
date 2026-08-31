@@ -129,6 +129,32 @@ async def test_happy_path_connects_and_closes_chain():
     assert "outcome" in actions
 
 
+# --- 1б. Защита: без телефона АТС не трогаем ---
+
+async def test_queued_chain_without_phone_is_closed_without_touching_pbx():
+    """Что бы ни лежало в хранилище (ручная правка, сбой между шагами создания
+    записи), звонить без номера движок не должен: цепочка закрывается сразу,
+    АТС не получает пустой client_phone."""
+    store = MemoryAutocallStore()
+    pbx = MemoryPbx()
+    amo = FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo)
+    lead_id = 302
+    await store.create(lead_id, phone10=None)
+    now = msk(2026, 8, 31, 14, 0)
+
+    link = await store.get(lead_id)
+    await engine.process_due(link, now)
+
+    closed = await store.get(lead_id)
+    assert closed.status == "gave_up"
+    assert closed.last_error == "звонок без телефона невозможен"
+    assert pbx.calls == []
+
+    logged = store.actions_of("no_phone")
+    assert logged and logged[0]["lead_id"] == lead_id
+
+
 # --- 2. Намерение фиксируется до звонка ---
 
 async def test_falling_between_intent_and_call_does_not_double_count_attempt():

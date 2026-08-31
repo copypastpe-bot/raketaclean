@@ -168,9 +168,16 @@ class AutocallWatcher:
         Финал именно "gave_up", а не тихое отсутствие цепочки: заявка была,
         робот её видел и не смог обработать — это должно остаться в журнале,
         а не выглядеть так, будто заявки не было вовсе.
+
+        Одной командой create с готовым статусом, а не create → update:
+        между двумя отдельными вызовами хранилища сбой БД оставил бы цепочку
+        "queued" с phone10=None навсегда — store.get её больше не заведёт
+        повторно (лид уже известен), а due() отдавал бы её движку каждый тик
+        без единого телефона для звонка. log_action и уведомление владельца
+        идут уже по готовой, закрытой записи — их сбой цепочку не портит
+        (см. _notify_no_phone).
         """
-        await self.store.create(lead_id, phone10=None)
-        await self.store.update(lead_id, status=STATUS_GAVE_UP,
+        await self.store.create(lead_id, phone10=None, status=STATUS_GAVE_UP,
                                 last_error="телефон из сделки не извлёкся")
         await self.store.log_action(lead_id, "no_phone", dry_run=False, payload=None)
         await self._notify_no_phone(lead_id)

@@ -228,6 +228,61 @@ async def test_engine_failure_on_one_chain_does_not_stop_the_other():
     assert [lead_id for lead_id, _ in engine.seen] == [6002]
 
 
+class PartialFailStore:
+    """Оборачивает MemoryAutocallStore и роняет update — сценарий ревью:
+    хранилище падает между шагами create → update → log_action. С атомарным
+    create (готовый статус уже в первой команде) ветка "нет телефона"
+    update больше не вызывает вовсе, поэтому даже сломанный update не мешает
+    цепочке закрыться, а не зависнуть "queued"-зомби без номера.
+    """
+
+    def __init__(self, inner: MemoryAutocallStore) -> None:
+        self._inner = inner
+
+    async def get(self, lead_id):
+        return await self._inner.get(lead_id)
+
+    async def create(self, lead_id, *, phone10=None, **fields):
+        return await self._inner.create(lead_id, phone10=phone10, **fields)
+
+    async def update(self, lead_id, **fields):
+        raise OSError("хранилище недоступно на update")
+
+    async def due(self, now):
+        return await self._inner.due(now)
+
+    async def cursor(self):
+        return await self._inner.cursor()
+
+    async def save_cursor(self, created_from):
+        await self._inner.save_cursor(created_from)
+
+    async def log_action(self, lead_id, action, *, dry_run, payload=None):
+        await self._inner.log_action(lead_id, action, dry_run=dry_run, payload=payload)
+
+    async def actions_for(self, lead_id):
+        return await self._inner.actions_for(lead_id)
+
+
+async def test_no_phone_finish_survives_a_broken_update():
+    """Регрессия ревью: раньше create → update оставлял "queued"-зомби
+    без телефона, если update падал между шагами. Атомарный create закрывает
+    цепочку сразу, и сломанный update этой ветки вообще не касается."""
+    inner = MemoryAutocallStore()
+    store = PartialFailStore(inner)
+    amo = FakeSiteAmo()
+    watcher = build(amo, store=store)
+    await watcher.tick()
+
+    amo.leads = [site_lead(4003, 1_900_000_700, contact_id=None)]
+    report = await watcher.tick()                  # update сломан, но не нужен
+
+    assert report.no_phone == 1
+    lead = await inner.get(4003)
+    assert lead.status == "gave_up"                # не "queued"-зомби
+    assert lead.phone10 is None
+
+
 async def test_switch_off_means_no_requests():
     amo = FakeSiteAmo(leads=[site_lead(7001, 1_900_002_000, contact_id=None)])
     watcher = build(amo, is_enabled=lambda: False)

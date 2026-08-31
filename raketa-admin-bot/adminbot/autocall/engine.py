@@ -42,6 +42,7 @@ from adminbot.autocall.chain import (
     STATUS_CALLING,
     STATUS_DONE,
     STATUS_ERROR,
+    STATUS_GAVE_UP,
     STATUS_QUEUED,
     Chain,
     Done,
@@ -187,7 +188,23 @@ class AutocallEngine:
             await self.store.update(link.lead_id, status=STATUS_DONE)
             return
 
-        # Бой. Намерение — ДО команды АТС (инвариант №1 из модульной докстрины):
+        # Бой. Последний рубеж перед командой АТС: что бы ни лежало в
+        # хранилище (ручная правка записи, сбой ровно между шагами создания
+        # цепочки без телефона), звонить нечем — движок не должен передавать
+        # АТС пустой client_phone. Наблюдатель уже не заводит такую цепочку
+        # живой ("queued"), но полагаться только на источник неправильно:
+        # опечатка в другом месте не должна приводить к звонку в никуда.
+        if not link.phone10:
+            await self.store.update(
+                link.lead_id, status=STATUS_GAVE_UP,
+                last_error="звонок без телефона невозможен",
+            )
+            await self.store.log_action(
+                link.lead_id, "no_phone", dry_run=self.dry_run, payload=None,
+            )
+            return
+
+        # Намерение — ДО команды АТС (инвариант №1 из модульной докстрины):
         # упади мы между этой записью и звонком, второй звонок по той же
         # попытке не уйдёт — цепочка обнаружится в "calling" без call_id и
         # уйдёт в Outcome.UNKNOWN по таймауту, а не позвонит ещё раз.

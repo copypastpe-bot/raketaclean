@@ -59,6 +59,26 @@ async def test_lead_chain_is_started_once(store):
     assert again.attempts_total == 0
 
 
+async def test_create_accepts_status_and_last_error_for_atomic_finish(store):
+    """Наблюдатель заводит заявку без телефона сразу финалом одной командой:
+    create(phone10=None, status="gave_up", last_error=...) — не create → update.
+    Так сбой хранилища между двумя отдельными вызовами не оставляет
+    "queued"-запись без номера, которую due() отдавал бы движку вечно.
+    """
+    lead = await store.create(41500009, phone10=None, status="gave_up",
+                              last_error="телефон из сделки не извлёкся")
+
+    assert lead.status == "gave_up"
+    assert lead.phone10 is None
+    assert lead.last_error == "телефон из сделки не извлёкся"
+
+    again = await store.create(41500009, phone10="9601861067", status="queued")
+
+    assert again.status == "gave_up"              # повтор ничего не переписал
+    assert again.phone10 is None
+    assert again.last_error == "телефон из сделки не извлёкся"
+
+
 async def test_progress_is_saved_attempt_by_attempt(store):
     """Счёт попыток переживает перезапуск: цепочку продолжат из хранилища."""
     await store.create(41500001, phone10="9601861067")
