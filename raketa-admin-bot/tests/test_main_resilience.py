@@ -78,6 +78,38 @@ async def test_calendar_absence_does_not_break_the_service():
     assert _build_calendar(with_key_missing, None, None, None, None) == (None, None, None)
 
 
+def test_every_configured_calendar_reaches_the_watcher(monkeypatch):
+    """Второй календарь должен доехать до наблюдателя, а не потеряться в сборке.
+
+    Порядок сохраняется: первому в списке достаётся закладка обмена, снятая
+    до того, как календарей стало несколько.
+    """
+    from adminbot.config import Settings
+    from adminbot.gcal import auth
+    from adminbot.main import _build_calendar
+
+    class FakeToken:
+        @classmethod
+        def from_file(cls, path):
+            return cls()
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(auth, "ServiceAccountToken", FakeToken)
+
+    settings = Settings(
+        tg_token="t", owner_tg_id=1, bot_db_dsn="postgresql://x",
+        own_db_dsn="postgresql://x", amo_base_url="https://x", amo_token="t",
+        gcal_enabled=True, gcal_dry_run=True,
+        gcal_calendar_ids=("main@gmail.com", "brigade@group.calendar.google.com"))
+
+    watcher, store, token = _build_calendar(settings, None, object(), object(), object())
+
+    assert [calendar.calendar_id for calendar in watcher.calendars] == [
+        "main@gmail.com", "brigade@group.calendar.google.com"]
+
+
 # --- _build_autocall: тот же приём «свой выключатель, мягкая деградация» ---
 
 def _autocall_settings(**overrides):

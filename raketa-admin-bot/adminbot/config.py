@@ -49,21 +49,27 @@ DEFAULT_SERVICE_BY_MASTER: dict[str, str] = {
 }
 
 
-def _calendar_ids(name: str, default: str) -> tuple[str, ...]:
-    """Адреса календарей из настройки «через запятую», по порядку и без повторов.
+def parse_calendar_ids(raw: str, default: str = DEFAULT_CALENDAR_ID) -> tuple[str, ...]:
+    """Адреса календарей из строки «через запятую», по порядку и без повторов.
 
     Порядок важен: первый календарь считается основным и наследует закладку
     обмена, снятую до того, как календарей стало несколько (миграция 008).
     Пустые куски отбрасываем: пустой адрес — это запрос ко всему аккаунту,
     Google ответил бы отказом, и обмен встал бы целиком.
+
+    Отдельной функцией — потому что тем же правилом пользуются скрипты
+    диагностики, а расходиться им нельзя.
     """
-    raw = os.environ.get(name, "").strip() or default
     ids: list[str] = []
-    for chunk in raw.split(","):
+    for chunk in (raw or "").split(","):
         value = chunk.strip()
         if value and value not in ids:
             ids.append(value)
     return tuple(ids) or (default,)
+
+
+def _calendar_ids(name: str, default: str) -> tuple[str, ...]:
+    return parse_calendar_ids(os.environ.get(name, "").strip() or default, default)
 
 
 def _require(name: str) -> str:

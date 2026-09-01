@@ -50,10 +50,14 @@ class CalendarTickReport:
     questions: tuple[str, ...] = ()                   # записи, по которым ушёл вопрос
     unknown_districts: tuple[str, ...] = ()           # приставки, которых робот не знает
     districts_missing: tuple[str, ...] = ()           # район понят, но его нет в списке амо
-    failures: tuple[tuple[str, str], ...] = ()
+    failures: tuple[tuple[str, str], ...] = ()        # сбойные записи
     # Сколько изменений принёс каждый календарь: в /status видно, что второй
     # календарь действительно опрашивается, а не молчит незаметно.
     by_calendar: dict[str, int] = field(default_factory=dict)
+    # Календари, с которыми не вышел обмен. Отдельно от сбойных записей:
+    # «Google не ответил» и «одна запись не разобралась» — разные новости,
+    # и владельцу они читаются по-разному.
+    calendars_failed: tuple[tuple[str, str], ...] = ()
     full_resync: bool = False
 
 
@@ -109,6 +113,7 @@ class CalendarWatcher:
         unknown: list[str] = []
         missing: list[str] = []
         by_calendar: dict[str, int] = {}
+        calendars_failed: list[tuple[str, str]] = []
         known = 0
         changes = 0
         full_resync = False
@@ -128,7 +133,8 @@ class CalendarWatcher:
                 # обмениваются. Закладка этого календаря не сдвинулась: сохраняем
                 # её только после того, как пачка разобрана.
                 log.exception("Календарь %s: обмен не удался", calendar.calendar_id)
-                failures.append((calendar.calendar_id, f"{type(exc).__name__}: {exc}"))
+                calendars_failed.append(
+                    (calendar.calendar_id, f"{type(exc).__name__}: {exc}"))
                 continue
             by_calendar[calendar.calendar_id] = result[0]
             changes += result[0]
@@ -150,6 +156,7 @@ class CalendarWatcher:
             by_status=dict(statuses), questions=tuple(questions),
             unknown_districts=tuple(unknown), districts_missing=tuple(missing),
             failures=tuple(failures), by_calendar=by_calendar,
+            calendars_failed=tuple(calendars_failed),
             full_resync=full_resync))
 
     async def _exchange(self, calendar: Any, *, first: bool, statuses: Counter,

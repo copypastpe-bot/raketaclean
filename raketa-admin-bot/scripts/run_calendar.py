@@ -52,7 +52,8 @@ async def main() -> int:
     settings = Settings.from_env()
 
     token = ServiceAccountToken.from_file(settings.gcal_key_file)
-    calendar = GoogleCalendar(calendar_id=settings.gcal_calendar_ids[0], token=token)
+    calendars = [GoogleCalendar(calendar_id=calendar_id, token=token)
+                 for calendar_id in settings.gcal_calendar_ids]
     amo = AmoClient(base_url=settings.amo_base_url, token=settings.amo_token,
                     dry_run=preview)
     pool = await db.create_pool(settings.own_db_dsn)
@@ -63,18 +64,25 @@ async def main() -> int:
     print("Режим:", "РЕПЕТИЦИЯ (в CRM не пишем)" if preview else "БОЕВОЙ")
 
     try:
-        batch = await calendar.fetch(sync_token=None,
-                                     sync_from=date.today() - timedelta(days=30))
-        found = {raw.get("id"): raw for raw in batch.events}
+        # Запись ищем во всех календарях: уборки лежат у бригадира, мебель —
+        # у мастеров, а владелец называет только идентификатор записи.
+        found: dict[str, dict] = {}
+        for calendar in calendars:
+            batch = await calendar.fetch(sync_token=None,
+                                         sync_from=date.today() - timedelta(days=30))
+            for raw in batch.events:
+                found.setdefault(str(raw.get("id")), raw)
 
         for event_id in wanted:
             raw = found.get(event_id)
             if raw is None:
-                print(f"\n✗ Запись {event_id} в календаре не найдена.")
+                print(f"\n✗ Запись {event_id} не найдена ни в одном календаре "
+                      f"({', '.join(settings.gcal_calendar_ids)}).")
                 continue
             await _run_one(engine, store, parse_event(raw), settings, preview)
     finally:
-        await calendar.close()
+        for calendar in calendars:
+            await calendar.close()
         await token.close()
         await amo.close()
         await pool.close()

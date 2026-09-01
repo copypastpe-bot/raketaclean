@@ -214,6 +214,14 @@ def calendar_status_text(*, enabled: bool, dry_run: bool,
 
     lines.append(f"   Последний обмен: изменений {report.changes}, "
                  f"обработано {report.processed}")
+    # Календарей может быть несколько (мебель у мастеров, уборки у бригадира).
+    # Пока он один, разбивка ничего не добавляет — не засоряем /status.
+    by_calendar = dict(getattr(report, "by_calendar", {}) or {})
+    if len(by_calendar) > 1:
+        for calendar_id, changes in by_calendar.items():
+            lines.append(f"   • {calendar_id}: изменений {changes}")
+    for calendar_id, error in (getattr(report, "calendars_failed", ()) or ()):
+        lines.append(f"   ⚠️ {calendar_id}: Google не ответил ({error})")
     if report.known:
         lines.append(f"   Записей, что были в календаре до включения: {report.known} — "
                      "их не трогаю")

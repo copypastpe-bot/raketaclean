@@ -15,6 +15,7 @@ import os
 import sys
 from datetime import date, timedelta
 
+from adminbot.config import parse_calendar_ids
 from adminbot.gcal.auth import GCalKeyError, ServiceAccountToken
 from adminbot.gcal.client import GCalError, GoogleCalendar
 from adminbot.gcal.event import EventKind, parse_event
@@ -36,7 +37,9 @@ KIND_WORDS = {
 
 
 async def main() -> int:
-    calendar_id = os.environ.get("GCAL_CALENDAR_ID", "").strip() or DEFAULT_CALENDAR
+    calendar_ids = parse_calendar_ids(
+        os.environ.get("GCAL_CALENDAR_ID", "").strip() or DEFAULT_CALENDAR,
+        DEFAULT_CALENDAR)
     key_file = os.environ.get("GCAL_SERVICE_ACCOUNT_FILE", "").strip() or "~/.gcal.json"
 
     try:
@@ -45,19 +48,34 @@ async def main() -> int:
         print(f"Ключ доступа не работает: {exc}")
         return 1
 
+    # Календарь, до которого не достучались, не должен прятать остальные:
+    # проверка нужна как раз затем, чтобы увидеть, какой именно недоступен.
+    failed = 0
+    try:
+        for calendar_id in calendar_ids:
+            failed += await _show_calendar(calendar_id, token)
+    finally:
+        await token.close()
+
+    print("\nВ amoCRM и в базу ничего не записано — это только проверка.")
+    return 1 if failed else 0
+
+
+async def _show_calendar(calendar_id: str, token: ServiceAccountToken) -> int:
+    """Показать ближайшие записи одного календаря. Возвращает 1, если не вышло."""
     calendar = GoogleCalendar(calendar_id=calendar_id, token=token)
     try:
         batch = await calendar.fetch(sync_token=None,
                                      sync_from=date.today() - timedelta(days=1))
     except GCalError as exc:
+        print(f"\n=== {calendar_id} ===")
         print(f"Календарь прочитать не удалось: {exc}")
         return 1
     finally:
         await calendar.close()
-        await token.close()
 
-    print(f"Календарь {calendar_id} доступен. Записей в ближайшие дни: "
-          f"{len(batch.events)}\n")
+    print(f"\n=== {calendar_id} ===")
+    print(f"Календарь доступен. Записей в ближайшие дни: {len(batch.events)}\n")
 
     # По времени работы, а не в порядке выдачи Google: владельцу нужен его день.
     ordered = sorted(batch.events, key=lambda raw: str(
@@ -81,8 +99,6 @@ async def main() -> int:
             print(f"    телефон найден: …{parsed.phone10[-4:]}")
         elif parsed.kind is EventKind.ORDER:
             print("    телефон НЕ найден")
-
-    print("\nВ amoCRM и в базу ничего не записано — это только проверка.")
     return 0
 
 

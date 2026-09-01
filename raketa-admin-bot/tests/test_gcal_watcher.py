@@ -150,7 +150,8 @@ async def test_google_failure_keeps_the_bookmark():
     report = await watcher.tick()
 
     assert await store.cursor(MAIN) == ("TOKEN-1", SYNC_FROM)
-    assert report.failures and report.failures[0][0] == MAIN
+    assert [name for name, _ in report.calendars_failed] == [MAIN]
+    assert report.failures == ()          # сбой календаря — не сбойная запись
 
 
 # --- когда календарей несколько (решение владельца 2026-09-01) ---
@@ -189,7 +190,7 @@ async def test_a_broken_calendar_does_not_stop_the_other():
     assert [event.event_id for event in engine.seen] == ["evt-1"]   # второй отработал
     assert await store.cursor(MAIN) == (None, None)                 # первый — нет
     assert await store.cursor(BRIGADE) == ("B2", SYNC_FROM)
-    assert [name for name, _ in report.failures] == [MAIN]
+    assert [name for name, _ in report.calendars_failed] == [MAIN]
 
 
 async def test_unfinished_work_is_handled_once_not_once_per_calendar():

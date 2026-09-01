@@ -217,6 +217,50 @@ def test_status_shows_mode_and_last_exchange():
     assert "выключен" in off.lower()
 
 
+def test_status_lists_every_calendar_when_there_are_several():
+    """Владелец должен видеть, что календарь бригадира опрашивается, а не молчит."""
+    from adminbot.gcal.watcher import CalendarTickReport
+    from adminbot.tg.calendar_cards import calendar_status_text
+
+    text = calendar_status_text(
+        enabled=True, dry_run=False,
+        report=CalendarTickReport(changes=3, processed=3,
+                                  by_calendar={"raketaclean52@gmail.com": 2,
+                                               "brigade@group.calendar.google.com": 1}))
+
+    assert "raketaclean52@gmail.com" in text
+    assert "brigade@group.calendar.google.com" in text
+
+
+def test_status_names_a_calendar_google_did_not_answer():
+    """Молчащий календарь — не «всё хорошо, изменений нет»: это надо сказать."""
+    from adminbot.gcal.watcher import CalendarTickReport
+    from adminbot.tg.calendar_cards import calendar_status_text
+
+    text = calendar_status_text(
+        enabled=True, dry_run=False,
+        report=CalendarTickReport(
+            changes=1, processed=1,
+            by_calendar={"brigade@group.calendar.google.com": 1},
+            calendars_failed=(("raketaclean52@gmail.com", "GCalError: 503"),)))
+
+    assert "raketaclean52@gmail.com" in text
+    assert "не ответил" in text.lower() or "не удался" in text.lower()
+
+
+def test_status_stays_short_with_a_single_calendar():
+    """Пока календарь один, лишних строк в /status быть не должно."""
+    from adminbot.gcal.watcher import CalendarTickReport
+    from adminbot.tg.calendar_cards import calendar_status_text
+
+    text = calendar_status_text(
+        enabled=True, dry_run=False,
+        report=CalendarTickReport(changes=1, processed=1,
+                                  by_calendar={"raketaclean52@gmail.com": 1}))
+
+    assert "raketaclean52@gmail.com" not in text
+
+
 # --- отчёт репетиции ---
 
 def test_rehearsal_card_tells_what_would_happen():
