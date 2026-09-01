@@ -11,7 +11,8 @@
 #   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
 #   sudo raketa-admin-bot-update --gcal-on --gcal-rehearsal         календарь: репетиция
 #   sudo raketa-admin-bot-update --gcal-live                        календарь: боевой режим
-#   sudo raketa-admin-bot-update --gcal-check                       проверить доступ к календарю
+#   sudo raketa-admin-bot-update --gcal-check                       проверить доступ к календарям
+#   sudo raketa-admin-bot-update --gcal-calendars=A,B               какие календари читать (через запятую, без пробелов)
 #   sudo raketa-admin-bot-update --gcal-run=ID[,ID]                 провести эти записи календаря
 #   sudo raketa-admin-bot-update --gcal-run=ID --gcal-preview       то же, но без записи в CRM
 #   sudo raketa-admin-bot-update --autocall-exam   экзамен фильтра заявок с сайта (читает CRM, ничего не меняет)
@@ -33,6 +34,7 @@ CARPETS_DRY=""
 GCAL=""
 GCAL_DRY=""
 GCAL_CHECK=""
+GCAL_CALENDARS=""
 GCAL_RUN=""
 GCAL_PREVIEW=""
 GCAL_RESET=""
@@ -58,6 +60,7 @@ for arg in "$@"; do
         --gcal-live)      GCAL_DRY=0 ;;
         --gcal-rehearsal) GCAL_DRY=1 ;;
         --gcal-check)     GCAL_CHECK=1 ;;
+        --gcal-calendars=*) GCAL_CALENDARS="${arg#*=}" ;;
         --gcal-run=*)     GCAL_RUN="${arg#*=}" ;;
         --gcal-preview)   GCAL_PREVIEW=1 ;;
         --gcal-reset)     GCAL_RESET=1 ;;
@@ -71,6 +74,15 @@ for arg in "$@"; do
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
+
+# Пробел внутри списка календарей позже разорвал бы строку при переносе настроек
+# в окружение диагностики (там xargs), и робот пошёл бы читать несуществующий
+# календарь. Ловим сразу, а не через сутки молчания.
+case "$GCAL_CALENDARS" in
+    *[[:space:]]*)
+        echo "В списке календарей есть пробел: перечисляйте через запятую без пробелов." >&2
+        exit 2 ;;
+esac
 
 # --report: только показать, что робот записал. Ничего не меняем и не перезапускаем.
 if [ -n "$REPORT" ]; then
@@ -164,6 +176,7 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
 [ -n "$GCAL" ] && set_flag GCAL_ENABLED "$GCAL"
 [ -n "$GCAL_DRY" ] && set_flag GCAL_DRY_RUN "$GCAL_DRY"
+[ -n "$GCAL_CALENDARS" ] && set_flag GCAL_CALENDAR_ID "$GCAL_CALENDARS"
 [ -n "$AUTOCALL" ] && set_flag AUTOCALL_ENABLED "$AUTOCALL"
 [ -n "$AUTOCALL_DRY" ] && set_flag AUTOCALL_DRY_RUN "$AUTOCALL_DRY"
 
@@ -202,6 +215,7 @@ echo "ковры:   $([ "$now_carpets" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$no
 now_gcal=$(flag_of GCAL_ENABLED)
 now_gcal_dry=$(flag_of GCAL_DRY_RUN)
 echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
+echo "календари: $(flag_of GCAL_CALENDAR_ID)"
 now_autocall=$(flag_of AUTOCALL_ENABLED)
 now_autocall_dry=$(flag_of AUTOCALL_DRY_RUN)
 echo "автозвонок: $([ "$now_autocall" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_autocall_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
