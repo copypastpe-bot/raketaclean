@@ -353,13 +353,96 @@ async def test_calendar_progress_and_bookmark_are_stored(pool):
     await store.mark_step("evt-1", "fill_primary")
     await store.log("evt-1", "update_lead", dry_run=False, entity="lead", amo_id=41400001,
                     payload={"price": 0})
-    await store.save_cursor("TOKEN-1", sync_from=date(2026, 8, 27))
+    await store.save_cursor("main@gmail.com", "TOKEN-1", sync_from=date(2026, 8, 27))
 
     link = await store.get("evt-1")
     assert link.status == "waiting_salesbot"
     assert "fill_primary" in link.checklist
     assert [row.event_id for row in await store.pending()] == ["evt-1"]
-    assert await store.cursor() == ("TOKEN-1", date(2026, 8, 27))
+    assert await store.cursor("main@gmail.com") == ("TOKEN-1", date(2026, 8, 27))
+
+
+# --- закладки, когда календарей несколько (2026-09-01) ---
+
+
+async def _put_legacy_cursor(pool, token: str, sync_from: date) -> None:
+    """Закладка, снятая до того, как календарей стало несколько (миграция 008)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO adminbot.gcal_cursor (calendar_id, sync_token, sync_from) "
+            "VALUES ('', $1, $2)", token, sync_from)
+
+
+async def test_each_calendar_keeps_its_own_bookmark(pool):
+    """Два календаря — две закладки: чужая пачка изменений не должна теряться."""
+    await db.save_calendar_cursor(pool, "main@gmail.com", "TOKEN-MAIN", date(2026, 9, 1))
+    await db.save_calendar_cursor(pool, "brigade@group.calendar.google.com",
+                                  "TOKEN-BRIGADE", date(2026, 9, 2))
+
+    assert await db.get_calendar_cursor(pool, "main@gmail.com") == (
+        "TOKEN-MAIN", date(2026, 9, 1))
+    assert await db.get_calendar_cursor(pool, "brigade@group.calendar.google.com") == (
+        "TOKEN-BRIGADE", date(2026, 9, 2))
+
+
+async def test_calendar_without_bookmark_starts_clean(pool):
+    """Новый календарь закладки не имеет — его первый обмен только запоминает."""
+    assert await db.get_calendar_cursor(pool, "brigade@group.calendar.google.com") == (
+        None, None)
+
+
+async def test_old_bookmark_goes_to_the_main_calendar(pool):
+    """Закладка «до нескольких календарей» достаётся первому из настроек.
+
+    Потерять её — получить от Google полную перезагрузку календаря вместо
+    изменений: робот увидел бы все записи разом.
+    """
+    await _put_legacy_cursor(pool, "OLD-TOKEN", date(2026, 8, 27))
+
+    inherited = await db.get_calendar_cursor(pool, "main@gmail.com", inherit_legacy=True)
+
+    assert inherited == ("OLD-TOKEN", date(2026, 8, 27))
+    # Усыновление одноразовое: второму календарю чужая закладка не достанется.
+    assert await db.get_calendar_cursor(
+        pool, "brigade@group.calendar.google.com", inherit_legacy=True) == (None, None)
+    # И она уже своя: повторное чтение без флага возвращает то же самое.
+    assert await db.get_calendar_cursor(pool, "main@gmail.com") == (
+        "OLD-TOKEN", date(2026, 8, 27))
+
+
+async def test_migration_008_keeps_the_bookmark_of_a_live_database(pool):
+    """На боевой базе закладка уже лежит — миграция обязана её сохранить.
+
+    Проверяем ровно тот путь, которым пойдёт сервер: схема до 008, закладка
+    по-старому (`id = 1`), затем миграция. Потерянная здесь строка означала бы
+    полную перезагрузку календаря на первом же обмене после деплоя.
+    """
+    migration_008 = next(m for m in MIGRATIONS if m.name.startswith("008_"))
+    older = [m for m in MIGRATIONS if m.name < "008_"]
+
+    async with pool.acquire() as conn:
+        await conn.execute("DROP SCHEMA IF EXISTS adminbot CASCADE")
+        for migration in older:
+            await conn.execute(migration.read_text())
+        await conn.execute(
+            "INSERT INTO adminbot.gcal_cursor (id, sync_token, sync_from) "
+            "VALUES (1, 'LIVE-TOKEN', $1)", date(2026, 8, 27))
+
+        await conn.execute(migration_008.read_text())
+        # Скрипт обновления прогоняет миграции при каждом деплое — повтор безопасен.
+        await conn.execute(migration_008.read_text())
+
+    assert await db.get_calendar_cursor(pool, "main@gmail.com", inherit_legacy=True) == (
+        "LIVE-TOKEN", date(2026, 8, 27))
+
+
+async def test_own_bookmark_is_not_overwritten_by_the_old_one(pool):
+    """У основного календаря уже своя закладка — старую строку он не забирает."""
+    await db.save_calendar_cursor(pool, "main@gmail.com", "FRESH", date(2026, 9, 1))
+    await _put_legacy_cursor(pool, "OLD-TOKEN", date(2026, 8, 27))
+
+    assert await db.get_calendar_cursor(pool, "main@gmail.com", inherit_legacy=True) == (
+        "FRESH", date(2026, 9, 1))
 
 
 async def test_calendar_lead_taken_by_another_event_is_not_reused(pool):

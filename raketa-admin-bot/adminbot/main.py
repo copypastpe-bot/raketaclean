@@ -365,7 +365,8 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
         salesbot_wait_sec=settings.salesbot_wait_sec,
     )
     watcher = CalendarWatcher(
-        calendar=GoogleCalendar(calendar_id=settings.gcal_calendar_ids[0], token=token),
+        calendars=[GoogleCalendar(calendar_id=calendar_id, token=token)
+                   for calendar_id in settings.gcal_calendar_ids],
         engine=engine,
         store=store,
         sync_from=settings.gcal_sync_from or datetime.now(MOSCOW_TZ).date(),

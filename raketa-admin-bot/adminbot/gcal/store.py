@@ -54,9 +54,11 @@ class CalendarStore(Protocol):
 
     async def actions_for(self, event_id: str) -> list[dict]: ...
 
-    async def cursor(self) -> tuple[Optional[str], Optional[date]]: ...
+    async def cursor(self, calendar_id: str, *, inherit_legacy: bool = False,
+                     ) -> tuple[Optional[str], Optional[date]]: ...
 
-    async def save_cursor(self, sync_token: Optional[str], *, sync_from: date) -> None: ...
+    async def save_cursor(self, calendar_id: str, sync_token: Optional[str],
+                          *, sync_from: date) -> None: ...
 
 
 class MemoryCalendarStore:
@@ -65,7 +67,9 @@ class MemoryCalendarStore:
     def __init__(self, now: Optional[Any] = None) -> None:
         self.links: dict[str, CalendarLink] = {}
         self.actions: list[dict] = []
-        self._cursor: tuple[Optional[str], Optional[date]] = (None, None)
+        # Закладка на каждый календарь: у мебельного и уборочного свои пачки
+        # изменений, общая закладка стирала бы одну другой.
+        self._cursors: dict[str, tuple[Optional[str], Optional[date]]] = {}
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     async def get(self, event_id: str) -> Optional[CalendarLink]:
@@ -132,11 +136,13 @@ class MemoryCalendarStore:
         """
         self.links.pop(event_id, None)
 
-    async def cursor(self) -> tuple[Optional[str], Optional[date]]:
-        return self._cursor
+    async def cursor(self, calendar_id: str, *, inherit_legacy: bool = False,
+                     ) -> tuple[Optional[str], Optional[date]]:
+        return self._cursors.get(calendar_id, (None, None))
 
-    async def save_cursor(self, sync_token: Optional[str], *, sync_from: date) -> None:
-        self._cursor = (sync_token, sync_from)
+    async def save_cursor(self, calendar_id: str, sync_token: Optional[str],
+                          *, sync_from: date) -> None:
+        self._cursors[calendar_id] = (sync_token, sync_from)
 
     async def actions_for(self, event_id: str) -> list[dict]:
         return [row for row in self.actions if row.get("event_id") == event_id]
@@ -189,8 +195,11 @@ class PgCalendarStore:
     async def actions_for(self, event_id: str) -> list[dict]:
         return await db.fetch_calendar_actions(self._pool, event_id)
 
-    async def cursor(self) -> tuple[Optional[str], Optional[date]]:
-        return await db.get_calendar_cursor(self._pool)
+    async def cursor(self, calendar_id: str, *, inherit_legacy: bool = False,
+                     ) -> tuple[Optional[str], Optional[date]]:
+        return await db.get_calendar_cursor(self._pool, calendar_id,
+                                            inherit_legacy=inherit_legacy)
 
-    async def save_cursor(self, sync_token: Optional[str], *, sync_from: date) -> None:
-        await db.save_calendar_cursor(self._pool, sync_token, sync_from)
+    async def save_cursor(self, calendar_id: str, sync_token: Optional[str],
+                          *, sync_from: date) -> None:
+        await db.save_calendar_cursor(self._pool, calendar_id, sync_token, sync_from)

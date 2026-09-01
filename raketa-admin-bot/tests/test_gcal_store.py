@@ -69,11 +69,22 @@ async def test_unfinished_events_come_back(store):
 
 
 async def test_bookmark_is_kept(store):
-    assert await store.cursor() == (None, None)
+    assert await store.cursor("main@gmail.com") == (None, None)
 
-    await store.save_cursor("TOKEN-1", sync_from=date(2026, 8, 27))
+    await store.save_cursor("main@gmail.com", "TOKEN-1", sync_from=date(2026, 8, 27))
 
-    assert await store.cursor() == ("TOKEN-1", date(2026, 8, 27))
+    assert await store.cursor("main@gmail.com") == ("TOKEN-1", date(2026, 8, 27))
+
+
+async def test_each_calendar_has_its_own_bookmark(store):
+    """Общая закладка на два календаря стирала бы одну пачку изменений другой."""
+    await store.save_cursor("main@gmail.com", "MAIN-1", sync_from=date(2026, 8, 27))
+    await store.save_cursor("brigade@group.calendar.google.com", "BRIG-1",
+                            sync_from=date(2026, 9, 1))
+
+    assert await store.cursor("main@gmail.com") == ("MAIN-1", date(2026, 8, 27))
+    assert await store.cursor("brigade@group.calendar.google.com") == (
+        "BRIG-1", date(2026, 9, 1))
 
 
 async def test_actions_are_logged_with_rehearsal_flag(store):

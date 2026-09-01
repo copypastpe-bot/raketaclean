@@ -34,7 +34,8 @@ DELETED = {"id": "evt-1", "status": "cancelled"}
 class FakeCalendar:
     """Google в памяти: отдаёт заготовленные пачки изменений."""
 
-    def __init__(self, *batches):
+    def __init__(self, *batches, calendar_id="main@gmail.com"):
+        self.calendar_id = calendar_id
         self.batches = list(batches)
         self.calls: list[tuple] = []
 
@@ -61,8 +62,12 @@ async def _link(event):
     return CalendarLink(event_id=event.event_id, kind=event.kind.value, status="done")
 
 
-def build(calendar, *, engine=None, store=None, **kwargs) -> CalendarWatcher:
-    return CalendarWatcher(calendar=calendar, engine=engine or FakeEngine(),
+MAIN = "main@gmail.com"
+BRIGADE = "brigade@group.calendar.google.com"
+
+
+def build(*calendars, engine=None, store=None, **kwargs) -> CalendarWatcher:
+    return CalendarWatcher(calendars=calendars, engine=engine or FakeEngine(),
                            store=store or MemoryCalendarStore(),
                            sync_from=SYNC_FROM, **kwargs)
 
@@ -79,7 +84,7 @@ async def test_first_exchange_only_remembers_what_is_already_there():
     assert engine.seen == []                       # ни одной сделки не заведено
     assert report.known == 2
     assert (await store.get("evt-1")).status == "skipped"
-    assert await store.cursor() == ("TOKEN-1", SYNC_FROM)
+    assert await store.cursor(MAIN) == ("TOKEN-1", SYNC_FROM)
 
 
 async def test_new_records_after_the_first_exchange_go_to_work():
@@ -94,7 +99,7 @@ async def test_new_records_after_the_first_exchange_go_to_work():
     assert [event.event_id for event in engine.seen] == ["evt-1"]
     assert calendar.calls[1][0] == "TOKEN-1"        # второй заход — с закладкой
     assert report.processed == 1
-    assert await store.cursor() == ("TOKEN-2", SYNC_FROM)
+    assert await store.cursor(MAIN) == ("TOKEN-2", SYNC_FROM)
 
 
 async def test_deletion_reaches_the_engine():
@@ -123,23 +128,109 @@ async def test_one_bad_record_does_not_stop_the_pass():
 
     assert [event.event_id for event in engine.seen] == ["evt-9"]
     assert report.failures and report.failures[0][0] == "evt-1"
-    assert await store.cursor() == ("T2", SYNC_FROM)     # проход всё же состоялся
+    assert await store.cursor(MAIN) == ("T2", SYNC_FROM)  # проход всё же состоялся
+
+
+class BrokenCalendar:
+    """Google, который не отвечает по этому календарю."""
+
+    def __init__(self, calendar_id=MAIN):
+        self.calendar_id = calendar_id
+
+    async def fetch(self, *, sync_token, sync_from):
+        raise RuntimeError("Google недоступен")
 
 
 async def test_google_failure_keeps_the_bookmark():
     """Обмен не удался — закладку не двигаем, иначе потеряем изменения."""
-    class BrokenCalendar:
-        async def fetch(self, *, sync_token, sync_from):
-            raise RuntimeError("Google недоступен")
-
     store = MemoryCalendarStore()
-    await store.save_cursor("TOKEN-1", sync_from=SYNC_FROM)
+    await store.save_cursor(MAIN, "TOKEN-1", sync_from=SYNC_FROM)
     watcher = build(BrokenCalendar(), store=store)
 
-    with pytest.raises(RuntimeError):
-        await watcher.tick()
+    report = await watcher.tick()
 
-    assert await store.cursor() == ("TOKEN-1", SYNC_FROM)
+    assert await store.cursor(MAIN) == ("TOKEN-1", SYNC_FROM)
+    assert report.failures and report.failures[0][0] == MAIN
+
+
+# --- когда календарей несколько (решение владельца 2026-09-01) ---
+
+
+async def test_both_calendars_are_exchanged_in_one_pass():
+    """Мебель ведут мастера в основном календаре, уборки — бригадир в своём."""
+    store = MemoryCalendarStore()
+    engine = FakeEngine()
+    cleaning = {**ORDER, "id": "evt-clean", "summary": "Сор! Уборка, Лариса"}
+    main = FakeCalendar(SyncBatch((), "M1"), SyncBatch((ORDER,), "M2"))
+    brigade = FakeCalendar(SyncBatch((), "B1"), SyncBatch((cleaning,), "B2"),
+                           calendar_id=BRIGADE)
+    watcher = build(main, brigade, engine=engine, store=store)
+
+    await watcher.tick()                                # первый обмен — только помним
+    report = await watcher.tick()
+
+    assert sorted(event.event_id for event in engine.seen) == ["evt-1", "evt-clean"]
+    assert report.processed == 2
+    assert await store.cursor(MAIN) == ("M2", SYNC_FROM)
+    assert await store.cursor(BRIGADE) == ("B2", SYNC_FROM)
+
+
+async def test_a_broken_calendar_does_not_stop_the_other():
+    """Сбой Google по одному календарю не должен останавливать работу по другому."""
+    store = MemoryCalendarStore()
+    engine = FakeEngine()
+    brigade = FakeCalendar(SyncBatch((), "B1"), SyncBatch((ORDER,), "B2"),
+                           calendar_id=BRIGADE)
+    watcher = build(BrokenCalendar(), brigade, engine=engine, store=store)
+
+    await watcher.tick()
+    report = await watcher.tick()
+
+    assert [event.event_id for event in engine.seen] == ["evt-1"]   # второй отработал
+    assert await store.cursor(MAIN) == (None, None)                 # первый — нет
+    assert await store.cursor(BRIGADE) == ("B2", SYNC_FROM)
+    assert [name for name, _ in report.failures] == [MAIN]
+
+
+async def test_unfinished_work_is_handled_once_not_once_per_calendar():
+    """Незавершённая запись доделывается один раз за проход, сколько бы ни было
+    календарей: иначе робот дважды сходил бы за одной сделкой в amoCRM."""
+    store = MemoryCalendarStore()
+    engine = FakeEngine()
+    main = FakeCalendar(SyncBatch((), "M1"))
+    brigade = FakeCalendar(SyncBatch((), "B1"), calendar_id=BRIGADE)
+    watcher = build(main, brigade, engine=engine, store=store)
+    await watcher.tick()
+
+    await store.create("evt-waiting", kind="order", phone10="9601861067",
+                       event_data={"event_id": "evt-waiting", "kind": "order"})
+    await store.update("evt-waiting", status="waiting_salesbot")
+    await watcher.tick()
+
+    assert [event.event_id for event in engine.seen] == ["evt-waiting"]
+
+
+async def test_only_the_first_calendar_inherits_the_old_bookmark():
+    """Закладку «до нескольких календарей» забирает основной календарь.
+
+    Отдать её второму — значит объявить его записи давно прочитанными и
+    пропустить всё, что бригадир завёл до включения.
+    """
+    asked: list[tuple[str, bool]] = []
+
+    class SpyStore(MemoryCalendarStore):
+        async def cursor(self, calendar_id, *, inherit_legacy=False):
+            asked.append((calendar_id, inherit_legacy))
+            return await super().cursor(calendar_id, inherit_legacy=inherit_legacy)
+
+    store = SpyStore()
+    watcher = build(FakeCalendar(SyncBatch((), "M1")),
+                    FakeCalendar(SyncBatch((), "B1"), calendar_id=BRIGADE),
+                    store=store)
+
+    await watcher.tick()
+
+    assert asked == [(MAIN, True), (BRIGADE, False)]
 
 
 async def test_unfinished_records_are_picked_up_again():

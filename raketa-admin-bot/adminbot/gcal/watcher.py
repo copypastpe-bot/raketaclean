@@ -51,6 +51,9 @@ class CalendarTickReport:
     unknown_districts: tuple[str, ...] = ()           # приставки, которых робот не знает
     districts_missing: tuple[str, ...] = ()           # район понят, но его нет в списке амо
     failures: tuple[tuple[str, str], ...] = ()
+    # Сколько изменений принёс каждый календарь: в /status видно, что второй
+    # календарь действительно опрашивается, а не молчит незаметно.
+    by_calendar: dict[str, int] = field(default_factory=dict)
     full_resync: bool = False
 
 
@@ -58,7 +61,7 @@ class CalendarWatcher:
     def __init__(
         self,
         *,
-        calendar: Any,
+        calendars: Any,
         engine: Any,
         store: Any,
         sync_from: date,
@@ -71,7 +74,10 @@ class CalendarWatcher:
         dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        self.calendar = calendar
+        # Календарей может быть несколько: мебель и ковры ведут мастера в основном,
+        # уборки — бригадир в своём (решение владельца 2026-09-01). Первый в списке
+        # считается основным: ему достаётся закладка, снятая до этой правки.
+        self.calendars = tuple(calendars)
         self.engine = engine
         self.store = store
         self.sync_from = sync_from
@@ -93,27 +99,75 @@ class CalendarWatcher:
         self.last_report: Optional[CalendarTickReport] = None
 
     async def tick(self) -> CalendarTickReport:
-        """Один проход: забрать изменения и доделать незавершённое."""
+        """Один проход: забрать изменения по каждому календарю и доделать хвосты."""
         if not await self._enabled():
             return self._remember(CalendarTickReport(paused=True))
-
-        sync_token, saved_from = await self.store.cursor()
-        sync_from = saved_from or self.sync_from
-        first_run = sync_token is None and saved_from is None
-
-        batch = await self.calendar.fetch(sync_token=sync_token, sync_from=sync_from)
 
         statuses: Counter[str] = Counter()
         questions: list[str] = []
         failures: list[tuple[str, str]] = []
         unknown: list[str] = []
         missing: list[str] = []
+        by_calendar: dict[str, int] = {}
         known = 0
+        changes = 0
+        full_resync = False
         # Записи, разобранные в этом проходе: та, что только что пришла с
         # изменениями, лежит и в незавершённых — без этого списка движок сходил бы
         # по ней в amoCRM дважды за один проход.
         handled: set[str] = set()
 
+        for position, calendar in enumerate(self.calendars):
+            try:
+                result = await self._exchange(calendar, first=position == 0,
+                                              statuses=statuses, questions=questions,
+                                              failures=failures, unknown=unknown,
+                                              missing=missing, handled=handled)
+            except Exception as exc:                   # noqa: BLE001
+                # Google не ответил по одному календарю — остальные всё равно
+                # обмениваются. Закладка этого календаря не сдвинулась: сохраняем
+                # её только после того, как пачка разобрана.
+                log.exception("Календарь %s: обмен не удался", calendar.calendar_id)
+                failures.append((calendar.calendar_id, f"{type(exc).__name__}: {exc}"))
+                continue
+            by_calendar[calendar.calendar_id] = result[0]
+            changes += result[0]
+            known += result[1]
+            full_resync = full_resync or result[2]
+
+        # Незавершённое из прошлых проходов: ожидание автосделки, ошибки, вопросы.
+        # Один раз за проход, а не по разу на календарь: хвосты общие для всех.
+        for link in await self.store.pending():
+            if link.event_id in handled:
+                continue                              # уже провели по изменениям
+            if not link.event_data:
+                continue                              # разбора нет — продолжать нечем
+            await self._handle(ParsedEvent.from_dict(link.event_data),
+                               statuses, questions, failures)
+
+        return self._remember(CalendarTickReport(
+            changes=changes, known=known, processed=sum(statuses.values()),
+            by_status=dict(statuses), questions=tuple(questions),
+            unknown_districts=tuple(unknown), districts_missing=tuple(missing),
+            failures=tuple(failures), by_calendar=by_calendar,
+            full_resync=full_resync))
+
+    async def _exchange(self, calendar: Any, *, first: bool, statuses: Counter,
+                        questions: list, failures: list, unknown: list, missing: list,
+                        handled: set) -> tuple[int, int, bool]:
+        """Обмен с одним календарём. Возвращает (изменений, запомнено, перезагрузка)."""
+        calendar_id = calendar.calendar_id
+        # Закладку «до нескольких календарей» забирает первый календарь из настроек:
+        # она снята с него, и отдать её другому — значит объявить чужие записи
+        # давно прочитанными.
+        sync_token, saved_from = await self.store.cursor(calendar_id,
+                                                         inherit_legacy=first)
+        sync_from = saved_from or self.sync_from
+        first_run = sync_token is None and saved_from is None
+
+        batch = await calendar.fetch(sync_token=sync_token, sync_from=sync_from)
+
+        known = 0
         for raw in batch.events:
             parsed = parse_event(raw)
             handled.add(parsed.event_id)
@@ -132,24 +186,10 @@ class CalendarWatcher:
 
             await self._handle(parsed, statuses, questions, failures)
 
-        # Незавершённое из прошлых проходов: ожидание автосделки, ошибки, вопросы.
-        for link in await self.store.pending():
-            if link.event_id in handled:
-                continue                              # уже провели по изменениям
-            if not link.event_data:
-                continue                              # разбора нет — продолжать нечем
-            await self._handle(ParsedEvent.from_dict(link.event_data),
-                               statuses, questions, failures)
-
         # Закладка — только теперь, когда пачка разобрана.
-        await self.store.save_cursor(batch.sync_token or sync_token, sync_from=sync_from)
-
-        return self._remember(CalendarTickReport(
-            changes=len(batch.events), known=known, processed=sum(statuses.values()),
-            by_status=dict(statuses), questions=tuple(questions),
-            unknown_districts=tuple(unknown), districts_missing=tuple(missing),
-            failures=tuple(failures),
-            full_resync=batch.full_resync))
+        await self.store.save_cursor(calendar_id, batch.sync_token or sync_token,
+                                     sync_from=sync_from)
+        return len(batch.events), known, batch.full_resync
 
     async def run_forever(self, stop: Optional[asyncio.Event] = None) -> None:
         while stop is None or not stop.is_set():

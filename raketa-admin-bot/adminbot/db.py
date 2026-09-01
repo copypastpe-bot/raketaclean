@@ -694,30 +694,49 @@ async def count_calendar_links_by_status(own_pool: asyncpg.Pool) -> dict[str, in
     return {row["status"]: row["n"] for row in rows}
 
 
-async def get_calendar_cursor(own_pool: asyncpg.Pool) -> tuple[Optional[str], Optional[date]]:
-    """Закладка обмена с Google: (токен, дата включения)."""
+async def get_calendar_cursor(own_pool: asyncpg.Pool, calendar_id: str,
+                              *, inherit_legacy: bool = False,
+                              ) -> tuple[Optional[str], Optional[date]]:
+    """Закладка обмена с Google по одному календарю: (токен, дата включения).
+
+    `inherit_legacy` ставит только первый календарь из настроек. До миграции 008
+    закладка была одна и хранилась без имени календаря; терять её нельзя —
+    иначе Google вместо изменений отдаст весь календарь целиком. Поэтому
+    безымянная строка достаётся первому календарю: переименовываем её на месте,
+    одним запросом, и повторно она уже никому не попадётся.
+    """
     async with own_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT sync_token, sync_from FROM adminbot.gcal_cursor WHERE id = 1")
+            "SELECT sync_token, sync_from FROM adminbot.gcal_cursor WHERE calendar_id = $1",
+            calendar_id)
+        if row is None and inherit_legacy:
+            row = await conn.fetchrow(
+                """
+                UPDATE adminbot.gcal_cursor
+                SET calendar_id = $1, updated_at = now()
+                WHERE calendar_id = ''
+                RETURNING sync_token, sync_from
+                """,
+                calendar_id)
     if row is None:
         return None, None
     return row["sync_token"], row["sync_from"]
 
 
-async def save_calendar_cursor(own_pool: asyncpg.Pool, sync_token: Optional[str],
-                               sync_from: date) -> None:
-    """Сохранить закладку. В репетиции сюда не приходят — там хранилище в памяти."""
+async def save_calendar_cursor(own_pool: asyncpg.Pool, calendar_id: str,
+                               sync_token: Optional[str], sync_from: date) -> None:
+    """Сохранить закладку календаря. В репетиции сюда не приходят — там память."""
     async with own_pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO adminbot.gcal_cursor (id, sync_token, sync_from)
-            VALUES (1, $1, $2)
-            ON CONFLICT (id) DO UPDATE
+            INSERT INTO adminbot.gcal_cursor (calendar_id, sync_token, sync_from)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (calendar_id) DO UPDATE
             SET sync_token = EXCLUDED.sync_token,
                 sync_from = EXCLUDED.sync_from,
                 updated_at = now()
             """,
-            sync_token, sync_from,
+            calendar_id, sync_token, sync_from,
         )
 
 
