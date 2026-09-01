@@ -365,7 +365,7 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
         salesbot_wait_sec=settings.salesbot_wait_sec,
     )
     watcher = CalendarWatcher(
-        calendar=GoogleCalendar(calendar_id=settings.gcal_calendar_id, token=token),
+        calendar=GoogleCalendar(calendar_id=settings.gcal_calendar_ids[0], token=token),
         engine=engine,
         store=store,
         sync_from=settings.gcal_sync_from or datetime.now(MOSCOW_TZ).date(),
@@ -380,7 +380,7 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
     )
     log.info("Календарь: включён, режим %s, календарь %s, читаю с %s",
              "репетиция" if settings.gcal_dry_run else "БОЕВОЙ",
-             settings.gcal_calendar_id, watcher.sync_from)
+             ", ".join(settings.gcal_calendar_ids), watcher.sync_from)
     return watcher, store, token
 
 

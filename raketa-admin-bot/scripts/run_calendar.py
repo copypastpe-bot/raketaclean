@@ -52,7 +52,7 @@ async def main() -> int:
     settings = Settings.from_env()
 
     token = ServiceAccountToken.from_file(settings.gcal_key_file)
-    calendar = GoogleCalendar(calendar_id=settings.gcal_calendar_id, token=token)
+    calendar = GoogleCalendar(calendar_id=settings.gcal_calendar_ids[0], token=token)
     amo = AmoClient(base_url=settings.amo_base_url, token=settings.amo_token,
                     dry_run=preview)
     pool = await db.create_pool(settings.own_db_dsn)

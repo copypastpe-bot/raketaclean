@@ -30,6 +30,9 @@ _TRUE_VALUES = {"1", "true"}
 DEFAULT_BACKLOG_FROM = date(2026, 8, 21)
 
 # Рабочий календарь компании и ключ служебного аккаунта на сервере (этап 2).
+# Календарей может быть несколько: мебель и ковры ведут мастера в основном,
+# уборки — бригадир в своём (решение владельца 2026-09-01). В настройке они
+# перечисляются через запятую; порядок важен — см. `_calendar_ids`.
 DEFAULT_CALENDAR_ID = "raketaclean52@gmail.com"
 DEFAULT_GCAL_KEY_FILE = "~/.gcal.json"
 
@@ -44,6 +47,23 @@ DEFAULT_SERVICE_BY_MASTER: dict[str, str] = {
     "ольга": "cleaning",
     "оля": "cleaning",
 }
+
+
+def _calendar_ids(name: str, default: str) -> tuple[str, ...]:
+    """Адреса календарей из настройки «через запятую», по порядку и без повторов.
+
+    Порядок важен: первый календарь считается основным и наследует закладку
+    обмена, снятую до того, как календарей стало несколько (миграция 008).
+    Пустые куски отбрасываем: пустой адрес — это запрос ко всему аккаунту,
+    Google ответил бы отказом, и обмен встал бы целиком.
+    """
+    raw = os.environ.get(name, "").strip() or default
+    ids: list[str] = []
+    for chunk in raw.split(","):
+        value = chunk.strip()
+        if value and value not in ids:
+            ids.append(value)
+    return tuple(ids) or (default,)
 
 
 def _require(name: str) -> str:
@@ -160,7 +180,8 @@ class Settings:
     gcal_enabled: bool = False
     gcal_dry_run: bool = True
     gcal_poll_interval_sec: int = 300
-    gcal_calendar_id: str = DEFAULT_CALENDAR_ID
+    # Календарей может быть несколько; первый — основной (наследует закладку).
+    gcal_calendar_ids: tuple[str, ...] = (DEFAULT_CALENDAR_ID,)
     gcal_key_file: str = DEFAULT_GCAL_KEY_FILE
     # С какой даты читаем календарь. Пусто — со дня включения: записи, лежавшие
     # там раньше, владелец ведёт сам (его решение 8).
@@ -228,8 +249,7 @@ class Settings:
             gcal_enabled=_flag("GCAL_ENABLED", False),
             gcal_dry_run=_flag("GCAL_DRY_RUN", True),
             gcal_poll_interval_sec=_int("GCAL_POLL_INTERVAL_SEC", 300),
-            gcal_calendar_id=(os.environ.get("GCAL_CALENDAR_ID", "").strip()
-                              or DEFAULT_CALENDAR_ID),
+            gcal_calendar_ids=_calendar_ids("GCAL_CALENDAR_ID", DEFAULT_CALENDAR_ID),
             gcal_key_file=(os.environ.get("GCAL_SERVICE_ACCOUNT_FILE", "").strip()
                            or DEFAULT_GCAL_KEY_FILE),
             gcal_sync_from=_optional_date("GCAL_SYNC_FROM"),

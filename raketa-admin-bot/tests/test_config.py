@@ -61,6 +61,49 @@ def test_unknown_service_name_is_rejected_at_start(monkeypatch):
         Settings.from_env()
 
 
+# --- календари: их может быть несколько ---
+
+def test_calendar_defaults_to_the_main_one(monkeypatch):
+    """Настройки нет — читаем основной календарь, как и раньше."""
+    _minimal_env(monkeypatch)
+    monkeypatch.delenv("GCAL_CALENDAR_ID", raising=False)
+
+    assert Settings.from_env().gcal_calendar_ids == ("raketaclean52@gmail.com",)
+
+
+def test_single_calendar_still_works(monkeypatch):
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("GCAL_CALENDAR_ID", "one@gmail.com")
+
+    assert Settings.from_env().gcal_calendar_ids == ("one@gmail.com",)
+
+
+def test_two_calendars_are_read_in_order(monkeypatch):
+    """Порядок важен: первый календарь наследует закладку, снятую до этой правки."""
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("GCAL_CALENDAR_ID",
+                       "raketaclean52@gmail.com, brigade@group.calendar.google.com")
+
+    assert Settings.from_env().gcal_calendar_ids == (
+        "raketaclean52@gmail.com", "brigade@group.calendar.google.com")
+
+
+def test_sloppy_separators_do_not_create_empty_calendars(monkeypatch):
+    """Лишние запятые и пробелы в .env — обычное дело; пустой адрес роняет обмен."""
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("GCAL_CALENDAR_ID", " , one@gmail.com ,, two@gmail.com , ")
+
+    assert Settings.from_env().gcal_calendar_ids == ("one@gmail.com", "two@gmail.com")
+
+
+def test_same_calendar_twice_is_read_once(monkeypatch):
+    """Дубль в настройке означал бы два обмена и две закладки по одному адресу."""
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("GCAL_CALENDAR_ID", "one@gmail.com, one@gmail.com")
+
+    assert Settings.from_env().gcal_calendar_ids == ("one@gmail.com",)
+
+
 # --- автозвонок по заявке с сайта (autocall) ---
 
 _AUTOCALL_ENV = (
