@@ -19,6 +19,7 @@
 #   sudo raketa-admin-bot-update --autocall-on --autocall-rehearsal   автозвонок: репетиция
 #   sudo raketa-admin-bot-update --autocall-live                      автозвонок: боевой режим
 #   sudo raketa-admin-bot-update --autocall-off                       автозвонок: выключить
+#   sudo raketa-admin-bot-update --manager-dials=8930...,8986...      телефоны менеджера: рабочий, потом личный (через запятую, без пробелов)
 #
 # Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
 # меняются только два выключателя, и каждый раз печатается итоговое состояние.
@@ -49,6 +50,7 @@ SHOW_LEAD_IDS=""
 AUTOCALL_EXAM=""
 AUTOCALL=""
 AUTOCALL_DRY=""
+MANAGER_DIALS=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
@@ -83,6 +85,7 @@ for arg in "$@"; do
         --autocall-off)       AUTOCALL=0 ;;
         --autocall-live)      AUTOCALL_DRY=0 ;;
         --autocall-rehearsal) AUTOCALL_DRY=1 ;;
+        --manager-dials=*)    MANAGER_DIALS="${arg#*=}" ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -93,6 +96,15 @@ done
 case "$GCAL_CALENDARS" in
     *[[:space:]]*)
         echo "В списке календарей есть пробел: перечисляйте через запятую без пробелов." >&2
+        exit 2 ;;
+esac
+
+# Та же беда с телефонами менеджера: строка уезжает в настройки службы как есть,
+# а systemd на пробеле внутри значения обрывает строку — робот остался бы с одним
+# номером и молча звонил бы только на него.
+case "$MANAGER_DIALS" in
+    *[[:space:]]*)
+        echo "В списке телефонов есть пробел: перечисляйте через запятую без пробелов." >&2
         exit 2 ;;
 esac
 
@@ -191,6 +203,7 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$GCAL_CALENDARS" ] && set_flag GCAL_CALENDAR_ID "$GCAL_CALENDARS"
 [ -n "$AUTOCALL" ] && set_flag AUTOCALL_ENABLED "$AUTOCALL"
 [ -n "$AUTOCALL_DRY" ] && set_flag AUTOCALL_DRY_RUN "$AUTOCALL_DRY"
+[ -n "$MANAGER_DIALS" ] && set_flag PBX_MANAGER_DIAL "$MANAGER_DIALS"
 
 # Доступы к почте робота лежат отдельным файлом у admin. Переносим их в настройки
 # службы один раз: сама служба читает только свой .env.
@@ -231,6 +244,9 @@ echo "календари: $(flag_of GCAL_CALENDAR_ID)"
 now_autocall=$(flag_of AUTOCALL_ENABLED)
 now_autocall_dry=$(flag_of AUTOCALL_DRY_RUN)
 echo "автозвонок: $([ "$now_autocall" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_autocall_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
+# Телефоны менеджера печатаем целиком: их видит только владелец у себя в консоли,
+# а проверить порядок «рабочий, потом личный» иначе нечем.
+echo "телефоны менеджера: $(flag_of PBX_MANAGER_DIAL)"
 
 # Проверка доступа к календарю: читает три ближайшие записи и ничего не меняет.
 if [ -n "$GCAL_CHECK" ]; then
