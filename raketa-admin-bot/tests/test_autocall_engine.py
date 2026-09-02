@@ -400,6 +400,92 @@ async def test_live_call_without_manager_phones_fails_loudly():
         await engine.process_due(link, msk(2026, 9, 2, 14, 0))
 
 
+# --- 5в. След робота в сделке (решение владельца 2026-09-02) ---
+#
+# Звонок роботом не попадает в карточку сделки: связка АТС с амо знает только
+# внутренний номер 100, а робот звонит менеджеру на мобильный. Проверено на
+# живой заявке — в АТС вызов есть, в амо нет. Поэтому след оставляет робот.
+
+
+def _notes(amo):
+    return [text for name, (_lead, text) in
+            ((n, a) for n, a in amo.calls if n == "add_note")]
+
+
+async def test_finished_chain_leaves_note_in_deal():
+    """Соединились — в сделке появляется одно примечание об этом."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo)
+    now = msk(2026, 9, 2, 18, 8)
+    await store.create(501, phone10=PHONE)
+
+    link = await store.get(501)
+    await engine.process_due(link, now)
+    calling = await store.get(501)
+    assert _notes(amo) == []          # пока звонок идёт, писать нечего
+
+    pbx.set_outcome(calling.call_id, Outcome.CONNECTED)
+    link2 = await store.get(501)
+    await engine.process_due(link2, now + timedelta(seconds=1))
+
+    notes = _notes(amo)
+    assert len(notes) == 1
+    assert "соединил" in notes[0].lower()
+
+
+async def test_retry_does_not_leave_note():
+    """Цепочка ещё жива (повтор через 5 минут) — примечание преждевременно."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo)
+    now = msk(2026, 9, 2, 18, 8)
+
+    await _first_attempt_missed_by_manager(store, pbx, amo, engine, 502, now)
+
+    assert _notes(amo) == []
+
+
+async def test_gave_up_chain_leaves_note_about_manager():
+    """Менеджер не ответил дважды — в сделке видно, почему робот встал."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo)
+    now = msk(2026, 9, 2, 18, 8)
+
+    retried = await _first_attempt_missed_by_manager(store, pbx, amo, engine, 503, now)
+    link = await store.get(503)
+    await engine.process_due(link, retried.next_action_at)
+    calling2 = await store.get(503)
+    pbx.set_outcome(calling2.call_id, Outcome.MANAGER_NO_ANSWER)
+    link2 = await store.get(503)
+    await engine.process_due(link2, retried.next_action_at + timedelta(seconds=1))
+
+    assert (await store.get(503)).status == "gave_up"
+    notes = _notes(amo)
+    assert len(notes) == 1
+    assert "менеджер" in notes[0].lower()
+
+
+async def test_note_failure_does_not_break_the_chain():
+    """CRM не приняла примечание — цепочка всё равно закрыта правильно.
+
+    Примечание — след для человека, а не часть решения: потерять его
+    неприятно, но остановить из-за него уже завершённую цепочку хуже.
+    """
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo)
+    now = msk(2026, 9, 2, 18, 8)
+    await store.create(504, phone10=PHONE)
+
+    link = await store.get(504)
+    await engine.process_due(link, now)
+    calling = await store.get(504)
+    pbx.set_outcome(calling.call_id, Outcome.CONNECTED)
+    amo.fail_on = "add_note"
+    link2 = await store.get(504)
+    await engine.process_due(link2, now + timedelta(seconds=1))
+
+    assert (await store.get(504)).status == "done"
+
+
 # --- 6. Клиент дважды не взял ---
 
 async def test_client_no_answer_twice_moves_lead_no_contact():

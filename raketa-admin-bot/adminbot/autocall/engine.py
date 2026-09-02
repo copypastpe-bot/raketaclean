@@ -53,6 +53,7 @@ from adminbot.autocall.chain import (
     Retry,
     advance,
 )
+from adminbot.autocall.notes import deal_note_text
 from adminbot.autocall.pbx import Pbx
 from adminbot.autocall.store import AutocallStore
 from adminbot.autocall.window import next_call_moment
@@ -265,6 +266,7 @@ class AutocallEngine:
             link.lead_id, "outcome", dry_run=self.dry_run, payload={"outcome": outcome.value},
         )
 
+        gave_up_reason: Optional[str] = None
         chain = Chain(
             lead_id=link.lead_id, status=STATUS_CALLING,
             attempts_total=link.attempts_total, manager_failures=link.manager_failures,
@@ -311,6 +313,7 @@ class AutocallEngine:
                     link.lead_id, "move_no_contact", dry_run=self.dry_run, payload=None,
                 )
             elif isinstance(effect, GaveUp):
+                gave_up_reason = effect.reason
                 await self.store.log_action(
                     link.lead_id, "gave_up", dry_run=self.dry_run,
                     payload={"reason": effect.reason},
@@ -320,7 +323,37 @@ class AutocallEngine:
 
         await self.store.update(link.lead_id, **update_fields)
 
+        if new_chain.status in FINAL_STATUSES:
+            await self._leave_deal_note(link, new_chain.status, gave_up_reason)
+
     # --- вспомогательное ---
+
+    async def _leave_deal_note(
+        self, link: AutocallLead, status: str, reason: Optional[str],
+    ) -> None:
+        """Написать в сделку, чем кончилась цепочка: один раз, при финале.
+
+        Зачем: звонок робота не попадает в карточку сделки — связка АТС с амо
+        раскладывает звонки по внутренним номерам и знает только 100 «Амо», а
+        робот звонит менеджеру на мобильный. На живой заявке 2026-09-02 вызов
+        в АТС записан, а в амо его нет. Пока это не решено на стороне
+        onlinePBX, след в сделке оставляет сам робот (решение владельца).
+
+        Упавшее примечание не роняет цепочку — по образцу `_notify_manager`:
+        след для человека не должен отменять уже принятое решение робота.
+        """
+        try:
+            text = deal_note_text(status, called_at=link.called_at, reason=reason)
+            await self.amo.add_note(link.lead_id, text)
+        except Exception:  # noqa: BLE001 — примечание не важнее самой цепочки
+            log.exception(
+                "Автозвонок, сделка %s: примечание об итоге (%s) не записано",
+                link.lead_id, status,
+            )
+            return
+        await self.store.log_action(
+            link.lead_id, "deal_note", dry_run=self.dry_run, payload={"status": status},
+        )
 
     async def _notify_manager(self, lead_id: int, kind: str) -> None:
         """Сообщение менеджеру не должно ронять цепочку: транспорт бывает недоступен.
