@@ -13,6 +13,7 @@
 сервера — тот же приём, что FakeAmo в test_amo_client.py.
 """
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -296,10 +297,15 @@ class FakePbx:
     def __init__(self):
         self.requests: list[tuple[str, dict]] = []
         self.responses: dict[str, list] = {}
+        self.delays: dict[str, float] = {}
         self.auth_calls = 0
 
     def stub(self, path: str, *responses):
         self.responses[path] = list(responses)
+
+    def delay(self, path: str, seconds: float):
+        """Тянуть с ответом — так АТС ведёт себя, пока менеджер не взял трубку."""
+        self.delays[path] = seconds
 
     def _next(self, path):
         queue = self.responses.get(path) or []
@@ -310,6 +316,9 @@ class FakePbx:
     async def handle(self, request: web.Request):
         if request.path == "/auth.json":
             self.auth_calls += 1
+        pause = self.delays.get(request.path)
+        if pause:
+            await asyncio.sleep(pause)
         if request.content_type == "application/json":
             body = await request.json()
         else:
@@ -360,6 +369,28 @@ async def test_call_now_returns_synthetic_id_when_response_has_no_id(pbx_server)
     assert call_id.startswith(f"search:{CLIENT_PHONE}:")
     parsed = parse_search_id(call_id)
     assert parsed is not None and parsed[0] == CLIENT_PHONE
+
+
+async def test_call_now_returns_id_when_manager_does_not_pick_up(pbx_server):
+    """Молчание АТС в ответ на команду звонка — не сбой, а «менеджер не взял».
+
+    Стенд 2026-09-02: АТС держит ответ до тех пор, пока первый вызываемый не
+    снимет трубку. Взял через 7 секунд — ответ пришёл; не взял — ответа нет
+    вовсе, а телефон звонил всю минуту. Значит, по таймауту падать нельзя:
+    звонок идёт, и попытку нужно вернуть с id для поиска в истории.
+    """
+    client, fake = pbx_server
+    fake.stub("/auth.json", {"status": "1", "data": {"key_id": "k1", "key": "s1"}})
+    fake.stub("/call/now.json", {"status": "1", "data": {"uuid": "не-дождёмся"}})
+    fake.delay("/call/now.json", 0.3)
+    impatient = OnlinePbx(base_url=client.base_url, api_key="test-key", timeout_sec=0.05)
+
+    try:
+        call_id = await impatient.call_now(to_dial="89001112233", client_phone=CLIENT_PHONE)
+    finally:
+        await impatient.close()
+
+    assert call_id.startswith(f"search:{CLIENT_PHONE}:")
 
 
 async def test_request_reauthenticates_once_on_expired_key_and_retries(pbx_server):
