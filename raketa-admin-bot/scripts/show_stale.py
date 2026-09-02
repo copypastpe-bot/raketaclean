@@ -17,25 +17,15 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from collections import Counter
 from datetime import date, datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
-from adminbot.amo import ids
 from adminbot.amo.client import AmoClient
+from adminbot.amo.stale import (
+    FORGOTTEN_DAYS, PIPELINE_NAMES, age_days, fetch_open_leads, open_stages)
 from adminbot.config import Settings
-
-# Возраст, начиная с которого сделка считается забытой, а не рабочей.
-# Полгода — решение владельца 2026-09-02: заказ такой давности закрыт
-# в жизни, но не в CRM, и новую запись календаря к нему не привязать.
-FORGOTTEN_DAYS = 180
-
-PIPELINE_NAMES = {
-    ids.PIPELINE_PRIMARY: "первичная",
-    ids.PIPELINE_REALIZATION: "реализация",
-}
 
 # Сколько самых старых сделок показать поимённо: список нужен, чтобы владелец
 # мог открыть их в CRM и закрыть, а не просто узнать число.
@@ -48,17 +38,17 @@ async def main() -> int:
                     dry_run=True)                       # только чтение
     today = datetime.now(timezone.utc).date()
     try:
-        stages = await _open_stages(amo)
+        stages = await open_stages(amo)
         if not stages:
             print("Не удалось прочитать воронки amoCRM — проверьте токен.")
             return 1
 
-        leads = await _open_leads(amo, stages)
+        leads = await fetch_open_leads(amo, stages)
         print(f"Незакрытых сделок в рабочих воронках: {len(leads)}\n")
         if not leads:
             return 0
 
-        aged = sorted(((_age_days(lead, today), lead) for lead in leads),
+        aged = sorted(((age_days(lead, today), lead) for lead in leads),
                       key=lambda pair: -(pair[0] or 0))
         _print_buckets(aged)
         _print_by_stage(aged, stages)
@@ -66,51 +56,6 @@ async def main() -> int:
     finally:
         await amo.close()
     return 0
-
-
-async def _open_stages(amo: AmoClient) -> dict[int, tuple[int, str]]:
-    """Незавершающие этапы рабочих воронок: id этапа → (воронка, название).
-
-    Список берём у самой амо, а не из справочника проекта: этапы владелец
-    заводит сам, и незнакомый этап робот всё равно считает открытым.
-    """
-    payload = await amo.get("/api/v4/leads/pipelines")
-    stages: dict[int, tuple[int, str]] = {}
-    for pipeline in ((payload or {}).get("_embedded") or {}).get("pipelines") or []:
-        pipeline_id = int(pipeline.get("id") or 0)
-        if pipeline_id not in PIPELINE_NAMES:
-            continue
-        for status in ((pipeline.get("_embedded") or {}).get("statuses") or []):
-            status_id = int(status.get("id") or 0)
-            if status_id in ids.STATUSES_FINAL:
-                continue
-            stages[status_id] = (pipeline_id, str(status.get("name") or status_id))
-    return stages
-
-
-async def _open_leads(amo: AmoClient, stages: dict[int, tuple[int, str]]) -> list[dict]:
-    """Все сделки на незавершающих этапах. Один запрос на этап — фильтр точный."""
-    leads: list[dict] = []
-    seen: set[int] = set()
-    for status_id, (pipeline_id, _name) in stages.items():
-        params: list[tuple[str, Any]] = [
-            ("filter[statuses][0][pipeline_id]", pipeline_id),
-            ("filter[statuses][0][status_id]", status_id),
-        ]
-        for lead in await amo.get_all("/api/v4/leads", "leads", params=params):
-            lead_id = int(lead.get("id") or 0)
-            if lead_id and lead_id not in seen:
-                seen.add(lead_id)
-                leads.append(lead)
-    return leads
-
-
-def _age_days(lead: dict, today: date) -> Optional[int]:
-    created = lead.get("created_at")
-    if not created:
-        return None
-    day = datetime.fromtimestamp(int(created), tz=timezone.utc).date()
-    return (today - day).days
 
 
 def _print_buckets(aged: list[tuple[Optional[int], dict]]) -> None:

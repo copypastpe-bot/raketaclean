@@ -40,6 +40,10 @@ GCAL_PREVIEW=""
 GCAL_RESET=""
 SHOW_LEADS=""
 SHOW_STALE=""
+CLOSE_STALE=""
+CLOSE_STALE_LIVE=""
+CLOSE_STALE_DAYS=""
+CLOSE_STALE_LIMIT=""
 SHOW_LEAD_IDS=""
 AUTOCALL_EXAM=""
 AUTOCALL=""
@@ -67,6 +71,10 @@ for arg in "$@"; do
         --gcal-reset)     GCAL_RESET=1 ;;
         --leads=*)        SHOW_LEADS="${arg#*=}" ;;
         --stale)          SHOW_STALE=1 ;;
+        --close-stale)       CLOSE_STALE=1 ;;
+        --close-stale-live)  CLOSE_STALE=1; CLOSE_STALE_LIVE=1 ;;
+        --close-stale-days=*)  CLOSE_STALE_DAYS="${arg#*=}" ;;
+        --close-stale-limit=*) CLOSE_STALE_LIMIT="${arg#*=}" ;;
         --lead-ids=*)     SHOW_LEAD_IDS="${arg#*=}" ;;
         --autocall-exam)  AUTOCALL_EXAM=1 ;;
         --autocall-on)        AUTOCALL=1 ;;
@@ -262,6 +270,18 @@ if [ -n "$SHOW_STALE" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.show_stale || true
 fi
 
+# Чистка забытых сделок. Без --close-stale-live только показывает список.
+if [ -n "$CLOSE_STALE" ]; then
+    say "Забытые сделки: $([ -n "$CLOSE_STALE_LIVE" ] && echo 'ЗАКРЫТИЕ' || echo 'просмотр')"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS \
+        CLOSE_STALE_LIVE="${CLOSE_STALE_LIVE:-0}" \
+        CLOSE_STALE_DAYS="$CLOSE_STALE_DAYS" \
+        CLOSE_STALE_LIMIT="$CLOSE_STALE_LIMIT" \
+        "$HOME_DIR/.venv/bin/python" -m scripts.close_stale || true
+fi
+
 # Экзамен фильтра заявок с сайта: читает CRM, ничего не меняет.
 if [ -n "$AUTOCALL_EXAM" ]; then
     say "Экзамен заявок с сайта"
@@ -272,7 +292,7 @@ if [ -n "$AUTOCALL_EXAM" ]; then
 fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
