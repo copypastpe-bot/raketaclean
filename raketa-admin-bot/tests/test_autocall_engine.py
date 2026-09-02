@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import aiohttp
+import pytest
 
 from adminbot.amo import ids
 from adminbot.amo.fields import MOSCOW_TZ
@@ -23,7 +24,8 @@ from adminbot.models import AutocallLead
 from tests.fakes import FakeAmo
 
 PHONE = "9601861067"
-MANAGER_DIAL = "9161234567"
+MANAGER_DIAL = "9161234567"          # рабочий телефон менеджера
+MANAGER_DIAL_PERSONAL = "9169876543"  # личный: туда идёт повтор, если рабочий молчал
 
 
 def msk(*args):
@@ -87,9 +89,10 @@ class FlakyStore:
 
 
 def make_engine(*, store, pbx, amo, dry_run=False, notify_manager=None,
-                notify_owner_rehearsal=None, notify_owner_connected=None):
+                notify_owner_rehearsal=None, notify_owner_connected=None,
+                manager_dials=(MANAGER_DIAL,)):
     return AutocallEngine(
-        pbx=pbx, amo=amo, store=store, manager_dial=MANAGER_DIAL,
+        pbx=pbx, amo=amo, store=store, manager_dials=manager_dials,
         notify_manager=notify_manager, notify_owner_rehearsal=notify_owner_rehearsal,
         notify_owner_connected=notify_owner_connected,
         dry_run=dry_run,
@@ -298,6 +301,103 @@ async def test_manager_unreachable_twice_gives_up_without_touching_amo():
     assert final.next_action_at is None
     assert notified == [(lead_id, "manager_unreachable")]
     assert amo.calls_of("move_lead") == []
+
+
+# --- 5б. Второй телефон менеджера (решение владельца 2026-09-02) ---
+#
+# У админа два телефона — рабочий и личный. Правило владельца: не взял
+# рабочий, значит повтор через 5 минут идёт на личный. Само правило повтора
+# (решение №3) при этом не меняется, меняется только НОМЕР.
+
+
+async def _first_attempt_missed_by_manager(store, pbx, amo, engine, lead_id, now):
+    """Первая попытка, менеджер не взял → цепочка вернулась в очередь."""
+    await store.create(lead_id, phone10=PHONE)
+    link = await store.get(lead_id)
+    await engine.process_due(link, now)
+    calling = await store.get(lead_id)
+    pbx.set_outcome(calling.call_id, Outcome.MANAGER_NO_ANSWER)
+    link2 = await store.get(lead_id)
+    await engine.process_due(link2, now + timedelta(seconds=1))
+    return await store.get(lead_id)
+
+
+async def test_retry_after_manager_miss_goes_to_his_second_phone():
+    """Рабочий не ответил — повтор набирает личный телефон менеджера."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo,
+                         manager_dials=(MANAGER_DIAL, MANAGER_DIAL_PERSONAL))
+    now = msk(2026, 9, 2, 14, 0)
+
+    retried = await _first_attempt_missed_by_manager(store, pbx, amo, engine, 401, now)
+    link = await store.get(401)
+    await engine.process_due(link, retried.next_action_at)
+
+    assert [dial for dial, _ in pbx.calls] == [MANAGER_DIAL, MANAGER_DIAL_PERSONAL]
+
+
+async def test_retry_after_client_miss_stays_on_first_phone():
+    """Клиент не подошёл — менеджер ни при чём, звоним на тот же рабочий."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo,
+                         manager_dials=(MANAGER_DIAL, MANAGER_DIAL_PERSONAL))
+    now = msk(2026, 9, 2, 14, 0)
+    await store.create(402, phone10=PHONE)
+
+    link = await store.get(402)
+    await engine.process_due(link, now)
+    calling = await store.get(402)
+    pbx.set_outcome(calling.call_id, Outcome.CLIENT_NO_ANSWER)
+    link2 = await store.get(402)
+    await engine.process_due(link2, now + timedelta(seconds=1))
+
+    retried = await store.get(402)
+    link3 = await store.get(402)
+    await engine.process_due(link3, retried.next_action_at)
+
+    assert [dial for dial, _ in pbx.calls] == [MANAGER_DIAL, MANAGER_DIAL]
+
+
+async def test_single_phone_setting_keeps_working():
+    """Номер задан один — повтор идёт на него же, без падений."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo, manager_dials=(MANAGER_DIAL,))
+    now = msk(2026, 9, 2, 14, 0)
+
+    retried = await _first_attempt_missed_by_manager(store, pbx, amo, engine, 403, now)
+    link = await store.get(403)
+    await engine.process_due(link, retried.next_action_at)
+
+    assert [dial for dial, _ in pbx.calls] == [MANAGER_DIAL, MANAGER_DIAL]
+
+
+async def test_rehearsal_works_without_manager_phones():
+    """Репетиция живёт и без телефонов: она никому не звонит.
+
+    Служба на сервере крутит автозвонок в репетиции, и настройки АТС там
+    могут быть не заполнены. Падение на старте из-за пустого списка
+    телефонов остановило бы работающую функцию — этого допустить нельзя.
+    """
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo, dry_run=True, manager_dials=())
+    await store.create(404, phone10=PHONE)
+
+    link = await store.get(404)
+    await engine.process_due(link, msk(2026, 9, 2, 14, 0))
+
+    assert pbx.calls == []
+    assert (await store.get(404)).status == "done"
+
+
+async def test_live_call_without_manager_phones_fails_loudly():
+    """А в бою пустой список — ошибка с понятным текстом, а не молчание."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_engine(store=store, pbx=pbx, amo=amo, dry_run=False, manager_dials=())
+    await store.create(405, phone10=PHONE)
+
+    link = await store.get(405)
+    with pytest.raises(ValueError, match="телефон"):
+        await engine.process_due(link, msk(2026, 9, 2, 14, 0))
 
 
 # --- 6. Клиент дважды не взял ---

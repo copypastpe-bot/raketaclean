@@ -72,6 +72,22 @@ def _calendar_ids(name: str, default: str) -> tuple[str, ...]:
     return parse_calendar_ids(os.environ.get(name, "").strip() or default, default)
 
 
+def _manager_dials(name: str) -> tuple[str, ...]:
+    """Телефоны менеджера из строки «через запятую», по порядку и без повторов.
+
+    Порядок значим: первый номер — рабочий, туда идёт первая попытка;
+    следующий — личный, туда уходит повтор после неудачи менеджера. Пустых
+    значений по умолчанию нет: без телефона функция autocall просто не
+    включается (проверка в main.py).
+    """
+    dials: list[str] = []
+    for chunk in os.environ.get(name, "").split(","):
+        value = chunk.strip()
+        if value and value not in dials:
+            dials.append(value)
+    return tuple(dials)
+
+
 def _require(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -201,11 +217,17 @@ class Settings:
     # Окно, когда можно звонить клиенту (часы по Москве): вне окна заявка ждёт.
     autocall_window_from_hour: int = 10
     autocall_window_to_hour: int = 20
-    # АТС: адрес, ключ и внутренний номер (цепочка) менеджера.
+    # АТС: адрес, ключ и телефоны менеджера.
     # Не в REQUIRED_ENV: нужны только при включённой функции autocall.
     pbx_base_url: str = ""
     pbx_api_key: str = ""
-    pbx_manager_dial: str = ""
+    # Телефоны менеджера по порядку: первый — рабочий, второй — личный.
+    # Перечисляются через запятую в PBX_MANAGER_DIAL. Раньше здесь стоял
+    # внутренний номер АТС, и цепочку «не ответил за 10 секунд — звони на
+    # мобильный» строила сама АТС. Так не работает: правила переадресации
+    # применяются только к входящим звонкам, а звонок робота идёт через API
+    # (проверено на стенде 2026-09-02). Поэтому номера ведёт робот.
+    pbx_manager_dials: tuple[str, ...] = ()
     # Токен рабочего бота и чат менеджера: уведомление уходит от имени бота,
     # с которым менеджер уже работает, а не от админ-бота владельца.
     worker_tg_token: str = ""
@@ -266,7 +288,7 @@ class Settings:
             autocall_window_to_hour=_int("AUTOCALL_WINDOW_TO", 20),
             pbx_base_url=os.environ.get("PBX_BASE_URL", "").strip().rstrip("/"),
             pbx_api_key=os.environ.get("PBX_API_KEY", "").strip(),
-            pbx_manager_dial=os.environ.get("PBX_MANAGER_DIAL", "").strip(),
+            pbx_manager_dials=_manager_dials("PBX_MANAGER_DIAL"),
             worker_tg_token=os.environ.get("WORKER_TG_TOKEN", "").strip(),
             manager_tg_chat_id=_int("MANAGER_TG_CHAT_ID", 0),
         )

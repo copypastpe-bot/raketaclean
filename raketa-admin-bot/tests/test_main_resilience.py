@@ -186,7 +186,8 @@ def test_autocall_live_with_pbx_settings_builds_online_pbx():
 
     settings = _autocall_settings(
         autocall_enabled=True, autocall_dry_run=False,
-        pbx_base_url="https://pbx.example", pbx_api_key="key", pbx_manager_dial="100")
+        pbx_base_url="https://pbx.example", pbx_api_key="key",
+        pbx_manager_dials=("89001112233", "89004445566"))
 
     watcher, _manager_bot = _build_autocall(settings, None, None, object(), object())
 
@@ -194,7 +195,8 @@ def test_autocall_live_with_pbx_settings_builds_online_pbx():
     assert isinstance(watcher.engine.pbx, OnlinePbx)
     assert watcher.engine.pbx.base_url == "https://pbx.example"
     assert watcher.engine.pbx.api_key == "key"
-    assert watcher.engine.manager_dial == "100"
+    # Оба телефона менеджера доезжают до движка в заданном порядке.
+    assert watcher.engine.manager_dials == ("89001112233", "89004445566")
 
 
 def test_autocall_bad_window_raises():

@@ -135,7 +135,7 @@ def test_autocall_defaults(monkeypatch):
     assert s.autocall_window_to_hour == 20
     assert s.pbx_base_url == ""
     assert s.pbx_api_key == ""
-    assert s.pbx_manager_dial == ""
+    assert s.pbx_manager_dials == ()
     assert s.worker_tg_token == ""
     assert s.manager_tg_chat_id == 0
 
@@ -163,6 +163,21 @@ def test_autocall_env_overrides(monkeypatch):
     assert s.autocall_window_to_hour == 21
     assert s.pbx_base_url == "https://pbx.example.com"
     assert s.pbx_api_key == "pbx-key"
-    assert s.pbx_manager_dial == "101"
+    assert s.pbx_manager_dials == ("101",)
     assert s.worker_tg_token == "456:def"
     assert s.manager_tg_chat_id == 777
+
+
+def test_pbx_manager_dial_accepts_work_and_personal_phones(monkeypatch):
+    """Два телефона менеджера — через запятую, порядок важен.
+
+    Первый — рабочий, на него идёт первая попытка; второй — личный, туда
+    уходит повтор, если рабочий молчал (решение владельца 2026-09-02).
+    Пробелы вокруг запятой срезаем: в .env их ставят машинально.
+    """
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("PBX_MANAGER_DIAL", "89001112233, 89004445566")
+
+    s = Settings.from_env()
+
+    assert s.pbx_manager_dials == ("89001112233", "89004445566")

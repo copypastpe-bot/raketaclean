@@ -458,7 +458,7 @@ def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
         pbx: Any = MemoryPbx()
     else:
         if not (settings.pbx_base_url and settings.pbx_api_key
-                and settings.pbx_manager_dial):
+                and settings.pbx_manager_dials):
             log.warning("Автозвонок не поднят: не заданы PBX_BASE_URL/PBX_API_KEY/"
                        "PBX_MANAGER_DIAL")
             return None, None
@@ -472,7 +472,7 @@ def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
     amo = rehearsal_amo if settings.autocall_dry_run else live_amo
     manager_sender, manager_bot = _make_autocall_manager_sender(settings, mail, store)
     engine = AutocallEngine(
-        pbx=pbx, amo=amo, store=store, manager_dial=settings.pbx_manager_dial,
+        pbx=pbx, amo=amo, store=store, manager_dials=settings.pbx_manager_dials,
         window_from_hour=settings.autocall_window_from_hour,
         window_to_hour=settings.autocall_window_to_hour,
         notify_manager=manager_sender,

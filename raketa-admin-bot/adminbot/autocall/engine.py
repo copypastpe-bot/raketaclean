@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 import aiohttp
 
@@ -89,7 +89,7 @@ class AutocallEngine:
         pbx: Pbx,
         amo: Any,
         store: AutocallStore,
-        manager_dial: str,
+        manager_dials: Sequence[str],
         window_from_hour: int = 10,
         window_to_hour: int = 20,
         notify_manager: Optional[NotifyManagerFn] = None,
@@ -100,7 +100,9 @@ class AutocallEngine:
         self.pbx = pbx
         self.amo = amo
         self.store = store
-        self.manager_dial = manager_dial
+        # Телефоны менеджера по порядку: первый — рабочий, следующий — личный.
+        # Решение владельца 2026-09-02: не взял рабочий — повтор идёт на личный.
+        self.manager_dials = tuple(manager_dials)
         self.window_from_hour = window_from_hour
         self.window_to_hour = window_to_hour
         self.notify_manager = notify_manager
@@ -218,11 +220,33 @@ class AutocallEngine:
             link.lead_id, status=STATUS_CALLING, called_at=now,
             attempts_total=link.attempts_total + 1, next_action_at=None, call_id=None,
         )
-        call_id = await self.pbx.call_now(to_dial=self.manager_dial, client_phone=link.phone10)
+        call_id = await self.pbx.call_now(
+            to_dial=self._dial_for(link), client_phone=link.phone10,
+        )
         await self.store.update(link.lead_id, call_id=call_id)
         await self.store.log_action(
             link.lead_id, "call_started", dry_run=self.dry_run, payload={"call_id": call_id},
         )
+
+    def _dial_for(self, link: AutocallLead) -> str:
+        """На какой телефон менеджера звонить в этой попытке.
+
+        Счёт идёт по НЕУДАЧАМ менеджера, а не по попыткам вообще: если
+        трубку не взял клиент, менеджер ни при чём — повтор снова идёт на
+        его рабочий номер. Список короче числа неудач (например, телефон
+        задан один) — остаёмся на последнем.
+
+        Пустой список проверяется здесь, а не в конструкторе: репетиция
+        никому не звонит и обязана подниматься даже с незаполненными
+        настройками АТС — иначе правка уронила бы работающую службу.
+        """
+        if not self.manager_dials:
+            raise ValueError(
+                "звонок невозможен: не задан ни один телефон менеджера "
+                "(PBX_MANAGER_DIAL)"
+            )
+        index = min(link.manager_failures, len(self.manager_dials) - 1)
+        return self.manager_dials[index]
 
     # --- статус "calling" ---
 
