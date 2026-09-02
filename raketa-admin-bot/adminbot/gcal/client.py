@@ -130,6 +130,23 @@ class GoogleCalendar:
             events, token = await self._collect(sync_token=None, sync_from=sync_from)
             return SyncBatch(events=tuple(events), sync_token=token, full_resync=True)
 
+    async def get_event(self, event_id: str) -> Optional[dict]:
+        """Одна запись по идентификатору. `None` — в этом календаре её нет.
+
+        Нужна, чтобы отличить переезд записи от отмены заказа: в обмене Google
+        и то и другое выглядит одинаково — `status: cancelled` в том календаре,
+        откуда запись ушла. Спросив соседний календарь, робот видит разницу.
+
+        Сбой связи наружу как исключение: молчаливое «нет» здесь означало бы
+        закрытую сделку по живому заказу.
+        """
+        url = (f"{self.base_url}/calendar/v3/calendars/"
+               f"{quote(self.calendar_id, safe='')}/events/{quote(event_id, safe='')}")
+        payload = await self._request([], url=url, none_on_404=True)
+        if payload is None or payload.get("status") == "cancelled":
+            return None
+        return payload
+
     async def _collect(self, *, sync_token: Optional[str],
                        sync_from: date) -> tuple[list[dict], Optional[str]]:
         events: list[dict] = []
@@ -137,7 +154,9 @@ class GoogleCalendar:
         next_sync_token: Optional[str] = None
 
         for _ in range(MAX_PAGES):
-            payload = await self._request(self._params(sync_token, sync_from, page_token))
+            # None приходит только при none_on_404, а здесь его не просят.
+            payload = await self._request(
+                self._params(sync_token, sync_from, page_token)) or {}
             events.extend(payload.get("items") or [])
 
             next_sync_token = payload.get("nextSyncToken")
@@ -170,11 +189,18 @@ class GoogleCalendar:
             params.append(("pageToken", page_token))
         return params
 
-    async def _request(self, params: list[tuple[str, str]]) -> dict:
-        """Один запрос с ретраями. Сбой — исключение, а не пустой список."""
+    async def _request(self, params: list[tuple[str, str]], *,
+                       url: Optional[str] = None,
+                       none_on_404: bool = False) -> Optional[dict]:
+        """Один запрос с ретраями. Сбой — исключение, а не пустой список.
+
+        `none_on_404` для запроса конкретной записи: «её здесь нет» — это ответ,
+        а не сбой, и повторять его незачем.
+        """
         session = await self._ensure_session()
-        url = (f"{self.base_url}/calendar/v3/calendars/"
-               f"{quote(self.calendar_id, safe='')}/events")
+        if url is None:
+            url = (f"{self.base_url}/calendar/v3/calendars/"
+                   f"{quote(self.calendar_id, safe='')}/events")
         headers = {"Authorization": f"Bearer {await self._token()}",
                    "Accept": "application/json"}
         last_error: Optional[Exception] = None
@@ -189,6 +215,8 @@ class GoogleCalendar:
                         raise GCalAuthError(resp.status, await resp.text())
                     if resp.status == 410:
                         raise GCalError(410, await resp.text())
+                    if resp.status == 404 and none_on_404:
+                        return None
                     if resp.status >= 400:
                         last_error = GCalError(resp.status, await resp.text())
                     else:

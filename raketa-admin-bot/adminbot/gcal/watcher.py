@@ -177,6 +177,15 @@ class CalendarWatcher:
         known = 0
         for raw in batch.events:
             parsed = parse_event(raw)
+            if parsed.kind is EventKind.CANCELLED:
+                # Владелец завёл заказ не в тот календарь и перенёс его в нужный:
+                # для покинутого календаря это неотличимо от удаления. Прежде чем
+                # закрывать заказ, спрашиваем соседей — вдруг запись просто уехала.
+                moved = await self._moved_elsewhere(parsed.event_id, source=calendar_id)
+                if moved is not None:
+                    log.info("Календарь %s: запись %s переехала в другой календарь — "
+                             "это не отмена", calendar_id, parsed.event_id)
+                    parsed = parse_event(moved)
             handled.add(parsed.event_id)
             if parsed.unknown_district and parsed.unknown_district not in unknown:
                 unknown.append(parsed.unknown_district)
@@ -214,6 +223,22 @@ class CalendarWatcher:
         return QUICK_RETRY_SEC if unfinished else self.poll_interval_sec
 
     # --- внутреннее ---
+
+    async def _moved_elsewhere(self, event_id: str, *, source: str) -> Optional[dict]:
+        """Лежит ли исчезнувшая запись в другом календаре. `None` — нигде нет.
+
+        Сбой связи наружу не глушим: объявить отмену на молчании соседа значит
+        закрыть сделку по живому заказу, а это не откатишь. Исключение прерывает
+        обмен по этому календарю, закладка не двигается, и Google пришлёт
+        удаление ещё раз следующим проходом.
+        """
+        for calendar in self.calendars:
+            if calendar.calendar_id == source:
+                continue
+            found = await calendar.get_event(event_id)
+            if found is not None:
+                return found
+        return None
 
     async def _remember_known(self, parsed: ParsedEvent) -> None:
         """Запись была в календаре до включения — только помним о ней.

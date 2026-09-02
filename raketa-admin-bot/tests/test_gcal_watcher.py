@@ -34,14 +34,24 @@ DELETED = {"id": "evt-1", "status": "cancelled"}
 class FakeCalendar:
     """Google в памяти: отдаёт заготовленные пачки изменений."""
 
-    def __init__(self, *batches, calendar_id="main@gmail.com"):
+    def __init__(self, *batches, calendar_id="main@gmail.com", holds=(), broken_lookup=False):
         self.calendar_id = calendar_id
         self.batches = list(batches)
         self.calls: list[tuple] = []
+        # Что лежит в этом календаре прямо сейчас — ответ на поиск записи по id.
+        self.holds = {raw["id"]: raw for raw in holds}
+        self.broken_lookup = broken_lookup
+        self.lookups: list[str] = []
 
     async def fetch(self, *, sync_token, sync_from):
         self.calls.append((sync_token, sync_from))
         return self.batches.pop(0) if self.batches else SyncBatch((), sync_token)
+
+    async def get_event(self, event_id):
+        self.lookups.append(event_id)
+        if self.broken_lookup:
+            raise RuntimeError("Google недоступен")
+        return self.holds.get(event_id)
 
 
 class FakeEngine:
@@ -487,3 +497,75 @@ async def test_the_mark_is_set_only_after_telegram_took_the_message():
 
     assert sent == ["evt-1", "evt-1"]
     assert (await store.get("evt-1")).done_msg_id == 999
+
+
+# --- переезд записи между календарями (сценарий владельца 2026-09-02) ---
+
+async def test_moved_event_is_not_a_cancellation():
+    """Владелец завёл заказ не в тот календарь и перенёс его в правильный.
+
+    Для старого календаря это выглядит как удаление, и до этой правки робот
+    закрывал заказ как отменённый. Теперь он сначала спрашивает соседний
+    календарь — запись там, значит это переезд, а не отмена.
+    """
+    store = MemoryCalendarStore()
+    engine = FakeEngine()
+    main = FakeCalendar(SyncBatch((), "M1"), SyncBatch((DELETED,), "M2"))
+    brigade = FakeCalendar(SyncBatch((), "B1"), SyncBatch((), "B2"),
+                           calendar_id=BRIGADE, holds=(ORDER,))
+    watcher = build(main, brigade, engine=engine, store=store)
+
+    await watcher.tick()
+    await watcher.tick()
+
+    assert [event.kind.value for event in engine.seen] == ["order"]   # не «cancelled»
+    assert brigade.lookups == ["evt-1"]
+
+
+async def test_event_deleted_everywhere_is_still_a_cancellation():
+    """Запись удалили по-настоящему: соседний календарь её тоже не знает."""
+    store = MemoryCalendarStore()
+    engine = FakeEngine()
+    main = FakeCalendar(SyncBatch((), "M1"), SyncBatch((DELETED,), "M2"))
+    brigade = FakeCalendar(SyncBatch((), "B1"), SyncBatch((), "B2"), calendar_id=BRIGADE)
+    watcher = build(main, brigade, engine=engine, store=store)
+
+    await watcher.tick()
+    await watcher.tick()
+
+    assert [event.kind.value for event in engine.seen] == ["cancelled"]
+
+
+async def test_single_calendar_asks_nobody():
+    """Пока календарь один, переезжать записи некуда — лишних запросов нет."""
+    store = MemoryCalendarStore()
+    engine = FakeEngine()
+    main = FakeCalendar(SyncBatch((), "M1"), SyncBatch((DELETED,), "M2"))
+    watcher = build(main, engine=engine, store=store)
+
+    await watcher.tick()
+    await watcher.tick()
+
+    assert main.lookups == []
+    assert [event.kind.value for event in engine.seen] == ["cancelled"]
+
+
+async def test_lookup_failure_does_not_declare_a_cancellation():
+    """Сосед не ответил — молчим до следующего прохода.
+
+    Объявить отмену на сбое связи значит закрыть сделку по живому заказу,
+    а это не откатишь. Закладка не двигается, изменение придёт снова.
+    """
+    store = MemoryCalendarStore()
+    engine = FakeEngine()
+    main = FakeCalendar(SyncBatch((), "M1"), SyncBatch((DELETED,), "M2"))
+    brigade = FakeCalendar(SyncBatch((), "B1"), SyncBatch((), "B2"),
+                           calendar_id=BRIGADE, broken_lookup=True)
+    watcher = build(main, brigade, engine=engine, store=store)
+
+    await watcher.tick()
+    report = await watcher.tick()
+
+    assert engine.seen == []                              # ничего не отменяли
+    assert await store.cursor(MAIN) == ("M1", SYNC_FROM)  # закладка на месте
+    assert [name for name, _ in report.calendars_failed] == [MAIN]
