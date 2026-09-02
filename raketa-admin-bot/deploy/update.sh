@@ -39,6 +39,7 @@ GCAL_RUN=""
 GCAL_PREVIEW=""
 GCAL_RESET=""
 SHOW_LEADS=""
+SHOW_STALE=""
 SHOW_LEAD_IDS=""
 AUTOCALL_EXAM=""
 AUTOCALL=""
@@ -65,6 +66,7 @@ for arg in "$@"; do
         --gcal-preview)   GCAL_PREVIEW=1 ;;
         --gcal-reset)     GCAL_RESET=1 ;;
         --leads=*)        SHOW_LEADS="${arg#*=}" ;;
+        --stale)          SHOW_STALE=1 ;;
         --lead-ids=*)     SHOW_LEAD_IDS="${arg#*=}" ;;
         --autocall-exam)  AUTOCALL_EXAM=1 ;;
         --autocall-on)        AUTOCALL=1 ;;
@@ -251,6 +253,15 @@ if [ -n "$SHOW_LEADS" ] || [ -n "$SHOW_LEAD_IDS" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.show_leads || true
 fi
 
+# Сколько в CRM висит незакрытых сделок и какого они возраста. Только чтение.
+if [ -n "$SHOW_STALE" ]; then
+    say "Незакрытые сделки в CRM"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS \
+        "$HOME_DIR/.venv/bin/python" -m scripts.show_stale || true
+fi
+
 # Экзамен фильтра заявок с сайта: читает CRM, ничего не меняет.
 if [ -n "$AUTOCALL_EXAM" ]; then
     say "Экзамен заявок с сайта"
@@ -261,7 +272,7 @@ if [ -n "$AUTOCALL_EXAM" ]; then
 fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
