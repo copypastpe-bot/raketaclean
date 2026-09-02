@@ -18,6 +18,13 @@ docs/plans/2026-08-31-autocall-implementation.md).
   --test-call НОМЕР         тестовый звонок: from=PBX_MANAGER_DIAL, to=НОМЕР
                             (номер — как ввели, без преобразований: формат
                             «to» в call/now.json не разведан, это и проверяем)
+  --from НОМЕР              кому звонить первым вместо PBX_MANAGER_DIAL:
+                            внутренний номер или мобильный менеджера. Нужно
+                            потому, что правила «номер при недоступности»
+                            (переадресация 100 → мобильные) на звонки через
+                            API не распространяются — проверено на стенде
+                            2026-09-02, 4 прогона: цепочка не поднялась ни
+                            разу, звонило только приложение
   --outcome CALL_ID --called-at UNIX
                             разбор исхода уже отданного звонка
 
@@ -97,18 +104,31 @@ async def test_call(pbx: OnlinePbx, manager_dial: str, phone: str) -> int:
     """Тестовый звонок: печатает сырой ответ call/now.json — формат не разведан."""
     if not manager_dial:
         raise SystemExit("PBX_MANAGER_DIAL не задан — не знаю, с какого номера звонить")
-    print(f"Запускаю тестовый звонок: менеджер({manager_dial}) → {mask(phone)}…")
+    print(f"Запускаю тестовый звонок: менеджер({_dial_label(manager_dial)}) → {mask(phone)}…")
     payload = await pbx._request(
         "/call/now.json", json_body={"from": manager_dial, "to": phone},
     )
-    print("Сырой ответ call/now.json (телефон в тексте маскирован):")
-    print(_masked_repr(payload, phone))
+    print("Сырой ответ call/now.json (телефоны в тексте маскированы):")
+    print(_masked_repr(payload, phone, manager_dial))
     return 0
 
 
-def _masked_repr(payload: Any, phone: str) -> str:
+def _dial_label(dial: str) -> str:
+    """Внутренний номер печатаем как есть, мобильный — под маской.
+
+    `mask("100")` вернул бы «…» и стенд перестал бы показывать, кому звонили;
+    ПД в коротком внутреннем номере нет, а в мобильном менеджера — есть.
+    """
+    digits = "".join(ch for ch in dial if ch.isdigit())
+    return mask(dial) if len(digits) >= 7 else dial
+
+
+def _masked_repr(payload: Any, *phones: str) -> str:
     text = repr(payload)
-    return text.replace(phone, mask(phone)) if phone and phone in text else text
+    for phone in phones:
+        if phone and phone in text:
+            text = text.replace(phone, mask(phone))
+    return text
 
 
 async def outcome_check(pbx: OnlinePbx, call_id: str, called_at_unix: int) -> int:
@@ -143,6 +163,9 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--test-call", metavar="НОМЕР",
                        help="тестовый звонок: from=PBX_MANAGER_DIAL, to=НОМЕР")
     group.add_argument("--outcome", metavar="CALL_ID", help="разбор исхода по call_id")
+    parser.add_argument("--from", dest="from_number", metavar="НОМЕР",
+                        help="кому звонить первым вместо PBX_MANAGER_DIAL "
+                             "(внутренний номер или мобильный менеджера)")
     parser.add_argument("--called-at", type=int, metavar="UNIX",
                         help="unix-время команды АТС (обязательно вместе с --outcome)")
     return parser.parse_args()
@@ -154,6 +177,8 @@ async def _main() -> int:
         raise SystemExit("--outcome требует --called-at UNIX")
 
     base_url, api_key, manager_dial = _settings()
+    if args.from_number:
+        manager_dial = args.from_number.strip()
     pbx = OnlinePbx(base_url=base_url, api_key=api_key)
     try:
         if args.auth_check:
