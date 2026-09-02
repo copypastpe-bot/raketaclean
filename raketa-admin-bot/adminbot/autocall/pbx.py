@@ -315,25 +315,28 @@ def outcome_from_history(
     встречается в разных форматах (79…/89…/+79…), поэтому сравниваем только
     по хвосту.
 
-    - Совпадений нет → None. Это НЕ всегда «подождать ещё»: если менеджер не
-      взял трубку, АТС, скорее всего, вообще не набирает клиента — записи по
-      клиенту тогда не будет НИКОГДА. В обоих случаях (звонок ещё идёт /
-      менеджер не взял) правильный ответ здесь один — None: движок сам
-      досчитает секунды до CALL_OUTCOME_TIMEOUT_SEC и отдаст машине переходов
-      Outcome.UNKNOWN, а chain.py обработает его как неудачу менеджера — то
-      есть ровно то, что нужно. Эта функция НИКОГДА не возвращает
-      Outcome.MANAGER_NO_ANSWER напрямую.
-    - Запись есть и `user_talk_time > 0` → CONNECTED (разговор состоялся).
-    - Запись есть, `user_talk_time == 0`, звонок завершён (виден `end_stamp`
-      или `hangup_cause`) → CLIENT_NO_ANSWER (до клиента дозвонились, трубку
-      не взял).
-    - Запись есть, но `user_talk_time == 0` и признаков завершения ещё нет →
-      None (попытка ещё идёт, спросим на следующем тике).
+    Правила откалиброваны на живых записях боевой АТС (стенд с владельцем
+    2026-09-02, по одному прогону на исход):
 
-    TODO(Задача 12, шаг 2 плана): точную калибровку исходов даст стенд с
-    владельцем на реальных записях истории — сегодняшние условия основаны на
-    разведанных полях API, не на живых образцах. Менять разбор только внутри
-    этой функции — она единственный источник правды об исходах.
+    - Совпадений нет → None: истории по попытке пока нет, движок спросит
+      позже. Если она не появится вовсе, движок сам досчитает секунды до
+      CALL_OUTCOME_TIMEOUT_SEC и отдаст машине переходов Outcome.UNKNOWN.
+    - `contacted: true` (или `user_talk_time > 0`) → CONNECTED. Главный
+      признак — именно `contacted`: время разговора равно нулю в ДВУХ
+      исходах из трёх, потому что АТС считает разговор только после того,
+      как соединились обе стороны.
+    - Звонок ещё не завершён (нет ни `end_stamp`, ни `hangup_cause`) → None.
+    - Завершён без соединения, но событие «перевод» на телефон клиента есть
+      → CLIENT_NO_ANSWER: менеджер трубку взял, до клиента дозванивались, он
+      не подошёл (образец стенда: `NO_USER_RESPONSE`, 73 секунды).
+    - Завершён без соединения и без события перевода → MANAGER_NO_ANSWER:
+      менеджер не взял, АТС клиента даже не набирала (образец стенда:
+      `NO_ANSWER`, 60 секунд, события пустые).
+
+    Последняя ветка — смена поведения: раньше функция такого исхода не
+    возвращала вовсе, и «менеджер не взял» приходил к машине переходов как
+    CLIENT_NO_ANSWER — то есть виноватым оказывался клиент, а сделка после
+    второго раза уезжала на этап «Не было первого контакта».
     """
     matched: list[Mapping[str, Any]] = []
     for record in records:
@@ -349,11 +352,41 @@ def outcome_from_history(
         return None
 
     record = matched[0]
-    if _as_int(record.get("user_talk_time")) > 0:
+    if _is_true(record.get("contacted")) or _as_int(record.get("user_talk_time")) > 0:
         return Outcome.CONNECTED
-    if record.get("end_stamp") or record.get("hangup_cause"):
+    if not (record.get("end_stamp") or record.get("hangup_cause")):
+        return None
+    if _client_was_dialled(record):
         return Outcome.CLIENT_NO_ANSWER
-    return None
+    return Outcome.MANAGER_NO_ANSWER
+
+
+def _client_was_dialled(record: Mapping[str, Any]) -> bool:
+    """Есть ли в событиях записи перевод на телефон клиента.
+
+    Телефон клиента берём из самой записи (`destination_number`), а не из
+    аргументов: так признак работает одинаково и когда попытку нашли по
+    телефону, и когда по боевому uuid.
+    """
+    wanted = _last10_digits(str(record.get("destination_number") or ""))
+    if len(wanted) != 10:
+        return False
+    events = record.get("events")
+    if not isinstance(events, list):
+        return False
+    for event in events:
+        if not isinstance(event, Mapping) or event.get("type") != "transfer":
+            continue
+        if _last10_digits(str(event.get("number") or "")) == wanted:
+            return True
+    return False
+
+
+def _is_true(value: Any) -> bool:
+    """`contacted` приходит булевым, но строку "true"/"1" тоже понимаем."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1")
 
 
 def _matches_phone(record: Mapping[str, Any], client_phone: str) -> bool:

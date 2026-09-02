@@ -107,14 +107,103 @@ def test_outcome_from_history_connected_when_talk_time_positive():
     assert outcome_from_history(records, client_phone=CLIENT_PHONE) is Outcome.CONNECTED
 
 
-def test_outcome_from_history_client_no_answer_when_ended_without_talk():
-    """Звонок завершился, но разговора не было — клиент не взял трубку."""
-    records = [{
-        "uuid": "u1", "destination_number": "89007001122",
-        "user_talk_time": 0, "duration": 20, "end_stamp": 1700000100,
+# Тест «завершился без разговора → клиент не взял» отсюда убран намеренно:
+# он описывал прежнее правило, которое стенд 2026-09-02 опроверг. Такая
+# запись (звонок закончен, событий нет) означает, что трубку не взял
+# МЕНЕДЖЕР. Оба исхода теперь проверяются на образцах стенда ниже.
+
+
+# --- Образцы стенда 2026-09-02: робот звонит менеджеру на мобильный ---
+#
+# Три записи истории, снятые с боевой АТС в один день, по одной на исход.
+# Схема звонка сменилась: раньше робот поднимал внутренний номер менеджера
+# и рассчитывал на переадресацию «не ответил за 10 секунд — звони на
+# мобильный», но правила переадресации к звонкам через API не применяются
+# (проверено: 4 прогона, цепочка не поднялась ни разу). Теперь АТС набирает
+# мобильный менеджера сразу, и поля истории стали другими: время разговора
+# больше не ноль при успехе, а «менеджер не взял» и «клиент не взял»
+# различаются наличием события перевода на телефон клиента.
+
+MANAGER_MOBILE = "79001112233"   # вымышленный «рабочий телефон менеджера»
+
+
+def _stand_record(**overrides):
+    """Запись истории по образцу стенда; overrides меняют нужные поля."""
+    record = {
+        "uuid": "u1",
+        "caller_id_number": MANAGER_MOBILE,
+        "destination_number": "79007001122",
+        "duration": 60,
+        "user_talk_time": 0,
         "hangup_cause": "NO_ANSWER",
-    }]
-    assert outcome_from_history(records, client_phone=CLIENT_PHONE) is Outcome.CLIENT_NO_ANSWER
+        "contacted": False,
+        "end_stamp": 1700000100,
+        "events": [],
+    }
+    record.update(overrides)
+    return record
+
+
+def test_outcome_from_history_connected_by_contacted_flag():
+    """Прогон А стенда: разговор состоялся — 131 секунда, contacted=true."""
+    records = [_stand_record(
+        duration=150, user_talk_time=131, hangup_cause="NORMAL_CLEARING",
+        contacted=True,
+        events=[{"type": "transfer", "timestamp": 1700000060, "number": "79007001122"}],
+    )]
+    assert outcome_from_history(records, client_phone=CLIENT_PHONE) is Outcome.CONNECTED
+
+
+def test_outcome_from_history_connected_even_if_talk_time_field_missing():
+    """Признак успеха — contacted, а не время разговора.
+
+    Время разговора равно нулю в двух исходах из трёх (стенд 2026-09-02),
+    поэтому опираться на него нельзя. Если АТС однажды не отдаст поле
+    вовсе, `contacted: true` всё равно означает «поговорили».
+    """
+    records = [_stand_record(
+        duration=150, hangup_cause="NORMAL_CLEARING", contacted=True,
+        events=[{"type": "transfer", "timestamp": 1700000060, "number": "79007001122"}],
+    )]
+    records[0].pop("user_talk_time")
+    assert outcome_from_history(records, client_phone=CLIENT_PHONE) is Outcome.CONNECTED
+
+
+def test_outcome_from_history_manager_no_answer_when_client_was_never_dialled():
+    """Прогон Б стенда: менеджер не взял — АТС до клиента не дошла.
+
+    Признак — пустой список событий: перевода на телефон клиента не было.
+    Раньше эта функция такого исхода не возвращала вовсе, и движок ждал
+    пять минут таймаута, чтобы отдать UNKNOWN. Теперь ответ известен сразу.
+    """
+    records = [_stand_record()]
+    assert (
+        outcome_from_history(records, client_phone=CLIENT_PHONE)
+        is Outcome.MANAGER_NO_ANSWER
+    )
+
+
+def test_outcome_from_history_client_no_answer_when_transfer_happened():
+    """Прогон В стенда: менеджер взял, клиент не подошёл.
+
+    Время разговора здесь тоже ноль — АТС считает разговор только после
+    того, как соединились ОБЕ стороны. Отличает исход событие перевода
+    на телефон клиента: оно есть, значит до клиента дозванивались.
+    """
+    records = [_stand_record(
+        duration=73, hangup_cause="NO_USER_RESPONSE",
+        events=[{"type": "transfer", "timestamp": 1700000060, "number": "79007001122"}],
+    )]
+    assert (
+        outcome_from_history(records, client_phone=CLIENT_PHONE)
+        is Outcome.CLIENT_NO_ANSWER
+    )
+
+
+def test_outcome_from_history_none_while_stand_call_not_finished_yet():
+    """Звонок ещё идёт: ни end_stamp, ни hangup_cause — исхода пока нет."""
+    records = [_stand_record(end_stamp=None, hangup_cause=None)]
+    assert outcome_from_history(records, client_phone=CLIENT_PHONE) is None
 
 
 def test_outcome_from_history_none_for_empty_history():
@@ -132,10 +221,10 @@ def test_outcome_from_history_none_while_call_still_in_progress():
 
 
 def test_outcome_from_history_none_when_no_record_matches_client():
-    """Менеджер не взял трубку — АТС клиента вообще не набрала, записи нет.
+    """Записи по этой попытке в истории пока нет — исхода тоже нет.
 
-    Движок сам досчитает таймаут и отдаст Outcome.UNKNOWN — эта функция
-    никогда не возвращает MANAGER_NO_ANSWER напрямую (см. докстрину pbx.py).
+    Движок спросит на следующем тике, а если история так и не появится —
+    сам досчитает таймаут и отдаст машине переходов Outcome.UNKNOWN.
     """
     records = [{"destination_number": "79001110000", "user_talk_time": 50}]
     assert outcome_from_history(records, client_phone=CLIENT_PHONE) is None
@@ -328,8 +417,12 @@ async def test_call_outcome_by_uuid_call_id(pbx_server):
     fake.stub("/auth.json", {"status": "1", "data": {"key_id": "k1", "key": "s1"}})
     fake.stub("/mongo_history/search.json", {
         "status": "1",
+        # Запись по образцу стенда: менеджер взял (есть перевод на телефон
+        # клиента), клиент не подошёл — разговора нет.
         "data": [{"uuid": "abc-123", "destination_number": "70000000000",
-                  "user_talk_time": 0, "end_stamp": 1700000100}],
+                  "user_talk_time": 0, "end_stamp": 1700000100,
+                  "hangup_cause": "NO_USER_RESPONSE", "contacted": False,
+                  "events": [{"type": "transfer", "number": "70000000000"}]}],
     })
 
     outcome = await client.call_outcome("abc-123", called_at=NOW)
