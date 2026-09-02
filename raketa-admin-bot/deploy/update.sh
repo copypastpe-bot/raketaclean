@@ -44,6 +44,7 @@ CLOSE_STALE=""
 CLOSE_STALE_LIVE=""
 CLOSE_STALE_DAYS=""
 CLOSE_STALE_LIMIT=""
+CLOSE_STALE_SUCCESS_FROM=""
 SHOW_LEAD_IDS=""
 AUTOCALL_EXAM=""
 AUTOCALL=""
@@ -75,6 +76,7 @@ for arg in "$@"; do
         --close-stale-live)  CLOSE_STALE=1; CLOSE_STALE_LIVE=1 ;;
         --close-stale-days=*)  CLOSE_STALE_DAYS="${arg#*=}" ;;
         --close-stale-limit=*) CLOSE_STALE_LIMIT="${arg#*=}" ;;
+        --close-stale-success-from=*) CLOSE_STALE_SUCCESS_FROM="${arg#*=}" ;;
         --lead-ids=*)     SHOW_LEAD_IDS="${arg#*=}" ;;
         --autocall-exam)  AUTOCALL_EXAM=1 ;;
         --autocall-on)        AUTOCALL=1 ;;
@@ -279,6 +281,7 @@ if [ -n "$CLOSE_STALE" ]; then
         CLOSE_STALE_LIVE="${CLOSE_STALE_LIVE:-0}" \
         CLOSE_STALE_DAYS="$CLOSE_STALE_DAYS" \
         CLOSE_STALE_LIMIT="$CLOSE_STALE_LIMIT" \
+        CLOSE_STALE_SUCCESS_FROM="$CLOSE_STALE_SUCCESS_FROM" \
         "$HOME_DIR/.venv/bin/python" -m scripts.close_stale || true
 fi
 

@@ -173,6 +173,55 @@ async def test_closing_moves_to_the_final_status_and_leaves_a_note(closer):
     assert "вручную" in note                            # что делать, если ошиблись
 
 
+def test_the_year_decides_the_final_status():
+    """Заведённые с 2025 года — успех, всё что раньше — «не реализовано».
+
+    Владелец посмотрел карточки за разные годы: ранние — брошенные
+    договорённости, поздние — выполненные работы, которые не довели в CRM.
+    """
+    from scripts.close_stale import target_status
+
+    border = date(2025, 1, 1)
+
+    assert target_status(a_lead(1, date(2024, 12, 31)), border) == ids.STATUS_CLOSED
+    assert target_status(a_lead(2, date(2025, 1, 1)), border) == ids.STATUS_SUCCESS
+    assert target_status(a_lead(3, date(2025, 8, 17)), border) == ids.STATUS_SUCCESS
+
+
+def test_without_a_border_nothing_goes_into_revenue():
+    """Границы не задали — закрываем как несостоявшиеся.
+
+    Записать чужую работу в выручку по умолчанию нельзя: это тихо исказило бы
+    отчётность, а тихих искажений денег в проекте быть не должно.
+    """
+    from scripts.close_stale import target_status
+
+    assert target_status(a_lead(1, date(2025, 8, 17)), None) == ids.STATUS_CLOSED
+
+
+def test_a_lead_without_a_date_never_counts_as_revenue():
+    """Дата неизвестна — в выручку не пишем, даже если граница задана."""
+    from scripts.close_stale import target_status
+
+    assert target_status(a_lead(1), date(2025, 1, 1)) == ids.STATUS_CLOSED
+
+
+async def test_a_deal_after_the_border_is_marked_as_done(closer):
+    """Успешная — своё примечание: «работа считается выполненной»."""
+    from tests.fakes import FakeAmo
+
+    amo = FakeAmo()
+
+    closed, failed = await closer(amo, [a_lead(7, date(2025, 6, 27))], TODAY,
+                                  date(2025, 1, 1))
+
+    assert (closed, failed) == (1, 0)
+    assert amo.calls_of("move_lead") == [
+        (7, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)]
+    _lead_id, note = amo.calls_of("add_note")[0]
+    assert "выполненной" in note
+
+
 async def test_one_failure_does_not_stop_the_rest(closer):
     """Амо ответила ошибкой по одной сделке — остальные всё равно закрываем."""
     from adminbot.amo.client import AmoError
