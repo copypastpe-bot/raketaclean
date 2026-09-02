@@ -17,6 +17,20 @@ from adminbot.amo.client import ROBOT_TASK_RESULT, AmoError, Intent
 from adminbot.models import AmoLink
 
 
+def _remember_fields(entity: dict, custom_fields: Any) -> None:
+    """Записанные поля должны читаться обратно — как в настоящей амо.
+
+    Робот сначала смотрит, что в сделке уже стоит, и только потом решает, писать
+    ли туда. Двойник, который забывает свои же записи, показывал бы «поле пустое»
+    вечно, и правило «заполненное не трогаем» в тестах не проверялось бы вовсе.
+    """
+    stored = {field["field_id"]: field
+              for field in entity.get("custom_fields_values") or []}
+    for field in custom_fields:
+        stored[field["field_id"]] = dict(field)
+    entity["custom_fields_values"] = list(stored.values())
+
+
 class FakeAmo:
     """amoCRM в памяти: помнит, что у неё просили и что в ней меняли."""
 
@@ -60,7 +74,10 @@ class FakeAmo:
         self._maybe_fail("update_lead")
         self.calls.append(("update_lead", (lead_id, payload)))
         if not self.dry_run:
-            self.leads.setdefault(lead_id, {"id": lead_id}).update(payload)
+            lead = self.leads.setdefault(lead_id, {"id": lead_id})
+            lead.update({key: value for key, value in payload.items()
+                         if key != "custom_fields"})
+            _remember_fields(lead, payload.get("custom_fields") or [])
         return Intent(action="update_lead", entity="lead", entity_id=lead_id,
                       payload=payload, performed=not self.dry_run)
 
@@ -84,6 +101,7 @@ class FakeAmo:
                 "id": new_id, "pipeline_id": fields["pipeline_id"],
                 "status_id": fields["status_id"], "name": fields.get("name"),
             }
+            _remember_fields(self.leads[new_id], fields.get("custom_fields") or [])
         return Intent(action="create_lead", entity="lead", entity_id=new_id,
                       payload=fields, performed=not self.dry_run)
 

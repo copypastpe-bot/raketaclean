@@ -12,19 +12,20 @@
   автозадачу «Назначь мастера» не закрывает — это работа владельца.
 - **Бюджет не трогаем.** Сумма чека появится только когда мастер закроет заказ
   в боте; движок amo_sync тогда её и проставит.
-- **Заполненное не переписываем — кроме адреса и комментария.** Правки владельца
-  в CRM важнее догадок робота, но эти два поля живут в календаре: амо подставляет
-  в сделку адрес из карточки клиента (адрес прошлого заказа), а в комментарии лида
-  часто стоит огрызок от заявки. Состав заказа и куда ехать мастеру владелец пишет
-  в записи (его решение 2026-08-27). Дату при переносе робот по-прежнему не правит
-  (решение 5): фактическую впишет заказ из бота.
+- **Заполненное не переписываем — кроме адреса, комментария и дня работы.** Правки
+  владельца в CRM важнее догадок робота, но эти поля живут в календаре: амо
+  подставляет в сделку адрес из карточки клиента (адрес прошлого заказа), а в
+  комментарии лида часто стоит огрызок от заявки. Состав заказа и куда ехать
+  мастеру владелец пишет в записи (его решение 2026-08-27), день работы — тоже
+  (решение 2026-09-02, отменяет прежнее решение 5). Переносом считается смена
+  дня: время внутри дня владелец ставит в CRM сам, и робот его не трогает.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any, Callable, Optional
 
 from adminbot.amo import ids
@@ -74,6 +75,10 @@ CHANGEABLE_FIELDS: tuple[tuple[str, str], ...] = (
     ("comment", "комментарий"),
     ("services", "услуга"),
     ("district", "район"),
+    # Перенос заказа на другой день — тоже правка записи (решение владельца
+    # 2026-09-02). Раньше его здесь не было, и сделка молча оставалась со старым
+    # днём: ни поля не менялись, ни владельцу об этом не говорили.
+    ("order_date", "дата"),
 )
 
 
@@ -469,9 +474,13 @@ class CalendarEngine:
         """
         fields: list[dict] = []
 
-        # «Дата и время заказа». При переносе записи НЕ правим (решение 5):
-        # фактическую дату впишет заказ из бота после выполнения.
-        if event.order_date and not field_value(existing, ids.FIELD_ORDER_DATETIME):
+        # «Дата и время заказа» — третье исключение из правила «заполненное не
+        # трогаем» (решение владельца 2026-09-02, отменяет прежнее решение 5).
+        # Клиент переносит и отменяет заказы, и сделка должна показывать тот день,
+        # на который он записан сейчас, а не тот, на который записывались сперва.
+        # Сравниваем по ДНЮ: время внутри дня владелец ставит в CRM сам, в записи
+        # календаря стоит начало работы — переписывать его нечем и незачем.
+        if event.order_date and order_date_msk(existing) != event.order_date:
             moment = event.start_at or datetime.combine(
                 event.order_date, time(hour=12), tzinfo=MOSCOW_TZ)
             fields.append(datetime_field(ids.FIELD_ORDER_DATETIME, moment))
@@ -566,9 +575,6 @@ class CalendarEngine:
 
         existing = await self._get_lead(lead_id)
         fields = self._lead_fields(event, existing)
-        # Дату не переносим: решение владельца 5 — фактическую впишет заказ бота.
-        fields = [field for field in fields
-                  if field["field_id"] != ids.FIELD_ORDER_DATETIME]
         if not fields:
             return
 
@@ -674,10 +680,22 @@ def _jsonable(payload: Any) -> Any:
 
 def _value_of(event: ParsedEvent, name: str) -> Any:
     """Значение поля записи в том виде, в каком его помнит хранилище."""
-    value = getattr(event, name, None)
-    return tuple(value) if isinstance(value, (list, tuple)) else value
+    return _comparable(getattr(event, name, None))
 
 
 def _value_of_dict(data: dict, name: str) -> Any:
-    value = data.get(name)
-    return tuple(value) if isinstance(value, (list, tuple)) else value
+    return _comparable(data.get(name))
+
+
+def _comparable(value: Any) -> Any:
+    """Привести к виду, в котором значения записи сравниваются между собой.
+
+    Хранилище держит разбор в JSON: дата там уже строка, а у свежей записи это
+    `date`. Без приведения любая проверка «дата изменилась» отвечала бы «да»
+    каждый проход и гоняла бы в амо одно и то же.
+    """
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value

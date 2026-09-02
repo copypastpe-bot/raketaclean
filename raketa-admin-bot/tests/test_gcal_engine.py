@@ -58,6 +58,16 @@ def only_value(field: dict):
     return field["values"][0].get("value", field["values"][0].get("enum_id"))
 
 
+def stamp_of(moment: datetime) -> int:
+    """Как амо хранит «Дату и время заказа» — unix-время."""
+    return int(moment.timestamp())
+
+
+def day_of(field: dict) -> date:
+    """День из поля «Дата и время заказа» по Москве — им и меряется перенос."""
+    return datetime.fromtimestamp(only_value(field), tz=timezone.utc).astimezone(MSK).date()
+
+
 @pytest.fixture
 def amo():
     return FakeAmo()
@@ -442,6 +452,64 @@ async def test_comment_from_the_calendar_wins(amo):
     assert "детский матрас" in only_value(sent_fields(amo)[ids.FIELD_COMMENT])
 
 
+async def test_order_date_is_rewritten_when_the_day_moved(amo):
+    """Заказ перенесли на другой день — в сделке должен стоять новый день.
+
+    Живой случай 2026-09-02: клиент отменила уборку, а потом подтвердила на
+    другое число. Сделка оставалась открытой со старой датой, робот запись
+    к ней привязал, комментарий обновил, а дату не тронул — поле было занято.
+    Владелец отменил прежнее решение 5: календарь — источник правды о дне
+    работы, как адрес и комментарий.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_ORDER_DATETIME,
+                      "values": [{"value": stamp_of(datetime(2026, 8, 20, 12, 0, tzinfo=MSK))}]}])
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    assert day_of(sent_fields(amo)[ids.FIELD_ORDER_DATETIME]) == ORDER_DAY
+
+
+async def test_owner_time_inside_the_same_day_is_kept(amo):
+    """День тот же, время в сделке своё — не трогаем и в амо не идём.
+
+    В записи календаря стоит начало работы, а в сделке владелец мог поставить
+    удобное ему время. Спорить не о чем: переносом считается смена дня.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_ORDER_DATETIME,
+                      "values": [{"value": stamp_of(datetime(2026, 8, 27, 9, 0, tzinfo=MSK))}]}])
+    engine = build(amo)
+
+    await engine.process(an_order())
+
+    assert ids.FIELD_ORDER_DATETIME not in sent_fields(amo)
+
+
+async def test_moved_record_carries_the_new_date_into_the_deal(amo):
+    """Запись перетащили на другой день — правка доезжает до сделки.
+
+    Перенос в календаре — это правка записи, а не новая запись. Раньше дата
+    в список изменяемых полей не входила вовсе: робот молча оставлял в сделке
+    старый день и владельцу об этом не говорил.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await engine.process(an_order())
+    moved_day = ORDER_DAY + timedelta(days=3)
+
+    await engine.process(an_order(
+        order_date=moved_day,
+        start_at=datetime(moved_day.year, moved_day.month, moved_day.day, 14, 30, tzinfo=MSK)))
+
+    assert day_of(sent_fields(amo, call=-1)[ids.FIELD_ORDER_DATETIME]) == moved_day
+    assert engine.last_edits == ("дата",)       # владельцу скажут, что именно поменялось
+
+
 async def test_same_comment_is_not_rewritten(amo):
     """Тот же текст второй раз не отправляем: лишний запрос в амо ни к чему."""
     amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
@@ -464,7 +532,7 @@ async def test_edited_record_updates_the_deal(amo):
 
     Решение владельца 2026-08-27: раз адрес и комментарий живут в календаре,
     они должны быть верны и после правки, а не только в момент заведения.
-    Дату при этом не трогаем (решение 5) — её впишет заказ из бота.
+    День работы при этом не менялся — дату в амо второй раз не отправляем.
     """
     amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
     store = MemoryCalendarStore(now=lambda: NOW)
