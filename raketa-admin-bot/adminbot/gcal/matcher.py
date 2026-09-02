@@ -36,6 +36,14 @@ MAX_LEAD_AGE_DAYS = 60
 # Небольшой запас нужен на случай, если клиент написал уже после договорённости.
 MAX_LEAD_FUTURE_DAYS = 7
 
+# Возраст, начиная с которого открытая сделка считается забытой, а не рабочей.
+# Решение владельца 2026-09-02: полгода. Такой заказ давно закрыт в жизни, но
+# в CRM его никто не закрыл — и робот видел незаконченную работу там, где её
+# нет. Проверка на живой базе в тот день: из 93 незакрытых сделок 60 старше
+# полугода, 51 — старше года, самая древняя заведена в декабре 2021-го.
+# Спрашивать владельца по каждой такой — значит спрашивать постоянно.
+FORGOTTEN_LEAD_DAYS = 180
+
 
 def _within_dates(order_date: date, lead: LeadInfo) -> bool:
     if lead.order_date is None:
@@ -51,6 +59,20 @@ def _is_timely(order_date: date, lead: LeadInfo) -> bool:
         return True                            # даты создания нет — не наказываем
     age = (order_date - lead.created_date).days
     return -MAX_LEAD_FUTURE_DAYS <= age <= MAX_LEAD_AGE_DAYS
+
+
+def _is_forgotten(order_date: date, lead: LeadInfo) -> bool:
+    """Сделка, которую забыли закрыть, а не работа, которую предстоит сделать.
+
+    Возраст меряем по дате заведения; её нет — по дате заказа в самой сделке.
+    Ни того ни другого нет — хвост считаем живым: сомнение решается в пользу
+    вопроса владельцу, потому что вторая сделка по живому заказу дороже, чем
+    лишний вопрос.
+    """
+    reference = lead.created_date or lead.order_date
+    if reference is None:
+        return False
+    return (order_date - reference).days > FORGOTTEN_LEAD_DAYS
 
 
 def _ask(leads: Iterable[LeadInfo], kind: str = "ask_owner") -> Decision:
@@ -113,11 +135,20 @@ def match_event(*, order_date: date, candidates: Iterable[LeadInfo],
         if decision is not None:
             return decision
 
-    # 3. Свежего нет, но висят старые хвосты — решает владелец: завести новую
-    #    сделку или разобраться руками.
+    # 3. Свежего нет, но висят старые хвосты. Те, что моложе полугода, ещё могут
+    #    быть про этот заказ — решает владелец. Забытые (см. FORGOTTEN_LEAD_DAYS)
+    #    работе не мешают: заводим новую сделку и упоминаем их в отчёте, чтобы
+    #    владелец знал, что в CRM висит мусор (решение владельца 2026-09-02).
     stale = [lead for lead in ours if not _is_timely(order_date, lead)]
-    if stale:
-        return _ask(stale, kind="ask_owner_stale")
+    forgotten = [lead for lead in stale if _is_forgotten(order_date, lead)]
+    recent = [lead for lead in stale if lead not in forgotten]
+    if recent:
+        # Древние в кнопках не показываем: привязывать сегодняшний заказ к сделке
+        # двухлетней давности владелец не станет, а лишняя кнопка путает.
+        return _ask(recent, kind="ask_owner_stale")
+    if forgotten:
+        return Decision(kind="create_new",
+                        forgotten=tuple(sorted(lead.lead_id for lead in forgotten)))
 
     # 4. Открытого ничего нет. Но если у клиента есть ЗАКРЫТАЯ сделка ровно на
     #    дату записи — владелец мог провести этот заказ сам, до того как записал

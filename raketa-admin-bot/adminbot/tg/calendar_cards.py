@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Optional, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -117,12 +118,21 @@ def calendar_question_card(link: Any) -> tuple[str, InlineKeyboardMarkup]:
 
 
 def _option_label(option: dict, reason: str = "") -> str:
-    """Подпись кнопки: номер сделки и её дата, если она известна."""
+    """Подпись кнопки: номер сделки и её дата, если она известна.
+
+    Год показываем, когда сделка не этого года: «11.09» у сделки 2024 года
+    выглядит свежей датой, и владелец 2026-09-02 именно так её и прочитал.
+    """
     label = f"Сделка #{option['lead_id']}"
     if reason == "ask_owner_closed":
         label = f"✔️ Это она — #{option['lead_id']}"
     when = option.get("date")
-    return f"{label} · {when[8:10]}.{when[5:7]}" if when else label
+    if not when:
+        return label
+    day = f"{when[8:10]}.{when[5:7]}"
+    if when[:4] != date.today().strftime("%Y"):
+        day = f"{day}.{when[:4]}"
+    return f"{label} · {day}"
 
 
 def _client_line(link: Any) -> str:
@@ -322,11 +332,44 @@ def done_text(link: Any, actions: Sequence[dict], *, base_url: str) -> str:
     lines = ["📅 Календарь · " + what, _client_line(link)]
     if created_contact:
         lines.append("Клиента в CRM не было — завёл новый контакт.")
+    lines += _forgotten_lines(actions)
 
     url = deal_url(base_url, link.real_lead_id or link.primary_lead_id)
     if url:
         lines += ["", url]
     return "\n".join(lines)
+
+
+def _forgotten_lines(actions: Sequence[dict]) -> list[str]:
+    """Про незакрытые сделки клиента, которым робот работать не дал.
+
+    Такая сделка раньше стоила владельцу вопроса «завести новую?». Теперь робот
+    заводит сам, но молчать о ней нельзя: в CRM это мусор, который копится и
+    мешает считать. Дату показываем с годом — без неё «11.09» выглядит свежей.
+    """
+    payload = next((row.get("payload") or {} for row in actions
+                    if row.get("action") == "note_forgotten"), None)
+    lead_ids = (payload or {}).get("lead_ids") or []
+    if not lead_ids:
+        return []
+
+    dates = (payload or {}).get("dates") or {}
+    listed = ", ".join(f"#{lead_id}{_since(dates.get(str(lead_id)))}"
+                       for lead_id in lead_ids)
+    word = "сделка" if len(lead_ids) == 1 else "сделки"
+    return [f"⚠️ У клиента висит незакрытая {word} {listed} — "
+            f"работе не мешает, но её стоит закрыть."]
+
+
+def _since(value: Optional[str]) -> str:
+    """«· от 11.09.2024» — год обязателен: без него старая сделка выглядит свежей."""
+    if not value:
+        return ""
+    try:
+        when = date.fromisoformat(value)
+    except ValueError:
+        return ""
+    return f" от {when:%d.%m.%Y}"
 
 
 def updated_text(link: Any, changed: Sequence[str], *, base_url: str) -> str:

@@ -271,6 +271,14 @@ class CalendarEngine:
         scratch.is_new_client = not candidates
         scratch.duplicates = tuple(decision.duplicates)
 
+        if decision.forgotten:
+            # Работе такие сделки не мешают, но владельцу о них надо сказать:
+            # это забытый в CRM мусор, и он копится (решение владельца 2026-09-02).
+            await self.store.log(
+                event.event_id, "note_forgotten", dry_run=self.dry_run,
+                payload={"lead_ids": list(decision.forgotten),
+                         "dates": _forgotten_dates(candidates, decision.forgotten)})
+
         if decision.kind in _ASK_KINDS:
             # Варианты кладём рядом с записью вместе с воронкой: карточку владельцу
             # может отправить уже другой проход, а по ответу надо знать, лид это
@@ -676,6 +684,18 @@ def _jsonable(payload: Any) -> Any:
     if isinstance(payload, (list, tuple)):
         return [_jsonable(item) for item in payload]
     return payload
+
+
+def _forgotten_dates(candidates: list[LeadInfo], lead_ids: tuple[int, ...]) -> dict:
+    """Когда завели забытые сделки — чтобы владелец видел возраст, а не только номер."""
+    dates: dict[str, str] = {}
+    for lead in candidates:
+        if lead.lead_id not in lead_ids:
+            continue
+        when = lead.created_date or lead.order_date
+        if when is not None:
+            dates[str(lead.lead_id)] = when.isoformat()
+    return dates
 
 
 def _value_of(event: ParsedEvent, name: str) -> Any:

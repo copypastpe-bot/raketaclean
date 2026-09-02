@@ -109,6 +109,10 @@ class Decision:
     lead_id: Optional[int] = None
     options: tuple[int, ...] = field(default=())
     duplicates: tuple[int, ...] = field(default=())   # лидам-дублям робот пишет комментарий
+    # Незакрытые сделки старше полугода: работать с ними робот не станет, но
+    # владельцу о них скажет — в CRM это забытый мусор, и он копится
+    # (2026-09-02: 60 таких из 93 незакрытых).
+    forgotten: tuple[int, ...] = field(default=())
 
 
 def _gap(order_date: date, value: Optional[date]) -> Optional[int]:

@@ -118,13 +118,63 @@ def test_regular_client_books_three_weeks_ahead():
     assert decision.lead_id == 2
 
 
-def test_ancient_lead_is_a_question_not_a_new_deal():
-    """Лид полугодовой давности — хвост. Молча заводить поверх него вторую нельзя."""
+def test_stale_lead_of_recent_months_is_a_question_not_a_new_deal():
+    """Хвост трёхмесячной давности — молча заводить поверх него вторую нельзя.
+
+    Такой лид ещё может оказаться про этот самый заказ: клиент обращался
+    весной, договорились, потом перенесли. Решает владелец.
+    """
     decision = match_event(order_date=ORDER_DAY,
-                           candidates=[primary(2, created_date=date(2026, 2, 1))])
+                           candidates=[primary(2, created_date=date(2026, 6, 1))])
 
     assert decision.kind == "ask_owner_stale"
     assert decision.options == (2,)
+
+
+def test_forgotten_lead_does_not_stop_a_new_deal():
+    """Хвост старше полугода — забытая сделка, а не работа. Заводим новую.
+
+    Решение владельца 2026-09-02. Повод: по записи на 06.09.2026 робот спросил
+    владельца из-за сделки от 11.09.2024, висевшей на этапе «мастер назначен».
+    В CRM таких 60 из 93 незакрытых — вопросы приходили бы постоянно.
+    """
+    decision = match_event(order_date=ORDER_DAY,
+                           candidates=[realization(9, created_date=date(2024, 9, 11))])
+
+    assert decision.kind == "create_new"
+    assert decision.forgotten == (9,)          # владельцу скажем, что хвост висит
+
+
+def test_a_fresh_tail_outweighs_a_forgotten_one():
+    """Есть и свежий хвост, и древний — спрашиваем, но кнопкой только свежий.
+
+    Древние в вариантах бесполезны: привязывать сегодняшний заказ к сделке
+    двухлетней давности владелец не станет, а лишняя кнопка путает.
+    """
+    decision = match_event(
+        order_date=ORDER_DAY,
+        candidates=[primary(2, created_date=date(2026, 6, 1)),
+                    realization(9, created_date=date(2024, 9, 11))])
+
+    assert decision.kind == "ask_owner_stale"
+    assert decision.options == (2,)
+
+
+def test_a_tail_without_dates_is_still_a_question():
+    """Возраст неизвестен — считаем хвост живым и спрашиваем.
+
+    Сомнение решается в пользу вопроса: заводить вторую сделку по живому
+    заказу дороже, чем лишний раз спросить.
+    """
+    decision = match_event(order_date=ORDER_DAY, candidates=[primary(2)])
+
+    assert decision.kind == "use_primary"      # без дат лид считается своевременным
+
+    decision = match_event(
+        order_date=ORDER_DAY,
+        candidates=[primary(2, created_date=date(2026, 6, 1)), primary(3)])
+
+    assert decision.kind in ("use_primary", "ask_owner_stale")
 
 
 def test_handled_lead_wins_over_unsorted():

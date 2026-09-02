@@ -452,6 +452,26 @@ async def test_comment_from_the_calendar_wins(amo):
     assert "детский матрас" in only_value(sent_fields(amo)[ids.FIELD_COMMENT])
 
 
+async def test_forgotten_deal_does_not_stop_the_work_but_is_reported(amo):
+    """Висит незакрытая сделка двухлетней давности — заводим новую и говорим о ней.
+
+    Живой случай 2026-09-02: сделка от 11.09.2024 на этапе «мастер назначен»
+    заставила робота спросить владельца по записи на 06.09.2026. Владельцу такие
+    вопросы не нужны, но и молчать о мусоре в CRM нельзя — он копится.
+    """
+    amo.add_lead(29174771, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CONFIRMED,
+                 created_at=int(datetime(2024, 9, 11, tzinfo=MSK).timestamp()))
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+
+    link = await engine.process(an_order())
+
+    assert link.status != "waiting_owner"                # вопроса владельцу нет
+    assert amo.calls_of("create_lead")                   # новая сделка заведена
+    told = [row for row in store.actions if row["action"] == "note_forgotten"]
+    assert told and told[0]["payload"]["lead_ids"] == [29174771]
+
+
 async def test_order_date_is_rewritten_when_the_day_moved(amo):
     """Заказ перенесли на другой день — в сделке должен стоять новый день.
 

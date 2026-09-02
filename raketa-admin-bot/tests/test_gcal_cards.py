@@ -78,6 +78,22 @@ def test_question_card_lists_candidate_deals():
     assert any("Сам разберусь" in b for b in buttons)
 
 
+def test_an_old_deal_shows_its_year_on_the_button():
+    """Сделка не этого года — на кнопке год обязателен.
+
+    2026-09-02 владелец увидел «Сделка #29174771 · 11.09» и принял её за свежую,
+    хотя это сентябрь 2024-го.
+    """
+    link = a_link(question={"reason": "ask_owner_stale", "options": [
+        {"lead_id": 29174771, "pipeline_id": 4482787, "date": "2024-09-11"},
+    ]})
+
+    _text, keyboard = calendar_question_card(link)
+
+    buttons = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "Сделка #29174771 · 11.09.2024" in buttons
+
+
 def test_choice_is_short_enough_for_telegram():
     """В кнопке нельзя везти длинный id записи Google — упрёмся в лимит.
 
@@ -337,6 +353,38 @@ def test_done_message_distinguishes_a_new_deal():
 
     assert "создал" in text.lower()
     assert "новый контакт" in text.lower()           # клиента в CRM не было
+
+
+def test_done_message_warns_about_a_forgotten_deal():
+    """Робот завёл новую сделку, но у клиента висит незакрытая старая.
+
+    Он про неё молчать не должен: раньше такая сделка стоила владельцу вопроса,
+    теперь — одной строки в отчёте, по которой её можно найти и закрыть.
+    """
+    from adminbot.tg.calendar_cards import done_text
+
+    link = a_link(status="done", question=None, path="C", real_lead_id=41400009,
+                  client_name="Елизавета")
+    actions = [{"action": "note_forgotten",
+                "payload": {"lead_ids": [29174771], "dates": {"29174771": "2024-09-11"}}},
+               {"action": "create_lead", "amo_id": 41400009}]
+
+    text = done_text(link, actions, base_url="https://raketacleancrm.amocrm.ru")
+
+    assert "29174771" in text
+    assert "11.09.2024" in text                       # видно, насколько она старая
+    assert "закрыть" in text.lower()                  # что с ней делать
+
+
+def test_done_message_stays_short_without_forgotten_deals():
+    """Обычный случай — никаких лишних строк про CRM."""
+    from adminbot.tg.calendar_cards import done_text
+
+    link = a_link(status="done", question=None, path="C", real_lead_id=41400009)
+    text = done_text(link, [{"action": "create_lead", "amo_id": 41400009}],
+                     base_url="https://raketacleancrm.amocrm.ru")
+
+    assert "незакрыт" not in text.lower()
 
 
 def test_changed_record_message_lists_what_was_updated():
