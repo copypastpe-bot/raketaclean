@@ -12,7 +12,7 @@
    обработаны, а сбойная — вернуться в следующий раз.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -500,6 +500,81 @@ async def test_the_mark_is_set_only_after_telegram_took_the_message():
 
 
 # --- переезд записи между календарями (сценарий владельца 2026-09-02) ---
+
+async def test_lost_report_is_sent_on_the_next_pass():
+    """Отчёт не ушёл, а запись больше не меняется — робот возвращается за долгом.
+
+    Живой случай 2026-09-02: работа по записи закончена, Telegram не ответил,
+    и отчёт пропал навсегда. Незавершённые записи робот добирает из хранилища,
+    но завершённая туда не попадает — она никуда не попадала вовсе.
+    """
+    store = MemoryCalendarStore()
+    answers = [None, 321]
+    sent: list = []
+
+    async def on_done(link, actions):
+        sent.append(link.event_id)
+        return answers.pop(0)
+
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((ORDER,), "T2"))
+    watcher = build(calendar, engine=FinishingEngine(store), store=store,
+                    dry_run=False, on_done=on_done)
+
+    await watcher.tick()                           # включение
+    await watcher.tick()                           # работа сделана, Telegram молчит
+    assert (await store.get("evt-1")).done_msg_id is None
+
+    await watcher.tick()                           # изменений в календаре больше нет
+
+    assert sent == ["evt-1", "evt-1"]
+    assert (await store.get("evt-1")).done_msg_id == 321
+
+
+async def test_the_engine_is_not_disturbed_by_the_report_debt():
+    """Долг по отчёту — это письмо владельцу, а не повод идти в amoCRM снова."""
+    store = MemoryCalendarStore()
+    engine = FinishingEngine(store)
+
+    async def on_done(link, actions):
+        return None                                # Telegram молчит всегда
+
+    calendar = FakeCalendar(SyncBatch((), "T1"), SyncBatch((ORDER,), "T2"))
+    watcher = build(calendar, engine=engine, store=store, dry_run=False,
+                    on_done=on_done)
+
+    await watcher.tick()
+    await watcher.tick()
+    handled_before = len(engine.seen)
+    await watcher.tick()
+
+    assert len(engine.seen) == handled_before
+
+
+async def test_old_records_without_a_report_stay_quiet():
+    """Древние записи без отметки не будят: отметки не было и в помине.
+
+    Колонка `done_msg_id` появилась 2026-08-28 (миграция 006). У всего, что робот
+    провёл до неё, отметка пуста по историческим причинам, а не из-за сбоя —
+    посыпать владельца отчётами за прошлую неделю робот не должен.
+    """
+    long_ago = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    store = MemoryCalendarStore(now=lambda: long_ago)
+    sent: list = []
+
+    async def on_done(link, actions):
+        sent.append(link.event_id)
+        return 1
+
+    await store.create("evt-old", kind="order", phone10=None)
+    await store.update("evt-old", status="done", real_lead_id=1)
+
+    watcher = build(FakeCalendar(SyncBatch((), "T1")), store=store,
+                    dry_run=False, on_done=on_done,
+                    now=lambda: datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc))
+    await watcher.tick()
+
+    assert sent == []
+
 
 async def test_moved_event_is_not_a_cancellation():
     """Владелец завёл заказ не в тот календарь и перенёс его в правильный.

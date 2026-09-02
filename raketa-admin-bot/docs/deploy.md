@@ -135,7 +135,8 @@ cd /opt/raketa-admin-bot/app
 for sql in migrations/*.sql; do psql "$ADMINBOT_DB_DSN" -v ON_ERROR_STOP=1 -f "$sql"; done
 psql "$ADMINBOT_DB_DSN" -tAc "select tablename from pg_tables where schemaname='adminbot'"
 # ожидаемо: amo_links, amo_actions, settings, carpet_links, carpet_actions,
-#           carpet_letters, gcal_events, gcal_actions, gcal_cursor
+#           carpet_letters, gcal_events, gcal_actions, gcal_cursor,
+#           autocall_leads, autocall_actions, autocall_cursor, owner_outbox
 ```
 
 Проверка, что правило «в чужие таблицы не пишем» держится не на честном слове:
@@ -330,3 +331,21 @@ ssh admin@91.200.150.68 'sudo raketa-admin-bot-update'
 | `permission denied for table` | значит правило read-only работает; смотрите, какой запрос это вызвал |
 | Робот звонит лишнее или не вовремя | `sudo raketa-admin-bot-update --autocall-off` — служба перезапустится без фичи |
 | АТС не отвечает (алерт владельцу) | проверьте `PBX_API_KEY` в `.env` службы и личный кабинет onlinePBX |
+| Сообщения от робота не приходят | `/status` покажет строку «Жду отправки: N» — значит Telegram недоступен, а сообщения целы и уйдут сами |
+
+### Почта владельца: что где смотреть
+
+Сообщение, не ушедшее с первой попытки, становится долгом и досылается фоном
+(раз в минуту, с растущей паузой). Очередь видна в базе:
+
+```bash
+psql "$ADMINBOT_DB_DSN" -c "
+  SELECT id, kind, ref, attempts, next_try_at, last_error
+  FROM adminbot.owner_outbox
+  WHERE sent_at IS NULL AND dropped_at IS NULL ORDER BY id"
+```
+
+Пусто — всё доставлено. Строки с растущим `attempts` означают, что Telegram
+недоступен дольше обычного; работа с CRM при этом идёт как ни в чём не бывало.
+Протухшие и отменённые видны отдельно — у них заполнены `dropped_at` и
+`drop_reason` («протухло» или «нужда отпала»).

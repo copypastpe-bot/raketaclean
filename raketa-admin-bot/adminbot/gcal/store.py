@@ -48,6 +48,8 @@ class CalendarStore(Protocol):
 
     async def pending(self) -> list[CalendarLink]: ...
 
+    async def finished_without_report(self, since: datetime) -> list[CalendarLink]: ...
+
     async def find_by_question_msg(self, message_id: Optional[int]) -> Optional[CalendarLink]: ...
 
     async def forget(self, event_id: str) -> None: ...
@@ -121,6 +123,11 @@ class MemoryCalendarStore:
     async def pending(self) -> list[CalendarLink]:
         return [link for link in self.links.values() if link.status in ACTIVE_STATUSES]
 
+    async def finished_without_report(self, since: datetime) -> list[CalendarLink]:
+        return [link for link in self.links.values()
+                if link.status == "done" and not link.done_msg_id
+                and (link.updated_at is None or link.updated_at >= since)]
+
     async def find_by_question_msg(self, message_id: Optional[int]) -> Optional[CalendarLink]:
         """Запись, по которой владельцу отправлена именно эта карточка."""
         if message_id is None:
@@ -183,6 +190,9 @@ class PgCalendarStore:
 
     async def pending(self) -> list[CalendarLink]:
         return await db.fetch_pending_calendar_links(self._pool, ACTIVE_STATUSES)
+
+    async def finished_without_report(self, since: datetime) -> list[CalendarLink]:
+        return await db.fetch_calendar_links_without_report(self._pool, since)
 
     async def find_by_question_msg(self, message_id: Optional[int]) -> Optional[CalendarLink]:
         if message_id is None:

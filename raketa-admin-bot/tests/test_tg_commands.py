@@ -41,6 +41,51 @@ async def test_status_shows_mode_queue_and_last_pass():
     assert "dry" not in text.lower()                 # без жаргона
 
 
+async def test_status_shows_letters_waiting_to_be_sent():
+    """Копятся неотправленные сообщения — владелец должен это видеть.
+
+    Иначе тишина робота и тишина Telegram выглядят одинаково, а это разные
+    вещи: в первом случае работы не было, во втором она есть и не доехала.
+    """
+    commands = make_commands(dry_run=False, mail=FakeMail(waiting=2))
+
+    message = FakeMessage()
+    await commands.status(message)
+
+    assert "Жду отправки: 2" in message.replies[0]
+
+
+async def test_status_is_silent_when_nothing_is_stuck():
+    """Долгов нет — лишней строки в ответе тоже нет."""
+    commands = make_commands(dry_run=False, mail=FakeMail(waiting=0))
+
+    message = FakeMessage()
+    await commands.status(message)
+
+    assert "Жду отправки" not in message.replies[0]
+
+
+async def test_broken_mail_does_not_break_the_status():
+    """База недоступна — /status всё равно отвечает: он и нужен в такие минуты."""
+    commands = make_commands(dry_run=False, mail=FakeMail(broken=True))
+
+    message = FakeMessage()
+    await commands.status(message)
+
+    assert "боевой" in message.replies[0]
+
+
+class FakeMail:
+    def __init__(self, waiting: int = 0, broken: bool = False):
+        self._waiting = waiting
+        self._broken = broken
+
+    async def waiting(self) -> int:
+        if self._broken:
+            raise RuntimeError("база недоступна")
+        return self._waiting
+
+
 async def test_status_says_live_mode_when_not_a_rehearsal():
     commands = make_commands(dry_run=False)
 

@@ -25,7 +25,7 @@ import asyncio
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from adminbot.amo import ids
@@ -36,6 +36,11 @@ log = logging.getLogger(__name__)
 
 # Пока есть незаконченная работа (ждём автосделку), следующий проход делаем скоро.
 QUICK_RETRY_SEC = 60
+
+# Как далеко назад робот возвращается за неотправленными отчётами. Трёх суток
+# хватает на любой обрыв связи и мало для того, чтобы разбудить записи,
+# проведённые до появления самой отметки (миграция 006 от 2026-08-28).
+REPORT_DEBT_DAYS = 3
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,7 @@ class CalendarWatcher:
         on_updated: Optional[Callable[[Any, tuple], Awaitable[None]]] = None,
         dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        now: Optional[Callable[[], datetime]] = None,
     ) -> None:
         # Календарей может быть несколько: мебель и ковры ведут мастера в основном,
         # уборки — бригадир в своём (решение владельца 2026-09-01). Первый в списке
@@ -100,6 +106,7 @@ class CalendarWatcher:
         self.on_updated = on_updated
         self.dry_run = dry_run
         self.sleep = sleep
+        self._now = now or (lambda: datetime.now(timezone.utc))
         self.last_report: Optional[CalendarTickReport] = None
 
     async def tick(self) -> CalendarTickReport:
@@ -150,6 +157,8 @@ class CalendarWatcher:
                 continue                              # разбора нет — продолжать нечем
             await self._handle(ParsedEvent.from_dict(link.event_data),
                                statuses, questions, failures)
+
+        await self._pay_report_debts(handled)
 
         return self._remember(CalendarTickReport(
             changes=changes, known=known, processed=sum(statuses.values()),
@@ -306,6 +315,31 @@ class CalendarWatcher:
         except Exception:                              # noqa: BLE001
             log.exception("Календарь, запись %s: сообщение владельцу не ушло",
                           link.event_id)
+
+    async def _pay_report_debts(self, handled: set[str]) -> None:
+        """Отчитаться о работе, о которой не вышло отчитаться раньше.
+
+        Отметку «отчитался» робот ставит только после того, как Telegram принял
+        сообщение, — иначе обрыв связи означал бы «сказал». Но возвращаться за
+        долгом было некому: незавершённые записи он добирает из хранилища,
+        а завершённая туда не попадает. Живой случай 2026-09-02: работа сделана,
+        Telegram промолчал, отчёт пропал.
+
+        В amoCRM этот проход не ходит: долг — это письмо владельцу, а не работа
+        по сделке. Горизонт нужен, чтобы не разбудить записи, проведённые до
+        появления самой отметки (миграция 006 от 2026-08-28).
+        """
+        if self.on_done is None or self.dry_run:
+            return
+        getter = getattr(self.store, "finished_without_report", None)
+        if getter is None:
+            return                                    # старое хранилище — молчим
+
+        since = self._now() - timedelta(days=REPORT_DEBT_DAYS)
+        for link in await getter(since):
+            if link.event_id in handled:
+                continue                              # об этой уже говорили в проходе
+            await self._maybe_report_done(link)
 
     async def _maybe_report_done(self, link: Any) -> None:
         """Отчёт о сделанной работе уходит РОВНО один раз — когда работа закончена.

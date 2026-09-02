@@ -456,3 +456,85 @@ async def test_calendar_lead_taken_by_another_event_is_not_reused(pool):
 
     assert await store.taken_leads("9601861067", exclude_event_id="evt-2") == {41400002}
     assert await store.taken_leads("9601861067", exclude_event_id="evt-1") == set()
+
+
+# --- почта владельца (миграция 009) ---
+
+
+async def test_undelivered_message_survives_in_the_outbox(pool):
+    """Долг ложится в базу целиком — с кнопками, сроком и назначением.
+
+    Кнопки здесь не украшение: карточка-вопрос без них станет сообщением,
+    на которое владельцу нечем ответить.
+    """
+    from adminbot.tg.outbox import PgMailStore
+
+    store = PgMailStore(pool)
+    keyboard = {"inline_keyboard": [[{"text": "Закрыть", "callback_data": "gcal:close"}]]}
+    letter_id = await store.add(
+        chat_id=190933209, kind="gcal_question", ref="evt-1", text="Закрыть сделку?",
+        reply_markup=keyboard, expires_at=NOW + timedelta(hours=24),
+        next_try_at=NOW, error="TimeoutError: нет связи")
+
+    due = await store.due(NOW)
+
+    assert [letter["id"] for letter in due] == [letter_id]
+    assert due[0]["reply_markup"] == keyboard          # jsonb вернулся словарём
+    assert due[0]["ref"] == "evt-1"
+    assert await store.waiting() == 1
+
+
+async def test_delivered_and_dropped_letters_leave_the_queue(pool):
+    """Доставленное и протухшее больше не созревают — очередь остаётся короткой."""
+    from adminbot.tg.outbox import PgMailStore
+
+    store = PgMailStore(pool)
+    common = dict(chat_id=190933209, kind="summary", ref=None, reply_markup=None,
+                  expires_at=NOW + timedelta(hours=6), next_try_at=NOW,
+                  error="TimeoutError")
+    delivered = await store.add(text="Сводка", **common)
+    dropped = await store.add(text="Вторая сводка", **common)
+    waiting = await store.add(text="Третья сводка", **common)
+
+    await store.mark_sent(delivered, 4242, NOW)
+    await store.drop(dropped, NOW, "протухло")
+
+    assert [letter["id"] for letter in await store.due(NOW)] == [waiting]
+    assert await store.waiting() == 1
+
+
+async def test_postponed_letter_waits_for_its_turn(pool):
+    """Неудачная попытка отодвигает следующую и считается."""
+    from adminbot.tg.outbox import PgMailStore
+
+    store = PgMailStore(pool)
+    letter_id = await store.add(
+        chat_id=190933209, kind="gcal_done", ref="evt-1", text="Сделка заведена",
+        reply_markup=None, expires_at=NOW + timedelta(hours=24), next_try_at=NOW,
+        error="TimeoutError")
+
+    await store.postpone(letter_id, NOW + timedelta(minutes=3), "TimeoutError: снова")
+
+    assert await store.due(NOW) == []
+    later = await store.due(NOW + timedelta(minutes=3))
+    assert later[0]["attempts"] == 2
+
+
+async def test_finished_records_without_a_report_are_found(pool):
+    """Работа сделана, отчёт не ушёл — робот найдёт такую запись и вернётся к ней."""
+    from adminbot.gcal.store import PgCalendarStore
+
+    store = PgCalendarStore(pool)
+    await store.create("evt-lost", kind="order", phone10="9601861067")
+    await store.update("evt-lost", status="done", real_lead_id=31600001)
+    await store.create("evt-told", kind="order", phone10="9159496642")
+    await store.update("evt-told", status="done", real_lead_id=31600002, done_msg_id=77)
+    await store.create("evt-busy", kind="order", phone10="9159496642")
+    await store.update("evt-busy", status="waiting_salesbot")
+
+    since = datetime.now(timezone.utc) - timedelta(days=3)
+    debts = await store.finished_without_report(since)
+
+    assert [link.event_id for link in debts] == ["evt-lost"]
+    assert await store.finished_without_report(
+        datetime.now(timezone.utc) + timedelta(days=1)) == []

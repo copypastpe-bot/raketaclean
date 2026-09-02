@@ -62,12 +62,30 @@ from adminbot.tg.calendar_cards import (
 from adminbot.tg.cards import (
     carpet_question_card, carpet_report_text, order_done_text, question_card,
     summary_text)
+from adminbot.tg.outbox import (
+    SUMMARY_TTL_SEC, MemoryMailStore, OwnerMail, PgMailStore, Purpose)
 from adminbot.tg.session import build_session
 
 log = logging.getLogger("adminbot")
 
 # Сколько ждать перед новой попыткой опроса, если Telegram не отвечает.
 TELEGRAM_RETRY_SEC = 30
+
+# Виды сообщений владельцу. Вид нужен почте: по нему она знает, нужен ли
+# недоставленный долг ещё и что отметить после доставки (см. tg/outbox.py).
+MAIL_SUMMARY = "summary"                       # вечерняя сводка — устаревает за часы
+MAIL_ORDER_DONE = "order_done"
+MAIL_ORDER_QUESTION = "order_question"
+MAIL_GCAL_DONE = "gcal_done"
+MAIL_GCAL_QUESTION = "gcal_question"
+MAIL_GCAL_UPDATED = "gcal_updated"
+MAIL_GCAL_REHEARSAL = "gcal_rehearsal"
+MAIL_CARPET_QUESTION = "carpet_question"
+MAIL_CARPET_REPORT = "carpet_report"
+MAIL_AUTOCALL_REHEARSAL = "autocall_rehearsal"
+MAIL_AUTOCALL_CONNECTED = "autocall_connected"
+MAIL_AUTOCALL_NO_PHONE = "autocall_no_phone"
+MAIL_AUTOCALL_MANAGER = "autocall_manager"
 
 
 @dataclass
@@ -83,6 +101,10 @@ class App:
     watcher: Watcher
     reconciler: Reconciler
     stop: asyncio.Event
+    # Почта владельца: досылает сообщения, не ушедшие с первой попытки.
+    # Отдельное занятие, потому что связь возвращается сама по себе, а не
+    # тогда, когда роботу случилось обработать очередную запись.
+    mail: Optional[Any] = None
     carpet_watcher: Optional[Any] = None
     calendar_watcher: Optional[Any] = None
     calendar_token: Optional[Any] = None
@@ -114,6 +136,9 @@ class App:
         if self.autocall_watcher is not None:
             background.append(asyncio.create_task(
                 self.autocall_watcher.run_forever(self.stop), name="autocall"))
+        if self.mail is not None:
+            background.append(asyncio.create_task(
+                self.mail.run_forever(self.stop), name="mail"))
         try:
             await self._poll_until_stopped()
         finally:
@@ -195,22 +220,31 @@ async def build_app(settings: Settings) -> App:
     # На российском сервере имя api.telegram.org не разрешается: если заданы
     # прямые адреса, ходим по ним (тот же приём, что у рабочего бота компании).
     bot = Bot(token=settings.tg_token, session=build_session(settings.telegram_api_ips))
+
+    # Единственная дверь, через которую робот пишет владельцу. Telegram здесь
+    # отвечает через раз, и сообщение, не ушедшее с первой попытки, раньше
+    # пропадало навсегда (решение владельца 2026-09-02: доотправлять).
+    mail = OwnerMail(bot=bot, chat_id=settings.owner_tg_id,
+                     store=PgMailStore(own_pool),
+                     purposes={MAIL_SUMMARY: Purpose(ttl_sec=SUMMARY_TTL_SEC)})
+
     source = PgOrderSource(bot_pool, own_pool, settings.backlog_from)
     watcher = Watcher(
         engine=engine,
         source=source,
         is_enabled=sync_allowed(sync_enabled=settings.amo_sync_enabled, control=control),
         poll_interval_sec=settings.poll_interval_sec,
-        on_question=_make_question_sender(bot, settings.owner_tg_id),
+        on_question=_make_question_sender(mail),
         # Неделя наблюдения (решение владельца 2026-08-27): о каждом проведённом
         # заказе робот пишет владельцу сразу, со ссылкой на сделку.
-        on_done=_make_order_done_sender(bot, settings.owner_tg_id, settings.amo_base_url),
+        on_done=_make_order_done_sender(mail, settings.amo_base_url),
     )
+    mail.register(MAIL_ORDER_QUESTION, _question_purpose(store))
 
     reconciler = Reconciler(
         watcher=watcher,
         source=PgSummarySource(bot_pool, own_pool, settings.backlog_from),
-        on_summary=_make_summary_sender(bot, settings.owner_tg_id),
+        on_summary=_make_summary_sender(mail),
         hour_msk=settings.reconcile_hour_msk,
     )
     # Календарь собирается ниже, но в вечернюю сверку он попадает здесь же:
@@ -231,15 +265,20 @@ async def build_app(settings: Settings) -> App:
 
     # Ковры от партнёра: своя цепочка и свой выключатель. Если функция выключена
     # или нет доступа к почте, наблюдатель просто не создаётся — уборка работает.
-    carpet_watcher, carpet_store = _build_carpets(settings, own_pool, bot, live_amo,
+    carpet_watcher, carpet_store = _build_carpets(settings, own_pool, mail, live_amo,
                                                   rehearsal_amo)
+    if carpet_store is not None:
+        mail.register(MAIL_CARPET_QUESTION, _question_purpose(carpet_store))
 
     # Календарь: своя цепочка, свой выключатель и свой ключ доступа. Нет ключа —
     # календарь просто не поднимается, остальные функции работают.
     calendar_watcher, calendar_store, calendar_token = _build_calendar(
-        settings, own_pool, bot, live_amo, rehearsal_amo)
+        settings, own_pool, mail, live_amo, rehearsal_amo)
+    if calendar_store is not None:
+        mail.register(MAIL_GCAL_QUESTION, _question_purpose(calendar_store))
+        mail.register(MAIL_GCAL_DONE, _gcal_done_purpose(calendar_store))
     reconciler.calendar_watcher = calendar_watcher
-    reconciler.on_calendar = _make_calendar_summary_sender(bot, settings.owner_tg_id)
+    reconciler.on_calendar = _make_calendar_summary_sender(mail)
 
     # Автозвонок по заявке с сайта: своя цепочка, свой выключатель и своя АТС.
     # Кривое окно валит старт осознанно (опечатку ловим при запуске); нет
@@ -248,7 +287,7 @@ async def build_app(settings: Settings) -> App:
     # отдельный send-only бот для сообщений менеджеру (или None, если транспорт
     # не настроен); App должен закрыть его сессию при остановке сервиса.
     autocall_watcher, autocall_manager_bot = _build_autocall(
-        settings, own_pool, bot, live_amo, rehearsal_amo)
+        settings, own_pool, mail, live_amo, rehearsal_amo)
 
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(
@@ -265,6 +304,7 @@ async def build_app(settings: Settings) -> App:
             calendar_dry_run=settings.gcal_dry_run,
             autocall_enabled=settings.autocall_enabled,
             autocall_dry_run=settings.autocall_dry_run,
+            mail=mail,
         ),
         OwnerAnswers(owner_tg_id=settings.owner_tg_id, store=store, backlog=backlog),
         CarpetAnswers(owner_tg_id=settings.owner_tg_id, store=carpet_store)
@@ -281,10 +321,11 @@ async def build_app(settings: Settings) -> App:
                calendar_token=calendar_token,
                autocall_watcher=autocall_watcher,
                autocall_manager_bot=autocall_manager_bot,
+               mail=mail,
                stop=asyncio.Event())
 
 
-def _build_carpets(settings: Settings, own_pool: Any, bot: Bot,
+def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
                    live_amo: AmoClient, rehearsal_amo: AmoClient):
     """Собрать разбор ковров. Возвращает (наблюдатель, хранилище) или (None, None).
 
@@ -316,8 +357,8 @@ def _build_carpets(settings: Settings, own_pool: Any, bot: Bot,
         mailbox=MailBox(connect=mail_settings.connect, folder=mail_settings.folder),
         store=store,
         poll_interval_sec=settings.carpets_poll_interval_sec,
-        on_question=_make_carpet_question_sender(bot, settings.owner_tg_id),
-        on_report=_make_carpet_report_sender(bot, settings.owner_tg_id),
+        on_question=_make_carpet_question_sender(mail),
+        on_report=_make_carpet_report_sender(mail),
         dry_run=settings.carpets_dry_run,
     )
     log.info("Ковры: включены, режим %s, почта %s/%s",
@@ -326,7 +367,7 @@ def _build_carpets(settings: Settings, own_pool: Any, bot: Bot,
     return watcher, store
 
 
-def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
+def _build_calendar(settings: Settings, own_pool: Any, mail: OwnerMail,
                     live_amo: AmoClient, rehearsal_amo: AmoClient):
     """Собрать работу по календарю. Возвращает (наблюдатель, хранилище, ключ).
 
@@ -371,12 +412,10 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
         store=store,
         sync_from=settings.gcal_sync_from or datetime.now(MOSCOW_TZ).date(),
         poll_interval_sec=settings.gcal_poll_interval_sec,
-        on_question=_make_calendar_question_sender(bot, settings.owner_tg_id),
-        on_rehearsal=_make_rehearsal_sender(bot, settings.owner_tg_id),
-        on_done=_make_calendar_done_sender(bot, settings.owner_tg_id,
-                                           settings.amo_base_url),
-        on_updated=_make_calendar_updated_sender(bot, settings.owner_tg_id,
-                                                 settings.amo_base_url),
+        on_question=_make_calendar_question_sender(mail),
+        on_rehearsal=_make_rehearsal_sender(mail),
+        on_done=_make_calendar_done_sender(mail, settings.amo_base_url),
+        on_updated=_make_calendar_updated_sender(mail, settings.amo_base_url),
         dry_run=settings.gcal_dry_run,
     )
     log.info("Календарь: включён, режим %s, календарь %s, читаю с %s",
@@ -385,7 +424,7 @@ def _build_calendar(settings: Settings, own_pool: Any, bot: Bot,
     return watcher, store, token
 
 
-def _build_autocall(settings: Settings, own_pool: Any, bot: Bot,
+def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
                     live_amo: AmoClient, rehearsal_amo: AmoClient):
     """Собрать автозвонок по заявке с сайта. Возвращает (наблюдатель, бот менеджера).
 
@@ -431,83 +470,122 @@ def _build_autocall(settings: Settings, own_pool: Any, bot: Bot,
         pbx = OnlinePbx(base_url=settings.pbx_base_url, api_key=settings.pbx_api_key)
 
     amo = rehearsal_amo if settings.autocall_dry_run else live_amo
-    manager_sender, manager_bot = _make_autocall_manager_sender(settings, bot, store)
+    manager_sender, manager_bot = _make_autocall_manager_sender(settings, mail, store)
     engine = AutocallEngine(
         pbx=pbx, amo=amo, store=store, manager_dial=settings.pbx_manager_dial,
         window_from_hour=settings.autocall_window_from_hour,
         window_to_hour=settings.autocall_window_to_hour,
         notify_manager=manager_sender,
         notify_owner_rehearsal=_make_autocall_rehearsal_sender(
-            bot, settings.owner_tg_id, settings.amo_base_url),
+            mail, settings.amo_base_url),
         notify_owner_connected=_make_autocall_connected_sender(
-            bot, settings.owner_tg_id, settings.amo_base_url, store),
+            mail, settings.amo_base_url, store),
         dry_run=settings.autocall_dry_run,
     )
     watcher = AutocallWatcher(
         amo=amo, engine=engine, store=store,
         poll_interval_sec=settings.autocall_poll_interval_sec,
-        on_no_phone=_make_autocall_no_phone_sender(
-            bot, settings.owner_tg_id, settings.amo_base_url),
+        on_no_phone=_make_autocall_no_phone_sender(mail, settings.amo_base_url),
     )
     log.info("Автозвонок: включён, режим %s",
              "репетиция" if settings.autocall_dry_run else "БОЕВОЙ")
     return watcher, manager_bot
 
 
-def _make_calendar_summary_sender(bot: Bot, owner_tg_id: int):
+def _question_purpose(store: Any) -> Purpose:
+    """Карточка-вопрос, доставленная с опозданием: отметить и не спросить дважды.
+
+    Отметка `question_msg_id` — это и признак «уже спросили», и ключ, по которому
+    ответ владельца находит свою запись. Без неё нажатие кнопки на доставленной
+    карточке было бы ответом в никуда.
+    """
+
+    async def still_needed(ref: str) -> bool:
+        link = await store.get(_ref_key(ref))
+        return link is not None and not link.question_msg_id
+
+    async def on_delivered(ref: str, message_id: int) -> None:
+        await store.update(_ref_key(ref), question_msg_id=message_id)
+
+    return Purpose(still_needed=still_needed, on_delivered=on_delivered)
+
+
+def _gcal_done_purpose(store: Any) -> Purpose:
+    """Отчёт о сделанной работе по записи календаря — ровно один на запись."""
+
+    async def still_needed(ref: str) -> bool:
+        link = await store.get(ref)
+        return link is not None and not link.done_msg_id
+
+    async def on_delivered(ref: str, message_id: int) -> None:
+        await store.update(ref, done_msg_id=message_id)
+
+    return Purpose(still_needed=still_needed, on_delivered=on_delivered)
+
+
+def _ref_key(ref: str) -> Any:
+    """К чему относится сообщение: у заказов и ковров это номер, у записи — строка."""
+    text = str(ref)
+    return int(text) if text.lstrip("-").isdigit() else text
+
+
+def _make_calendar_summary_sender(mail: OwnerMail):
     """Вечерняя строка про календарь — вслед за сводкой по заказам."""
 
     async def send(report) -> None:
-        await bot.send_message(owner_tg_id, calendar_summary_text(report))
+        await mail.send(calendar_summary_text(report), kind=MAIL_SUMMARY)
 
     return send
 
 
-def _make_order_done_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+def _make_order_done_sender(mail: OwnerMail, amo_base_url: str):
     """Сообщение о проведённом заказе из бота."""
 
     async def send(order, link) -> None:
-        await bot.send_message(owner_tg_id,
-                               order_done_text(order, link, base_url=amo_base_url))
+        await mail.send(order_done_text(order, link, base_url=amo_base_url),
+                        kind=MAIL_ORDER_DONE, ref=order.order_id)
 
     return send
 
 
-def _make_calendar_done_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+def _make_calendar_done_sender(mail: OwnerMail, amo_base_url: str):
     """Сообщение о сделке, заведённой по записи календаря.
 
     Возвращает номер отправленного сообщения — по нему наблюдатель понимает,
-    что об этой работе владелец уже извещён, и второй раз не пишет.
+    что об этой работе владелец уже извещён, и второй раз не пишет. Связи нет —
+    возвращаем None: сообщение стало долгом почты, и отметку поставит она сама,
+    когда доставит. Отметить раньше времени значило бы потерять отчёт, как
+    это случилось 2026-09-02.
     """
 
     async def send(link, actions) -> Optional[int]:
-        sent = await bot.send_message(owner_tg_id,
-                                      done_text(link, actions, base_url=amo_base_url))
-        return sent.message_id
+        return await mail.send(done_text(link, actions, base_url=amo_base_url),
+                               kind=MAIL_GCAL_DONE, ref=link.event_id)
 
     return send
 
 
-def _make_calendar_updated_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+def _make_calendar_updated_sender(mail: OwnerMail, amo_base_url: str):
     """Сообщение о том, что правка записи доехала до сделки."""
 
     async def send(link, changed) -> None:
-        await bot.send_message(owner_tg_id,
-                               updated_text(link, changed, base_url=amo_base_url))
+        await mail.send(updated_text(link, changed, base_url=amo_base_url),
+                        kind=MAIL_GCAL_UPDATED, ref=link.event_id)
 
     return send
 
 
-def _make_rehearsal_sender(bot: Bot, owner_tg_id: int):
+def _make_rehearsal_sender(mail: OwnerMail):
     """Отчёт репетиции: что робот сделал бы с записью календаря."""
 
     async def send(link, actions) -> None:
-        await bot.send_message(owner_tg_id, rehearsal_text(link, actions))
+        await mail.send(rehearsal_text(link, actions), kind=MAIL_GCAL_REHEARSAL,
+                        ref=link.event_id)
 
     return send
 
 
-def _make_calendar_question_sender(bot: Bot, owner_tg_id: int):
+def _make_calendar_question_sender(mail: OwnerMail):
     """Карточка по записи календаря. Какая именно — зависит от того, что случилось."""
 
     async def send(link) -> Optional[int]:
@@ -519,41 +597,30 @@ def _make_calendar_question_sender(bot: Bot, owner_tg_id: int):
         else:
             text, keyboard = calendar_question_card(link)
 
-        try:
-            sent = await bot.send_message(owner_tg_id, text, reply_markup=keyboard)
-        except Exception:                              # noqa: BLE001
-            log.exception("Календарь, запись %s: карточку отправить не удалось",
-                          link.event_id)
-            return None
-        return sent.message_id
+        return await mail.send(text, kind=MAIL_GCAL_QUESTION, ref=link.event_id,
+                               reply_markup=keyboard)
 
     return send
 
 
-def _make_carpet_question_sender(bot: Bot, owner_tg_id: int):
+def _make_carpet_question_sender(mail: OwnerMail):
     async def send(row, link) -> Optional[int]:
         text, keyboard = carpet_question_card(row, link.question)
-        try:
-            sent = await bot.send_message(owner_tg_id, text, reply_markup=keyboard)
-        except Exception:                              # noqa: BLE001
-            log.exception("Ковры, заказ №%s: карточку отправить не удалось", row.partner_id)
-            return None
-        return sent.message_id
+        return await mail.send(text, kind=MAIL_CARPET_QUESTION, ref=row.partner_id,
+                               reply_markup=keyboard)
 
     return send
 
 
-def _make_carpet_report_sender(bot: Bot, owner_tg_id: int):
+def _make_carpet_report_sender(mail: OwnerMail):
     async def send(letter, report) -> None:
-        try:
-            await bot.send_message(owner_tg_id, carpet_report_text(letter.subject, report))
-        except Exception:                              # noqa: BLE001
-            log.exception("Ковры: отчёт по письму отправить не удалось")
+        await mail.send(carpet_report_text(letter.subject, report),
+                        kind=MAIL_CARPET_REPORT)
 
     return send
 
 
-def _make_autocall_manager_sender(settings: Settings, bot: Bot, store: Any):
+def _make_autocall_manager_sender(settings: Settings, mail: OwnerMail, store: Any):
     """Сообщение менеджеру по исходу попытки дозвона.
 
     Возвращает (отправитель, бот менеджера). Второй элемент нужен вызывающему
@@ -581,25 +648,25 @@ def _make_autocall_manager_sender(settings: Settings, bot: Bot, store: Any):
         if manager_bot is not None:
             await manager_bot.send_message(settings.manager_tg_chat_id, text)
             return
-        await bot.send_message(
-            settings.owner_tg_id,
-            f"(менеджеру не отправлено: транспорт не настроен)\n{text}",
-        )
+        # Транспорта до менеджера нет — говорим владельцу. Это сообщение ему,
+        # значит идёт почтой: обрыв связи не должен съесть и его.
+        await mail.send(f"(менеджеру не отправлено: транспорт не настроен)\n{text}",
+                        kind=MAIL_AUTOCALL_MANAGER, ref=lead_id)
 
     return send, manager_bot
 
 
-def _make_autocall_rehearsal_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+def _make_autocall_rehearsal_sender(mail: OwnerMail, amo_base_url: str):
     """Репетиция: что робот сделал бы, если бы дошёл до звонка."""
 
     async def send(lead_id: int, phone10: Optional[str]) -> None:
-        await bot.send_message(
-            owner_tg_id, autocall_rehearsal_text(lead_id, phone10, base_url=amo_base_url))
+        await mail.send(autocall_rehearsal_text(lead_id, phone10, base_url=amo_base_url),
+                        kind=MAIL_AUTOCALL_REHEARSAL, ref=lead_id)
 
     return send
 
 
-def _make_autocall_connected_sender(bot: Bot, owner_tg_id: int, amo_base_url: str,
+def _make_autocall_connected_sender(mail: OwnerMail, amo_base_url: str,
                                     store: Any):
     """Отчёт владельцу о соединении — неделя наблюдения (дизайн §6.5).
 
@@ -612,45 +679,44 @@ def _make_autocall_connected_sender(bot: Bot, owner_tg_id: int, amo_base_url: st
     async def send(lead_id: int) -> None:
         link = await store.get(lead_id)
         phone10 = link.phone10 if link is not None else None
-        await bot.send_message(
-            owner_tg_id, connected_text(lead_id, phone10, base_url=amo_base_url))
+        await mail.send(connected_text(lead_id, phone10, base_url=amo_base_url),
+                        kind=MAIL_AUTOCALL_CONNECTED, ref=lead_id)
 
     return send
 
 
-def _make_autocall_no_phone_sender(bot: Bot, owner_tg_id: int, amo_base_url: str):
+def _make_autocall_no_phone_sender(mail: OwnerMail, amo_base_url: str):
     """Заявка с сайта пришла без телефона — владелец должен посмотреть сам."""
 
     async def send(lead_id: int) -> None:
-        await bot.send_message(owner_tg_id, no_phone_text(lead_id, base_url=amo_base_url))
+        await mail.send(no_phone_text(lead_id, base_url=amo_base_url),
+                        kind=MAIL_AUTOCALL_NO_PHONE, ref=lead_id)
 
     return send
 
 
-def _make_summary_sender(bot: Bot, owner_tg_id: int):
+def _make_summary_sender(mail: OwnerMail):
     """Вечерняя сводка владельцу."""
 
     async def send(summary) -> None:
-        await bot.send_message(owner_tg_id, summary_text(summary))
+        await mail.send(summary_text(summary), kind=MAIL_SUMMARY)
 
     return send
 
 
-def _make_question_sender(bot: Bot, owner_tg_id: int):
+def _make_question_sender(mail: OwnerMail):
     """Карточка-вопрос владельцу. Возвращает id сообщения — признак «уже спросили».
 
-    Если Telegram недоступен, возвращаем None: наблюдатель попробует ещё раз
-    на следующем проходе, и вопрос не потеряется.
+    Если Telegram недоступен, возвращаем None: карточка стала долгом почты.
+    Наблюдатель попробует ещё раз на следующем проходе, а почта — по своему
+    расписанию; кто успеет первым, тот и спросит, второй увидит проставленную
+    отметку и промолчит.
     """
 
     async def send(order, link) -> Optional[int]:
         text, keyboard = question_card(order, link.question)
-        try:
-            sent = await bot.send_message(owner_tg_id, text, reply_markup=keyboard)
-        except Exception:                              # noqa: BLE001
-            log.exception("Заказ №%s: карточку отправить не удалось", order.order_id)
-            return None
-        return sent.message_id
+        return await mail.send(text, kind=MAIL_ORDER_QUESTION, ref=order.order_id,
+                               reply_markup=keyboard)
 
     return send
 

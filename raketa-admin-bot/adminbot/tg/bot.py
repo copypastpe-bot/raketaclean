@@ -91,6 +91,7 @@ class OwnerCommands:
         calendar_dry_run: bool = True,
         autocall_enabled: bool = False,
         autocall_dry_run: bool = True,
+        mail: Optional[Any] = None,
     ) -> None:
         self.owner_tg_id = owner_tg_id
         self.control = control
@@ -104,6 +105,9 @@ class OwnerCommands:
         self.calendar_dry_run = calendar_dry_run
         self.autocall_enabled = autocall_enabled
         self.autocall_dry_run = autocall_dry_run
+        # Почта владельца — чтобы в /status было видно, копятся ли неотправленные
+        # сообщения. Тишина в Telegram и тишина робота выглядят одинаково.
+        self.mail = mail
 
     async def status(self, message: Any) -> None:
         text = status_text(
@@ -119,7 +123,21 @@ class OwnerCommands:
             report=getattr(self.calendar_watcher, "last_report", None))
         autocall = _autocall_status_line(
             enabled=self.autocall_enabled, dry_run=self.autocall_dry_run)
-        await message.answer(f"{text}\n\n{calendar}\n\n{autocall}")
+        parts = [text, calendar, autocall]
+        waiting = await self._mail_waiting()
+        if waiting:
+            parts.append(f"✉️ Жду отправки: {waiting} — Telegram не отвечал, дошлю сам.")
+        await message.answer("\n\n".join(parts))
+
+    async def _mail_waiting(self) -> int:
+        """Сколько сообщений владельцу ждут отправки. Сбой почты /status не роняет."""
+        if self.mail is None:
+            return 0
+        try:
+            return int(await self.mail.waiting())
+        except Exception:                              # noqa: BLE001
+            log.exception("Не удалось посчитать неотправленные сообщения")
+            return 0
 
     async def pause(self, message: Any) -> None:
         if await self.control.is_paused():

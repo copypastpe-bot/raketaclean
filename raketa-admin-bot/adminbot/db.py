@@ -687,6 +687,29 @@ async def fetch_pending_calendar_links(own_pool: asyncpg.Pool,
     return [_calendar_from_row(row) for row in rows]
 
 
+async def fetch_calendar_links_without_report(own_pool: asyncpg.Pool,
+                                              since: datetime) -> list[CalendarLink]:
+    """Записи, по которым работа сделана, а владельцу не отчитались.
+
+    Обычно таких нет: отметка ставится сразу после того, как Telegram принял
+    сообщение. Строка появляется здесь, когда связь оборвалась ровно в момент
+    отправки, — и без этого запроса отчёт пропал бы навсегда (2026-09-02).
+
+    `since` отсекает древность: колонка done_msg_id появилась 2026-08-28, и у
+    всего, что проведено раньше, она пуста по историческим причинам.
+    """
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM adminbot.gcal_events
+            WHERE status = 'done' AND done_msg_id IS NULL AND updated_at >= $1
+            ORDER BY updated_at
+            """,
+            since,
+        )
+    return [_calendar_from_row(row) for row in rows]
+
+
 async def count_calendar_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]:
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -901,6 +924,99 @@ async def fetch_autocall_actions(own_pool: asyncpg.Pool, lead_id: int,
             lead_id, limit,
         )
     return [dict(row) for row in rows]
+
+
+async def add_owner_letter(own_pool: asyncpg.Pool, *, chat_id: int, kind: str,
+                           ref: Optional[str], text: str,
+                           reply_markup: Optional[dict], expires_at: datetime,
+                           next_try_at: datetime, last_error: Optional[str]) -> int:
+    """Положить недоставленное сообщение в долг. Возвращает его номер."""
+    async with own_pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO adminbot.owner_outbox
+                (chat_id, kind, ref, text, reply_markup, expires_at, next_try_at,
+                 attempts, last_error)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8)
+            RETURNING id
+            """,
+            chat_id, kind, ref, text,
+            json.dumps(reply_markup) if reply_markup is not None else None,
+            expires_at, next_try_at, last_error,
+        )
+
+
+async def fetch_due_owner_letters(own_pool: asyncpg.Pool, now: datetime,
+                                  limit: int = 20) -> list[dict]:
+    """Созревшие долги, старые первыми: владелец читает их в порядке событий."""
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, chat_id, kind, ref, text, reply_markup, attempts, expires_at
+            FROM adminbot.owner_outbox
+            WHERE sent_at IS NULL AND dropped_at IS NULL AND next_try_at <= $1
+            ORDER BY id
+            LIMIT $2
+            """,
+            now, limit,
+        )
+    letters = []
+    for row in rows:
+        letter = dict(row)
+        letter["reply_markup"] = _as_dict(letter["reply_markup"])
+        letters.append(letter)
+    return letters
+
+
+async def mark_owner_letter_sent(own_pool: asyncpg.Pool, letter_id: int,
+                                 message_id: Optional[int], now: datetime) -> None:
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE adminbot.owner_outbox
+            SET sent_at = $2, message_id = $3
+            WHERE id = $1
+            """,
+            letter_id, now, message_id,
+        )
+
+
+async def postpone_owner_letter(own_pool: asyncpg.Pool, letter_id: int,
+                                next_try_at: datetime, error: str) -> None:
+    """Попытка не удалась — считаем её и назначаем следующую."""
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE adminbot.owner_outbox
+            SET attempts = attempts + 1, next_try_at = $2, last_error = $3
+            WHERE id = $1
+            """,
+            letter_id, next_try_at, error[:500],
+        )
+
+
+async def drop_owner_letter(own_pool: asyncpg.Pool, letter_id: int, now: datetime,
+                            reason: str) -> None:
+    """Долг больше не нужен: протух или нужда в нём отпала."""
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE adminbot.owner_outbox
+            SET dropped_at = $2, drop_reason = $3
+            WHERE id = $1
+            """,
+            letter_id, now, reason,
+        )
+
+
+async def count_owner_letters_waiting(own_pool: asyncpg.Pool) -> int:
+    """Сколько сообщений владельцу сейчас ждут отправки — строка для /status."""
+    async with own_pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            SELECT count(*) FROM adminbot.owner_outbox
+            WHERE sent_at IS NULL AND dropped_at IS NULL
+            """) or 0
 
 
 async def get_autocall_cursor(own_pool: asyncpg.Pool) -> Optional[datetime]:
