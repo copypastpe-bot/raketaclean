@@ -61,7 +61,7 @@ async def main() -> int:
         aged = sorted(((_age_days(lead, today), lead) for lead in leads),
                       key=lambda pair: -(pair[0] or 0))
         _print_buckets(aged)
-        _print_by_stage(leads, stages)
+        _print_by_stage(aged, stages)
         _print_oldest(aged, stages, base_url=settings.amo_base_url)
     finally:
         await amo.close()
@@ -141,12 +141,38 @@ def _print_buckets(aged: list[tuple[Optional[int], dict]]) -> None:
           f"молча): {forgotten}")
 
 
-def _print_by_stage(leads: list[dict], stages: dict[int, tuple[int, str]]) -> None:
-    counts = Counter(int(lead.get("status_id") or 0) for lead in leads)
-    print("\nПо этапам:")
-    for status_id, count in counts.most_common():
+def _print_by_stage(aged: list[tuple[Optional[int], dict]],
+                    stages: dict[int, tuple[int, str]]) -> None:
+    """По воронкам и этапам — и сколько на каждом забытых.
+
+    Владельцу это нужнее общего числа: по этапу видно, что именно не доделано.
+    «Заказ выполнен» без закрытия — забыли провести; «Новый лид» годовой
+    давности — заявка, до которой не дошли руки.
+    """
+    totals: Counter[int] = Counter()
+    forgotten: Counter[int] = Counter()
+    by_pipeline: Counter[int] = Counter()
+    forgotten_by_pipeline: Counter[int] = Counter()
+
+    for age, lead in aged:
+        status_id = int(lead.get("status_id") or 0)
+        pipeline_id = int(lead.get("pipeline_id") or 0)
+        totals[status_id] += 1
+        by_pipeline[pipeline_id] += 1
+        if age is not None and age > FORGOTTEN_DAYS:
+            forgotten[status_id] += 1
+            forgotten_by_pipeline[pipeline_id] += 1
+
+    print("\nПо воронкам (всего / из них старше полугода):")
+    for pipeline_id, count in by_pipeline.most_common():
+        name = PIPELINE_NAMES.get(pipeline_id, str(pipeline_id))
+        print(f"  {name}: {count} / {forgotten_by_pipeline[pipeline_id]}")
+
+    print("\nПо этапам (всего / из них старше полугода):")
+    for status_id, count in totals.most_common():
         pipeline_id, name = stages.get(status_id, (0, str(status_id)))
-        print(f"  {PIPELINE_NAMES.get(pipeline_id, pipeline_id)} · {name}: {count}")
+        print(f"  {PIPELINE_NAMES.get(pipeline_id, pipeline_id)} · {name}: "
+              f"{count} / {forgotten[status_id]}")
 
 
 def _print_oldest(aged: list[tuple[Optional[int], dict]],
