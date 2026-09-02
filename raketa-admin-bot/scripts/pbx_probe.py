@@ -100,14 +100,37 @@ async def auth_check(pbx: OnlinePbx) -> int:
     return 0
 
 
-async def test_call(pbx: OnlinePbx, manager_dial: str, phone: str) -> int:
-    """Тестовый звонок: печатает сырой ответ call/now.json — формат не разведан."""
+async def test_call(
+    pbx: OnlinePbx,
+    manager_dial: str,
+    phone: str,
+    *,
+    gate_from: str = "",
+    orig_number: str = "",
+    orig_name: str = "",
+) -> int:
+    """Тестовый звонок: печатает сырой ответ call/now.json — формат не разведан.
+
+    `gate_from`, `orig_number`, `orig_name` — параметры call/now.json из
+    официальной спецификации (api2.onlinepbx.ru/documentation, HTTP API
+    2.10.1): транк для первого номера и то, какой номер/имя увидит первый
+    вызываемый. Проверяем ими замену голосовой отбивке: менеджер должен
+    понять, что звонит робот, ЕЩЁ ДО того, как возьмёт трубку.
+    """
     if not manager_dial:
         raise SystemExit("PBX_MANAGER_DIAL не задан — не знаю, с какого номера звонить")
     print(f"Запускаю тестовый звонок: менеджер({_dial_label(manager_dial)}) → {mask(phone)}…")
-    payload = await pbx._request(
-        "/call/now.json", json_body={"from": manager_dial, "to": phone},
-    )
+    body: dict[str, str] = {"from": manager_dial, "to": phone}
+    if gate_from:
+        body["gate_from"] = gate_from
+    if orig_number:
+        body["from_orig_number"] = orig_number
+    if orig_name:
+        body["from_orig_name"] = orig_name
+    if len(body) > 2:
+        extras = ", ".join(f"{k}={_dial_label(v)}" for k, v in body.items() if k not in ("from", "to"))
+        print(f"Дополнительные параметры: {extras}")
+    payload = await pbx._request("/call/now.json", json_body=body)
     print("Сырой ответ call/now.json (телефоны в тексте маскированы):")
     print(_masked_repr(payload, phone, manager_dial))
     return 0
@@ -166,6 +189,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from", dest="from_number", metavar="НОМЕР",
                         help="кому звонить первым вместо PBX_MANAGER_DIAL "
                              "(внутренний номер или мобильный менеджера)")
+    parser.add_argument("--gate-from", metavar="ТРАНК", default="",
+                        help="через какой внешний номер звонить первому")
+    parser.add_argument("--orig-number", metavar="НОМЕР", default="",
+                        help="какой номер увидит первый вызываемый")
+    parser.add_argument("--orig-name", metavar="ИМЯ", default="",
+                        help="какое имя увидит первый вызываемый")
     parser.add_argument("--called-at", type=int, metavar="UNIX",
                         help="unix-время команды АТС (обязательно вместе с --outcome)")
     return parser.parse_args()
@@ -184,7 +213,12 @@ async def _main() -> int:
         if args.auth_check:
             return await auth_check(pbx)
         if args.test_call:
-            return await test_call(pbx, manager_dial, args.test_call)
+            return await test_call(
+                pbx, manager_dial, args.test_call,
+                gate_from=args.gate_from,
+                orig_number=args.orig_number,
+                orig_name=args.orig_name,
+            )
         return await outcome_check(pbx, args.outcome, args.called_at)
     except PbxError as exc:
         print(f"АТС ответила ошибкой: {exc}")
