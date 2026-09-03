@@ -20,6 +20,8 @@
 #   sudo raketa-admin-bot-update --autocall-live                      автозвонок: боевой режим
 #   sudo raketa-admin-bot-update --autocall-off                       автозвонок: выключить
 #   sudo raketa-admin-bot-update --manager-dials=8930...,8986...      телефоны менеджера: рабочий, потом личный (через запятую, без пробелов)
+#   sudo raketa-admin-bot-update --telegram-proxy=http://user:pass@host:port  трафик до Telegram через прокси вне РФ
+#   sudo raketa-admin-bot-update --telegram-proxy-off                 вернуть прямой путь до Telegram
 #
 # Токены и пароль базы в /opt/raketa-admin-bot/.env не трогаются никогда —
 # меняются только два выключателя, и каждый раз печатается итоговое состояние.
@@ -86,6 +88,8 @@ for arg in "$@"; do
         --autocall-live)      AUTOCALL_DRY=0 ;;
         --autocall-rehearsal) AUTOCALL_DRY=1 ;;
         --manager-dials=*)    MANAGER_DIALS="${arg#*=}" ;;
+        --telegram-proxy=*)   TELEGRAM_PROXY="${arg#*=}"; TELEGRAM_PROXY_SET=1 ;;
+        --telegram-proxy-off) TELEGRAM_PROXY=""; TELEGRAM_PROXY_SET=1 ;;
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
@@ -187,8 +191,10 @@ done
 
 say "5. Выключатели"
 set_flag() {                                  # имя переменной, новое значение
+    # Разделитель sed — вертикальная черта, а не косая: адрес прокси
+    # (http://user:pass@host:port) косыми чертами разорвал бы саму команду.
     if grep -q "^$1=" "$ENV_FILE"; then
-        sed -i "s/^$1=.*/$1=$2/" "$ENV_FILE"
+        sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
     else
         echo "$1=$2" >> "$ENV_FILE"
     fi
@@ -198,6 +204,7 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$BACKLOG_FROM" ] && set_flag AMO_SYNC_BACKLOG_FROM "$BACKLOG_FROM"
 [ -n "$CARPETS" ] && set_flag CARPETS_ENABLED "$CARPETS"
 [ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
+[ -n "$TELEGRAM_PROXY_SET" ] && set_flag TELEGRAM_PROXY_URL "$TELEGRAM_PROXY"
 [ -n "$GCAL" ] && set_flag GCAL_ENABLED "$GCAL"
 [ -n "$GCAL_DRY" ] && set_flag GCAL_DRY_RUN "$GCAL_DRY"
 [ -n "$GCAL_CALENDARS" ] && set_flag GCAL_CALENDAR_ID "$GCAL_CALENDARS"
@@ -247,6 +254,10 @@ echo "автозвонок: $([ "$now_autocall" = 1 ] && echo "ВКЛЮЧЁН, $
 # Телефоны менеджера печатаем целиком: их видит только владелец у себя в консоли,
 # а проверить порядок «рабочий, потом личный» иначе нечем.
 echo "телефоны менеджера: $(flag_of PBX_MANAGER_DIAL)"
+# Адрес прокси НЕ печатаем: в нём пароль, а вывод скрипта уходит в терминал
+# и в историю. Достаточно знать, каким путём бот идёт до Telegram.
+now_proxy=$(flag_of TELEGRAM_PROXY_URL)
+echo "Telegram: $([ -n "$now_proxy" ] && echo 'через прокси' || echo 'напрямую')"
 
 # Проверка доступа к календарю: читает три ближайшие записи и ничего не меняет.
 if [ -n "$GCAL_CHECK" ]; then
