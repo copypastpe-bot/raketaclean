@@ -103,3 +103,58 @@ def test_ip_pool_drops_junk_and_duplicates():
 def test_empty_setting_means_usual_resolution():
     assert parse_ip_pool("") == []
     assert parse_ip_pool(None) == []
+
+
+# --- прокси до Telegram ---
+# Блокировка идёт волнами и гасит все прямые адреса разом; тогда трафик
+# уводится через сервер вне РФ. Проверяем, что настройка доходит до сессии,
+# а не молча теряется по дороге.
+
+PROXY = "http://user:pass@75.119.153.118:39443"
+
+
+def test_session_without_proxy_stays_direct():
+    from adminbot.tg.session import build_session
+
+    session = build_session(POOL)
+
+    assert session._proxy is None
+
+
+def test_session_carries_the_proxy_when_given():
+    from aiohttp_socks import ProxyConnector
+
+    from adminbot.tg.session import build_session
+
+    session = build_session(POOL, PROXY)
+
+    assert session._proxy == PROXY
+    assert session._connector_type is ProxyConnector
+
+
+def test_address_pool_still_works_together_with_the_proxy():
+    """Пул адресов остаётся путём отката: он не должен пропадать при прокси."""
+    from adminbot.tg.session import build_session
+
+    session = build_session(POOL, PROXY)
+
+    assert "resolver" in session._connector_init
+
+
+def test_bot_actually_passes_the_proxy_setting():
+    """Сессия умеет прокси и без этого теста; ловим другое — что настройку
+    забыли передать при создании ботов. Именно так прокси и не включился бы:
+    молча, без единой ошибки."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path("adminbot/main.py").read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name)
+             and node.func.id == "build_session"]
+
+    assert calls, "вызовы build_session не найдены — тест устарел"
+    for call in calls:
+        assert len(call.args) >= 2, "build_session вызван без настройки прокси"
+        assert ast.unparse(call.args[1]) == "settings.telegram_proxy_url"

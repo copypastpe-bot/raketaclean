@@ -237,6 +237,10 @@ class Settings:
     # не разрешается, хотя сами адреса доступны. Пусто — обычный путь.
     telegram_api_ips: tuple[str, ...] = ()
 
+    # Прокси до Telegram: блокировка идёт волнами и гасит все прямые адреса
+    # разом, поэтому трафик уводится через сервер вне РФ. Пусто — прямой путь.
+    telegram_proxy_url: str = ""
+
     @classmethod
     def from_env(cls) -> "Settings":
         """Собрать настройки из переменных окружения.
@@ -271,6 +275,7 @@ class Settings:
             service_by_master=_service_by_master("SERVICE_BY_MASTER",
                                                  DEFAULT_SERVICE_BY_MASTER),
             telegram_api_ips=tuple(parse_ip_pool(os.environ.get("TELEGRAM_API_IPS"))),
+            telegram_proxy_url=(os.environ.get("TELEGRAM_PROXY_URL") or "").strip(),
             carpets_enabled=_flag("CARPETS_ENABLED", False),
             carpets_dry_run=_flag("CARPETS_DRY_RUN", True),
             carpets_poll_interval_sec=_int("CARPETS_POLL_INTERVAL_SEC", 3600),

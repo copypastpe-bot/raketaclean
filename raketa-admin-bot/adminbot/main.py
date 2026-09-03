@@ -218,8 +218,11 @@ async def build_app(settings: Settings) -> App:
                     service_by_master=services)
 
     # На российском сервере имя api.telegram.org не разрешается: если заданы
-    # прямые адреса, ходим по ним (тот же приём, что у рабочего бота компании).
-    bot = Bot(token=settings.tg_token, session=build_session(settings.telegram_api_ips))
+    # прямые адреса, ходим по ним. Блокировка идёт волнами и гасит все адреса
+    # разом, поэтому при заданном прокси трафик уходит через сервер вне РФ
+    # (тот же приём, что у рабочего бота компании).
+    bot = Bot(token=settings.tg_token,
+              session=build_session(settings.telegram_api_ips, settings.telegram_proxy_url))
 
     # Единственная дверь, через которую робот пишет владельцу. Telegram здесь
     # отвечает через раз, и сообщение, не ушедшее с первой попытки, раньше
@@ -638,7 +641,8 @@ def _make_autocall_manager_sender(settings: Settings, mail: OwnerMail, store: An
     manager_bot: Optional[Bot] = None
     if settings.worker_tg_token and settings.manager_tg_chat_id:
         manager_bot = Bot(token=settings.worker_tg_token,
-                          session=build_session(settings.telegram_api_ips))
+                          session=build_session(settings.telegram_api_ips,
+                                                settings.telegram_proxy_url))
 
     async def send(lead_id: int, kind: str) -> None:
         link = await store.get(lead_id)

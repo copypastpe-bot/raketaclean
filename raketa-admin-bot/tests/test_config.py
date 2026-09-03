@@ -181,3 +181,18 @@ def test_pbx_manager_dial_accepts_work_and_personal_phones(monkeypatch):
     s = Settings.from_env()
 
     assert s.pbx_manager_dials == ("89001112233", "89004445566")
+
+
+# --- прокси до Telegram ---
+
+def test_telegram_proxy_is_off_by_default(monkeypatch):
+    """Пусто — значит прямой путь, как было до появления прокси."""
+    _minimal_env(monkeypatch)
+    monkeypatch.delenv("TELEGRAM_PROXY_URL", raising=False)
+    assert Settings.from_env().telegram_proxy_url == ""
+
+
+def test_telegram_proxy_is_read_from_env(monkeypatch):
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_PROXY_URL", "  http://user:pass@75.119.153.118:39443  ")
+    assert Settings.from_env().telegram_proxy_url == "http://user:pass@75.119.153.118:39443"
