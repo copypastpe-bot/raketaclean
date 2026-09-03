@@ -53,6 +53,8 @@ AUTOCALL_EXAM=""
 AUTOCALL=""
 AUTOCALL_DRY=""
 MANAGER_DIALS=""
+TELEGRAM_PROXY=""
+TELEGRAM_PROXY_SET=""
 for arg in "$@"; do
     case "$arg" in
         --enable)    ENABLED=1 ;;
