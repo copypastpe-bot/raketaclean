@@ -23,6 +23,7 @@ from aiogram.filters import BaseFilter, Command
 
 from adminbot.amo import ids
 from adminbot.control import ControlPanel
+from adminbot.gcal.engine import OWNER_HANDLES_REASON, OWNER_KEEPS_REASON
 from adminbot.tg.calendar_cards import (
     CHOICE_PREFIX as GCAL_PREFIX, calendar_status_text, calendar_summary_text,
     parse_calendar_choice)
@@ -282,15 +283,18 @@ class CalendarAnswers:
     # Что записать по каждому ответу и что сказать владельцу.
     CHOICES: dict[str, tuple[dict, str]] = {
         "close": ({"status": "closing"}, "закрою сделку как несостоявшуюся."),
-        "keep": ({"status": "cancelled",
-                  "skip_reason": "владелец оставил сделку как есть"},
-                 "оставляю сделку как есть."),
+        # «Веду сам» — не просто отметка у себя: сделку надо пометить галочкой
+        # в амо, иначе рабочий бот про решение владельца не узнает и продолжит
+        # писать клиенту. Пометку ставит движок (статус `marking`), а не эта
+        # кнопка: так решение не потеряется при перезапуске.
+        "keep": ({"status": "marking", "skip_reason": OWNER_KEEPS_REASON},
+                 "оставляю сделку как есть и помечу её — роботы не полезут."),
         "boat_create": ({"status": "new", "path": "BOAT"}, "заведу сделку на юрлицо."),
         "boat_skip": ({"status": "skipped", "skip_reason": "теплоход — пропущен владельцем"},
                       "пропускаю."),
         "new": ({"status": "new", "path": "C"}, "создам новую сделку с нуля."),
-        "manual": ({"status": "skipped", "skip_reason": "владелец разбирается сам"},
-                   "понял, оставляю вам."),
+        "manual": ({"status": "marking", "skip_reason": OWNER_HANDLES_REASON},
+                   "понял, оставляю вам. Сделку помечу — роботы не полезут."),
         "retry": ({"status": "new"}, "проверю ещё раз."),
     }
 

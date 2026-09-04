@@ -76,6 +76,15 @@ def text_field(field_id: int, value: Any) -> dict:
     return {"field_id": field_id, "values": [{"value": value}]}
 
 
+def checkbox_field(field_id: int, value: bool) -> dict:
+    """Галочка: амо принимает её булевым значением, а не строкой «1».
+
+    Снятая галочка отправляется явным `False`, а не пустым значением: пустое
+    амо трактует как «не трогай это поле», и снять пометку стало бы нечем.
+    """
+    return {"field_id": field_id, "values": [{"value": bool(value)}]}
+
+
 def enum_field(field_id: int, enum_id: int) -> dict:
     """Значение из списка: «Услуга», «Специалист»."""
     return {"field_id": field_id, "values": [{"enum_id": enum_id}]}

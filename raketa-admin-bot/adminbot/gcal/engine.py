@@ -31,8 +31,8 @@ from typing import Any, Callable, Optional
 from adminbot.amo import ids
 from adminbot.amo.client import AmoError
 from adminbot.amo.fields import (
-    MOSCOW_TZ, datetime_field, enums_field, field_value, lead_contact_ids,
-    order_date_msk, text_field,
+    MOSCOW_TZ, checkbox_field, datetime_field, enums_field, field_value,
+    lead_contact_ids, order_date_msk, text_field,
 )
 from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.matcher import match_event
@@ -61,6 +61,32 @@ SERVICE_ENUMS: dict[str, int] = {
 # владелец ведёт сам (его решение 8), и правка записи не возвращает её в работу:
 # иначе первое же изменение состава завело бы сделку по чужой работе.
 KEPT_OUT_REASON = "была в календаре до включения"
+
+# Решения владельца «дальше веду сам»: кнопки «✋ Сам разберусь» на карточке-
+# вопросе и «✋ Оставить как есть» на карточке отмены. До 2026-09-04 они не
+# держались: запись оставалась в статусе `skipped`, а следующий проход
+# принимал это за снятую пометку «⁉️» и возвращал её в работу — робот шёл
+# и переписывал поля сделки поверх того, что владелец правил руками.
+OWNER_HANDLES_REASON = "владелец разбирается сам"
+OWNER_KEEPS_REASON = "владелец оставил сделку как есть"
+
+# Причины, по которым робот к записи больше не подходит.
+HANDS_OFF_REASONS: tuple[str, ...] = (
+    KEPT_OUT_REASON, OWNER_HANDLES_REASON, OWNER_KEEPS_REASON,
+)
+
+# Чем кончается пометка сделки: «оставить как есть» — отменённой записью,
+# «сам разберусь» — пропущенной. Разница только в отчётности, работать робот
+# не станет ни с той, ни с другой.
+FINAL_AFTER_MARK: dict[str, str] = {
+    OWNER_KEEPS_REASON: "cancelled",
+    OWNER_HANDLES_REASON: "skipped",
+}
+
+
+def _hands_off(link: CalendarLink) -> bool:
+    """Робот в эту запись не лезет — так решил владелец или так вышло само."""
+    return (link.skip_reason or "").startswith(HANDS_OFF_REASONS)
 
 
 def _kept_out_of_work(link: CalendarLink) -> bool:
@@ -167,6 +193,12 @@ class CalendarEngine:
         if link.status == "closing":
             return await self._close_deal(link)
 
+        # Владелец нажал «✋ Сам разберусь» или «✋ Оставить как есть»: ставим
+        # галочку в самой сделке. Отсюда, а не из Telegram, по той же причине,
+        # что и закрытие: решение переживёт перезапуск робота.
+        if link.status == "marking":
+            return await self._mark_owner_handles(link)
+
         if event.kind is EventKind.CANCELLED:
             return await self._handle_cancelled(link)
 
@@ -176,16 +208,17 @@ class CalendarEngine:
         if event.kind not in SILENT_KINDS and event.kind is not EventKind.BOAT:
             before = link
             link = await self._refresh(event, link)
-            if link.status == "done" and not _kept_out_of_work(link):
+            if link.status == "done" and not _hands_off(link):
                 # Запись поправили после проведения — доносим правку до сделки.
                 await self._apply_edits(event, link, before)
 
         if link.status in ("done", "waiting_owner", "cancelled"):
             return link                        # закончили или ждём ответа владельца
 
-        if _kept_out_of_work(link):
-            # Запись лежала в календаре до включения: этот заказ владелец ведёт
-            # сам, и правка записи не делает его нашей работой (решение 8).
+        if _hands_off(link):
+            # Запись лежала в календаре до включения либо владелец сказал
+            # «веду сам»: правка записи не делает этот заказ нашей работой
+            # (решение 8 и решение владельца 2026-09-04).
             return link
 
         if event.kind in SILENT_KINDS:
@@ -233,6 +266,36 @@ class CalendarEngine:
                                          "Закрыто по подтверждению владельца.")
         return await self.store.update(link.event_id, status="cancelled",
                                        skip_reason="сделка закрыта по вашему подтверждению")
+
+    async def _mark_owner_handles(self, link: CalendarLink) -> CalendarLink:
+        """Пометить сделку галочкой «заказ ведёт владелец».
+
+        Галочка нужна не нам, а рабочему боту (tgbot-v1): он пишет клиенту
+        письмо «Ваш заказ принят» и вопрос-подтверждение за сутки, а про наши
+        кнопки не знает и знать не может — общий язык у роботов только амо.
+        2026-09-04 клиентка отменила работу, владелец нажал «Оставить как есть»
+        и договорился созвониться через неделю, а рабочий бот всё равно
+        собирался спросить её про заказ.
+
+        Сделки может и не быть — тогда помечать нечего, и это нормальный исход,
+        а не ошибка: робот просто отступает.
+        """
+        reason = link.skip_reason or OWNER_HANDLES_REASON
+        final = FINAL_AFTER_MARK.get(reason, "skipped")
+        lead_id = link.real_lead_id or link.primary_lead_id
+        if lead_id is None:
+            return await self.store.update(link.event_id, status=final,
+                                           skip_reason=reason)
+
+        await self.store.log(link.event_id, "update_lead", dry_run=self.dry_run,
+                             entity="lead", amo_id=lead_id,
+                             payload={"field": ids.FIELD_OWNER_HANDLES})
+        await self.amo.update_lead(
+            lead_id, custom_fields=[checkbox_field(ids.FIELD_OWNER_HANDLES, True)])
+        await self.amo.add_note(lead_id, "🤖 Заказ ведёт владелец: роботы эту "
+                                         "сделку не трогают.")
+        return await self.store.update(link.event_id, status=final,
+                                       skip_reason=reason)
 
     async def _handle_cancelled(self, link: CalendarLink) -> CalendarLink:
         """Запись удалена = заказ отменён.
@@ -553,8 +616,10 @@ class CalendarEngine:
         }
         changed = {name: value for name, value in updates.items()
                    if getattr(link, name, None) != value}
-        if link.status == "skipped" and not _kept_out_of_work(link):
+        if link.status == "skipped" and not _hands_off(link):
             # Владелец снял пометку «⁉️» — запись снова в работе (решение 9).
+            # Его собственное «веду сам» сюда не попадает: это не снятая
+            # пометка, а прямое указание не трогать заказ.
             changed["status"] = "new"
             changed["skip_reason"] = None
         if not changed:

@@ -633,3 +633,101 @@ async def test_known_contact_without_a_lead_is_a_repeat_order(amo):
     created = amo.calls_of("create_lead")[0]
     fields = {field["field_id"]: field for field in created["custom_fields"]}
     assert fields[ids.FIELD_SOURCE]["values"] == [{"enum_id": ids.SOURCE_ENUM_REPEAT}]
+
+
+async def test_owner_decision_to_handle_it_himself_sticks(amo):
+    """«✋ Сам разберусь» держится: следующий проход запись не будит.
+
+    До 2026-09-04 не держалось. Запись оставалась в `skipped`, а проход
+    принимал это за снятую пометку «⁉️» (решение 9) и возвращал её в работу:
+    робот шёл и переписывал поля сделки поверх правок владельца.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="skipped",
+                       skip_reason="владелец разбирается сам")
+
+    link = await engine.process(an_order(comment="Дописал состав"))
+
+    assert link.status == "skipped"
+    assert amo.calls == []
+
+
+async def test_owner_decision_marks_the_deal_in_amo(amo):
+    """По нажатию кнопки сделка помечается галочкой «заказ ведёт владелец».
+
+    Галочка нужна не нам, а рабочему боту: про наши кнопки он не знает,
+    общий язык у роботов только карточка сделки в амо.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", real_lead_id=41400001, status="marking",
+                       skip_reason="владелец оставил сделку как есть")
+
+    link = await engine.process(ParsedEvent(event_id="evt-1",
+                                            kind=EventKind.CANCELLED))
+
+    assert link.status == "cancelled"
+    updates = amo.calls_of("update_lead")
+    assert updates, "галочка в амо не поставлена"
+    fields = updates[-1][1]["custom_fields"]
+    assert fields == [{"field_id": ids.FIELD_OWNER_HANDLES,
+                       "values": [{"value": True}]}]
+
+
+async def test_marking_without_a_deal_is_not_an_error(amo):
+    """Сделки у записи нет — помечать нечего, робот просто отступает."""
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="marking",
+                       skip_reason="владелец разбирается сам")
+
+    link = await engine.process(an_order())
+
+    assert link.status == "skipped"
+    assert amo.calls_of("update_lead") == []
+
+
+async def test_marked_record_is_not_woken_by_a_later_edit(amo):
+    """Пометили — и правка записи в календаре её больше не будит."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", real_lead_id=41400001, status="marking",
+                       skip_reason="владелец разбирается сам")
+
+    await engine.process(an_order())
+    amo.calls.clear()
+    link = await engine.process(an_order(comment="И ещё раз поправил"))
+
+    assert link.status == "skipped"
+    assert amo.calls == []
+
+
+async def test_marks_the_primary_lead_when_the_salesbot_never_made_a_deal(amo):
+    """Сюжет 6: лид передан в работу, автосделки нет, владелец берёт заказ себе.
+
+    Дочерней сделки в этот момент не существует, но лид известен — его и
+    помечаем. Рабочий бот смотрит обе карточки цепочки, так что галочки на
+    лиде ему достаточно.
+    """
+    amo.add_lead(41400002, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", primary_lead_id=41400002, status="marking",
+                       skip_reason="владелец разбирается сам")
+
+    link = await engine.process(an_order())
+
+    assert link.status == "skipped"
+    updates = amo.calls_of("update_lead")
+    assert updates and updates[-1][0] == 41400002
+    assert updates[-1][1]["custom_fields"] == [
+        {"field_id": ids.FIELD_OWNER_HANDLES, "values": [{"value": True}]}]

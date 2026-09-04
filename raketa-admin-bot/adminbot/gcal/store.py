@@ -24,7 +24,8 @@ from adminbot.models import CalendarLink
 # `waiting_owner` здесь тоже есть — движок по нему ничего не делает, но карточку
 # может понадобиться дослать, если Telegram в прошлый раз не ответил.
 ACTIVE_STATUSES: tuple[str, ...] = (
-    "new", "in_progress", "waiting_salesbot", "waiting_owner", "closing", "error",
+    "new", "in_progress", "waiting_salesbot", "waiting_owner", "closing",
+    "marking", "error",
 )
 
 

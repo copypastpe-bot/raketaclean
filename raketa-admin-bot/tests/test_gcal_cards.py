@@ -157,12 +157,18 @@ async def test_owner_confirms_closing(answered):
 
 
 async def test_owner_keeps_the_deal(answered):
+    """«Оставить как есть» — сначала пометка сделки, отмена записи потом.
+
+    Кнопка ставит `marking`, а галочку «заказ ведёт владелец» и итоговый
+    `cancelled` доделывает проход движка: решение владельца должно пережить
+    перезапуск робота, как и закрытие сделки.
+    """
     store, answers = answered
 
     await answers.on_choice(FakeCallback("gcal:keep"))
 
     link = await store.get("evt-1")
-    assert link.status == "cancelled"
+    assert link.status == "marking"
     assert "остав" in (link.skip_reason or "")
 
 

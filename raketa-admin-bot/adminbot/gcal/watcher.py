@@ -228,7 +228,8 @@ class CalendarWatcher:
         """Обычно ждём положенное, но не тогда, когда работа не закончена."""
         counts = dict(getattr(self.last_report, "by_status", {}) or {})
         unfinished = sum(counts.get(status, 0) for status in
-                         ("waiting_salesbot", "in_progress", "new", "error", "closing"))
+                         ("waiting_salesbot", "in_progress", "new", "error", "closing",
+                          "marking"))
         return QUICK_RETRY_SEC if unfinished else self.poll_interval_sec
 
     # --- внутреннее ---
