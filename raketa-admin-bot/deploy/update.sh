@@ -15,6 +15,8 @@
 #   sudo raketa-admin-bot-update --gcal-calendars=A,B               какие календари читать (через запятую, без пробелов)
 #   sudo raketa-admin-bot-update --gcal-run=ID[,ID]                 провести эти записи календаря
 #   sudo raketa-admin-bot-update --gcal-run=ID --gcal-preview       то же, но без записи в CRM
+#   sudo raketa-admin-bot-update --gcal-forget=ID[,ID]              показать, что робот помнит об этих записях
+#   sudo raketa-admin-bot-update --gcal-forget=ID --gcal-forget-live  забыть их (сделки снова свободны)
 #   sudo raketa-admin-bot-update --autocall-exam   экзамен фильтра заявок с сайта (читает CRM, ничего не меняет)
 #   sudo raketa-admin-bot-update --autocall-on --autocall-rehearsal   автозвонок: репетиция
 #   sudo raketa-admin-bot-update --autocall-live                      автозвонок: боевой режим
@@ -41,6 +43,8 @@ GCAL_CALENDARS=""
 GCAL_RUN=""
 GCAL_PREVIEW=""
 GCAL_RESET=""
+GCAL_FORGET=""
+GCAL_FORGET_LIVE=""
 SHOW_LEADS=""
 SHOW_STALE=""
 CLOSE_STALE=""
@@ -76,6 +80,8 @@ for arg in "$@"; do
         --gcal-run=*)     GCAL_RUN="${arg#*=}" ;;
         --gcal-preview)   GCAL_PREVIEW=1 ;;
         --gcal-reset)     GCAL_RESET=1 ;;
+        --gcal-forget=*)  GCAL_FORGET="${arg#*=}" ;;
+        --gcal-forget-live) GCAL_FORGET_LIVE=1 ;;
         --leads=*)        SHOW_LEADS="${arg#*=}" ;;
         --stale)          SHOW_STALE=1 ;;
         --close-stale)       CLOSE_STALE=1 ;;
@@ -282,6 +288,18 @@ if [ -n "$GCAL_RUN" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.run_calendar || true
 fi
 
+# Забыть запись календаря: нужно, когда запись удалена из календаря, а сделку
+# она за собой держит — вернувшийся заказ того же клиента иначе считается новым.
+# Без --gcal-forget-live только показывает, что будет забыто.
+if [ -n "$GCAL_FORGET" ]; then
+    say "Память о записях календаря: $([ -n "$GCAL_FORGET_LIVE" ] && echo 'ЗАБЫВАЮ' || echo 'просмотр')"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS GCAL_FORGET_IDS="$GCAL_FORGET" \
+        GCAL_FORGET_LIVE="${GCAL_FORGET_LIVE:-0}" \
+        "$HOME_DIR/.venv/bin/python" -m scripts.forget_calendar || true
+fi
+
 # Диагностика: какие сделки у клиента в CRM. Ничего не меняет.
 if [ -n "$SHOW_LEADS" ] || [ -n "$SHOW_LEAD_IDS" ]; then
     say "Сделки клиента"
@@ -324,7 +342,7 @@ if [ -n "$AUTOCALL_EXAM" ]; then
 fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."

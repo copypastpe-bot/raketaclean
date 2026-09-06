@@ -538,3 +538,33 @@ async def test_finished_records_without_a_report_are_found(pool):
     assert [link.event_id for link in debts] == ["evt-lost"]
     assert await store.finished_without_report(
         datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+async def test_letters_of_a_forgotten_record_are_visible(pool):
+    """Забывая запись, владелец должен видеть её недосланные письма.
+
+    Иначе робот погасил бы долги молча, а владелец так и не узнал бы, о чём
+    ему собирались написать.
+    """
+    from adminbot.tg.outbox import PgMailStore
+
+    store = PgMailStore(pool)
+    waiting = await store.add(
+        chat_id=190933209, kind="gcal_done", ref="evt-dead", text="Сделка заведена",
+        reply_markup=None, expires_at=NOW + timedelta(hours=24), next_try_at=NOW,
+        error="TimeoutError")
+    delivered = await store.add(
+        chat_id=190933209, kind="gcal_done", ref="evt-dead", text="Ушло раньше",
+        reply_markup=None, expires_at=NOW + timedelta(hours=24), next_try_at=NOW,
+        error="TimeoutError")
+    await store.mark_sent(delivered, 555, NOW)
+    await store.add(
+        chat_id=190933209, kind="gcal_done", ref="evt-other", text="Про другую запись",
+        reply_markup=None, expires_at=NOW + timedelta(hours=24), next_try_at=NOW,
+        error="TimeoutError")
+
+    letters = await db.fetch_owner_letters_for(pool, "evt-dead")
+
+    assert [letter["id"] for letter in letters] == [waiting]
+    assert letters[0]["preview"] == "Сделка заведена"
+    assert await db.fetch_owner_letters_for(pool, "evt-missing") == []

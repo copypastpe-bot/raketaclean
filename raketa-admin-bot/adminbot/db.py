@@ -968,6 +968,27 @@ async def fetch_due_owner_letters(own_pool: asyncpg.Pool, now: datetime,
     return letters
 
 
+async def fetch_owner_letters_for(own_pool: asyncpg.Pool, ref: str) -> list[dict]:
+    """Незаконченные долги по одной записи: они ещё ждут отправки.
+
+    Нужно при ручном разборе последствий: если робот забывает запись, её
+    недоставленные письма теряют смысл, и владелец должен видеть, что именно
+    он гасит вместе с ней.
+    """
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, kind, ref, attempts, next_try_at, expires_at,
+                   left(text, 80) AS preview
+            FROM adminbot.owner_outbox
+            WHERE ref = $1 AND sent_at IS NULL AND dropped_at IS NULL
+            ORDER BY id
+            """,
+            ref,
+        )
+    return [dict(row) for row in rows]
+
+
 async def mark_owner_letter_sent(own_pool: asyncpg.Pool, letter_id: int,
                                  message_id: Optional[int], now: datetime) -> None:
     async with own_pool.acquire() as conn:
