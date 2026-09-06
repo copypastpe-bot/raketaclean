@@ -52,6 +52,34 @@ async def test_specialist_is_not_overwritten():
     assert ids.FIELD_SPECIALIST not in fields_of(amo)
 
 
+async def test_address_from_the_calendar_is_not_overwritten():
+    """Адрес заказа приходит из карточки клиента и бывает устаревшим.
+
+    Фактический адрес работы владелец вносит в календарь, оттуда его переносит
+    в сделку календарный движок — и он точнее: «п 3, эт 4, со стороны двора»
+    против «Менделеева 15 а» из карточки, заполненной когда-то импортом из CRM.
+    Проведение заказа не повод затирать уточнение (случай 2026-09-06).
+    """
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo, custom_fields_values=[
+        {"field_id": ids.FIELD_ADDRESS,
+         "values": [{"value": "Менделеева д 15а, кв 99, п 3, эт 4, со стороны двора"}]}])
+
+    await make_engine(amo, store).process_order(make_order())
+
+    assert ids.FIELD_ADDRESS not in fields_of(amo)
+
+
+async def test_empty_address_is_filled_from_the_order():
+    """Сделка без адреса: то, что знает бот, лучше пустого поля."""
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo)
+
+    await make_engine(amo, store).process_order(make_order())
+
+    assert fields_of(amo)[ids.FIELD_ADDRESS]["values"][0]["value"] == "ул. Ленина, 5"
+
+
 async def test_payment_type_and_date_are_filled():
     amo, store = FakeAmo(), FakeStore()
     open_realization_lead(amo)
