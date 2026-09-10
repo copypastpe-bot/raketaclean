@@ -99,7 +99,7 @@ class Watcher:
             try:
                 link = await self.engine.process_order(order)
             except Exception as exc:                  # noqa: BLE001 — цикл не должен падать
-                log.exception("Заказ №%s: проход прерван", order.order_id)
+                log.exception("%s №%s: проход прерван", order.label, order.order_id)
                 failures.append((order.order_id, f"{type(exc).__name__}: {exc}"))
                 continue
 
@@ -145,7 +145,7 @@ class Watcher:
         try:
             await self.on_done(order, link)
         except Exception:                              # noqa: BLE001
-            log.exception("Заказ №%s: сообщение о работе не ушло", order.order_id)
+            log.exception("%s №%s: сообщение о работе не ушло", order.label, order.order_id)
 
     async def _maybe_ask(self, order: Order, link: AmoLink) -> bool:
         """Отправить карточку-вопрос, если она ещё не отправлена. True — отправили."""
@@ -156,7 +156,8 @@ class Watcher:
 
         message_id = await self.on_question(order, link)
         if not message_id:
-            log.warning("Заказ №%s: карточку-вопрос отправить не удалось", order.order_id)
+            log.warning("%s №%s: карточку-вопрос отправить не удалось",
+                        order.label, order.order_id)
             return False
         await self.engine.store.update(order.order_id, question_msg_id=int(message_id))
         return True
@@ -179,6 +180,30 @@ class PgOrderSource:
         fresh = await db.fetch_unprocessed_orders(self.bot_pool, self.own_pool, self.backlog_from)
         active_ids = await db.fetch_link_ids_by_status(self.own_pool, ACTIVE_STATUSES)
         unfinished = await db.fetch_orders_by_ids(self.bot_pool, active_ids)
+
+        by_id = {order.order_id: order for order in unfinished}
+        by_id.update({order.order_id: order for order in fresh})
+        return [by_id[order_id] for order_id in sorted(by_id)]
+
+
+class PgCleaningSource:
+    """Тот же источник, но по уборкам клининг-контура.
+
+    Читает `public.cleaning_orders` и свою таблицу связок: номера уборок и заказов
+    химчистки пересекаются, и общая очередь путала бы их между собой.
+    """
+
+    def __init__(self, bot_pool: asyncpg.Pool, own_pool: asyncpg.Pool, backlog_from: date) -> None:
+        self.bot_pool = bot_pool
+        self.own_pool = own_pool
+        self.backlog_from = backlog_from
+
+    async def pending(self) -> list[Order]:
+        fresh = await db.fetch_unprocessed_cleaning_orders(
+            self.bot_pool, self.own_pool, self.backlog_from)
+        active_ids = await db.fetch_link_ids_by_status(
+            self.own_pool, ACTIVE_STATUSES, table=db.CLEANING_LINKS_TABLE)
+        unfinished = await db.fetch_cleaning_orders_by_ids(self.bot_pool, active_ids)
 
         by_id = {order.order_id: order for order in unfinished}
         by_id.update({order.order_id: order for order in fresh})

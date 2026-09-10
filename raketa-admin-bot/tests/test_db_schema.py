@@ -47,7 +47,8 @@ async def pool():
             """
             INSERT INTO public.clients (id, full_name, phone, phone_digits, address, last_order_addr) VALUES
                 (100, 'Ирина', '+79601861067', '79601861067', 'ул. Ленина, 5', NULL),
-                (101, 'Юлия', '+79159496642', '79159496642', NULL, 'пр. Гагарина, 12')
+                (101, 'Юлия', '+79159496642', '79159496642', NULL, 'пр. Гагарина, 12'),
+                (102, 'Наталья', '+79101112233', '79101112233', NULL, NULL)
             """
         )
         await conn.execute(
@@ -65,6 +66,36 @@ async def pool():
             """
             INSERT INTO public.order_masters (order_id, master_id) VALUES
                 (596, 1), (596, 2), (597, 2)
+            """
+        )
+        # Клининг-контур: уборки лежат в своих таблицах, и их номера пересекаются
+        # с номерами химчистки — уборка №596 и заказ №596 существуют разом.
+        await conn.execute(
+            """
+            INSERT INTO public.cleaning_foremen (id, fn, ln, phone) VALUES
+                (1, 'Лариса', 'Иванова', '+79200000001')
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO public.cleaning_orders
+                (id, client_id, foreman_id, address, total_amount, happened_at, deleted_at) VALUES
+                (3,   102, 1, 'Гагарина 1, кв 5',   3000.00, $1, NULL),
+                (596, 100, 1, 'Менделеева 15, кв 3', 12000.00, $2, NULL),
+                (5,   102, 1, 'Гагарина 1, кв 5',   9000.00, $3, NULL),
+                (7,   101, 1, 'пр. Гагарина, 12',    4000.00, $3, $3)
+            """,
+            NOW - timedelta(days=5), NOW - timedelta(hours=2), NOW,
+        )
+        await conn.execute(
+            """
+            INSERT INTO public.cleaning_order_payments (id, order_id, method, amount) VALUES
+                (1, 3,   'Расчётный',            3000.00),
+                (2, 596, 'Карта',                5000.00),
+                (3, 596, 'Наличные',             7000.00),
+                (4, 5,   'Подарочный сертификат', 2000.00),
+                (5, 5,   'Наличные',             7000.00),
+                (6, 7,   'Наличные',             4000.00)
             """
         )
     try:
@@ -568,3 +599,149 @@ async def test_letters_of_a_forgotten_record_are_visible(pool):
     assert [letter["id"] for letter in letters] == [waiting]
     assert letters[0]["preview"] == "Сделка заведена"
     assert await db.fetch_owner_letters_for(pool, "evt-missing") == []
+
+
+# --- уборки клининг-контура (2026-09-10) ---
+
+
+async def test_cleaning_orders_come_from_their_own_tables(pool):
+    """Уборка приходит целиком: свой адрес, бригадир, оплата и подпись."""
+    orders = await db.fetch_unprocessed_cleaning_orders(
+        pool, pool, since=NOW.date() - timedelta(days=10))
+
+    # по времени работы: 3 (пять дней назад), 596 (два часа назад), 5 (сейчас).
+    # Уборка №7 удалена — её в списке нет вовсе.
+    assert [o.order_id for o in orders] == [3, 596, 5]
+
+    cleaning = {o.order_id: o for o in orders}[596]
+    assert cleaning.kind == "cleaning" and cleaning.label == "Уборка"
+    assert cleaning.phone10 == "9601861067"
+    assert cleaning.client_name == "Ирина"
+    assert cleaning.address == "Менделеева 15, кв 3"     # адрес свой, не из карточки клиента
+    assert cleaning.amount_total == Decimal("12000.00")
+    assert cleaning.masters == [("Лариса Иванова", "+79200000001")]
+    assert cleaning.rating_score is None                 # оценки у клининга нет
+    assert cleaning.awaiting_wire_payment is False       # оплату вносят при проведении
+    assert cleaning.service_kind == "cleaning"
+    assert cleaning.specialist_enums == (952251,)        # «Ольга Скоропашкина»
+
+
+async def test_payment_method_is_the_first_row_of_the_order(pool):
+    """Способов оплаты бывает несколько; основной — первый внесённый.
+
+    Так же считает и сам бот, когда начисляет бонусы (`cleaning/handlers.py`).
+    """
+    by_id = {o.order_id: o for o in
+             await db.fetch_cleaning_orders_since(pool, NOW.date() - timedelta(days=10))}
+
+    assert by_id[596].payment_method == "Карта"                 # вторая строка — «Наличные»
+    assert by_id[5].payment_method == "Подарочный сертификат"   # вторая строка — «Наличные»
+    assert by_id[3].payment_method == "Расчётный"
+
+
+async def test_deleted_cleaning_is_never_taken_into_work(pool):
+    """Уборку удалили в боте — в CRM её проводить нельзя."""
+    orders = await db.fetch_cleaning_orders_since(pool, NOW.date() - timedelta(days=60))
+
+    assert 7 not in [o.order_id for o in orders]
+    assert await db.fetch_cleaning_orders_by_ids(pool, [7]) == []
+
+
+async def test_repeat_client_is_seen_across_both_tables(pool):
+    """«Источник сделки»: первый раз — сарафан, дальше — повторный заказ.
+
+    Клиент мог прийти сначала за химчисткой, а уборку заказать впервые — это
+    всё равно повторное обращение, и «сарафаном» его называть нельзя.
+    """
+    by_id = {o.order_id: o for o in
+             await db.fetch_cleaning_orders_since(pool, NOW.date() - timedelta(days=60))}
+
+    assert by_id[3].is_repeat_client is False    # у Натальи это первая работа вообще
+    assert by_id[5].is_repeat_client is True     # у неё же была уборка пять дней назад
+    assert by_id[596].is_repeat_client is True   # у Ирины химчистка месяц назад
+
+
+async def test_cleaning_and_order_with_the_same_number_are_two_works(pool):
+    """Номера таблиц бота пересекаются: связки лежат раздельно."""
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.create_link(pool, order_id=596, phone10="9601861067",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 596, table=db.CLEANING_LINKS_TABLE,
+                         status="done", path="A", real_lead_id=41400002)
+
+    assert (await db.get_link(pool, 596)).status == "new"          # заказ не тронут
+    assert (await db.get_link(pool, 596, table=db.CLEANING_LINKS_TABLE)).status == "done"
+
+    # уборка №596 взята в работу — в очередь новых уборок она больше не попадает
+    fresh = await db.fetch_unprocessed_cleaning_orders(
+        pool, pool, since=NOW.date() - timedelta(days=60))
+    assert [o.order_id for o in fresh] == [3, 5]
+
+
+async def test_a_lead_taken_by_one_stream_is_not_reused_by_the_other(pool):
+    """Уборка и химчистка одному клиенту в один день — это две сделки."""
+    await db.create_link(pool, order_id=597, phone10="9601861067")
+    await db.update_link(pool, 597, real_lead_id=31500001)
+    await db.create_link(pool, order_id=5, phone10="9601861067",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 5, table=db.CLEANING_LINKS_TABLE, real_lead_id=31500002)
+
+    # уборка не берёт сделку, занятую химчисткой...
+    assert await db.fetch_taken_lead_ids(pool, "9601861067", 5,
+                                         table=db.CLEANING_LINKS_TABLE) == {31500001}
+    # ...и наоборот
+    assert await db.fetch_taken_lead_ids(pool, "9601861067", 597) == {31500002}
+
+
+async def test_cleaning_journal_is_its_own(pool):
+    await db.create_link(pool, order_id=5, phone10="9601861067",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.log_action(pool, order_id=5, action="update_lead", dry_run=False,
+                        amo_entity="lead", amo_id=41400002, payload={"price": 9000},
+                        table=db.CLEANING_ACTIONS_TABLE)
+    await db.mark_checklist_step(pool, 5, "fill_realization",
+                                 table=db.CLEANING_LINKS_TABLE)
+
+    actions = await db.fetch_actions(pool, 5, table=db.CLEANING_ACTIONS_TABLE)
+    assert [row["action"] for row in actions] == ["update_lead"]
+    assert await db.fetch_actions(pool, 5) == []      # в журнале заказов пусто
+    link = await db.get_link(pool, 5, table=db.CLEANING_LINKS_TABLE)
+    assert set(link.checklist) == {"fill_realization"}
+
+
+async def test_cleaning_source_takes_new_and_unfinished(pool):
+    """Источник работы по уборкам: новые плюс недоделанные, как у заказов."""
+    from adminbot.sync.watcher import PgCleaningSource
+
+    await db.create_link(pool, order_id=3, phone10="79101112233",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 3, table=db.CLEANING_LINKS_TABLE,
+                         status="error", last_error="AmoError: 502")
+    await db.create_link(pool, order_id=596, phone10="9601861067",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 596, table=db.CLEANING_LINKS_TABLE,
+                         status="done", path="A", real_lead_id=41400002)
+
+    source = PgCleaningSource(pool, pool, NOW.date() - timedelta(days=60))
+    orders = await source.pending()
+
+    assert [o.order_id for o in orders] == [3, 5]      # 3 — с ошибкой, 5 — новая
+    assert orders[0].client_name == "Наталья"          # уборка приходит целиком
+
+
+async def test_evening_summary_sees_cleanings_separately(pool):
+    """Вечерняя сверка по уборкам считает свою таблицу, а не таблицу заказов."""
+    from adminbot.sync.reconcile import PgCleaningSummarySource, build_summary
+
+    await db.create_link(pool, order_id=596, phone10="9601861067",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 596, table=db.CLEANING_LINKS_TABLE,
+                         status="done", path="A", real_lead_id=41400002)
+
+    snapshot = await PgCleaningSummarySource(
+        pool, pool, NOW.date() - timedelta(days=60)).collect()
+    summary = build_summary(snapshot, now=NOW)
+
+    assert [row.order_id for row in summary.processed] == [596]
+    assert sorted(row.order_id for row in summary.missed) == [3, 5]
+    assert summary.total_orders == 3

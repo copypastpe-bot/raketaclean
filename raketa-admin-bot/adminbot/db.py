@@ -13,6 +13,7 @@ from typing import Any, Optional, Sequence
 
 import asyncpg
 
+from adminbot.amo import ids
 from adminbot.models import AmoLink, AutocallLead, CalendarLink, CarpetLink, Order
 from adminbot.phone import last10
 
@@ -21,6 +22,18 @@ _UPDATABLE_LINK_FIELDS = frozenset(
     {"phone10", "status", "path", "primary_lead_id", "real_lead_id", "question",
      "question_msg_id", "last_error"}
 )
+
+# Два потока работы — две таблицы связок. Номера `orders.id` и `cleaning_orders.id`
+# пересекаются: заказ №5 и уборка №5 существуют одновременно, и в общей таблице
+# слились бы в одну работу. Строение таблиц одинаковое, поэтому запросы ниже
+# принимают имя таблицы, а не дублируются.
+#
+# Имена берутся только отсюда — снаружи их не задают, поэтому подстановка в текст
+# запроса безопасна.
+LINKS_TABLE = "adminbot.amo_links"
+ACTIONS_TABLE = "adminbot.amo_actions"
+CLEANING_LINKS_TABLE = "adminbot.cleaning_links"
+CLEANING_ACTIONS_TABLE = "adminbot.cleaning_actions"
 
 # Заказы рабочего бота за период. Мастера: основной (orders.master_id) первым,
 # затем помощники из order_masters. Адрес — из карточки клиента.
@@ -62,6 +75,55 @@ LEFT JOIN public.clients c ON c.id = o.client_id
 WHERE ($1::date IS NULL OR o.created_at >= ($1::date AT TIME ZONE 'Europe/Moscow'))
   AND ($2::bigint[] IS NULL OR o.id = ANY($2::bigint[]))
 ORDER BY o.created_at, o.id
+"""
+
+# Уборки клининг-контура за период. Отличия от химчистки:
+# - адрес свой, в самом заказе (у химчистки его берут из карточки клиента);
+# - мастер один — бригадир, и он идёт только в примечание сделки: «Специалистом»
+#   у уборки всегда стоит Ольга (решение владельца 2026-09-10);
+# - оплат может быть несколько строк; основной считается первая по номеру —
+#   так же считает и сам бот при начислении бонусов;
+# - `deleted_at` не пустой — уборку удалили, в амо её проводить нельзя;
+# - «повторный клиент» смотрит обе таблицы бота: человек мог сначала заказать
+#   химчистку, а уборку — впервые, и «сарафаном» это уже не назвать.
+_SELECT_CLEANING_ORDERS = """
+SELECT
+    co.id,
+    co.happened_at,
+    co.total_amount,
+    co.address,
+    c.full_name AS client_full_name,
+    c.phone AS client_phone,
+    c.phone_digits AS client_phone_digits,
+    NULLIF(TRIM(CONCAT_WS(' ', f.fn, f.ln)), '') AS foreman_name,
+    f.phone AS foreman_phone,
+    (
+        SELECT p.method
+        FROM public.cleaning_order_payments p
+        WHERE p.order_id = co.id
+        ORDER BY p.id
+        LIMIT 1
+    ) AS payment_method,
+    (
+        EXISTS (
+            SELECT 1 FROM public.cleaning_orders prev
+            WHERE prev.client_id = co.client_id
+              AND prev.deleted_at IS NULL
+              AND prev.happened_at < co.happened_at
+        )
+        OR EXISTS (
+            SELECT 1 FROM public.orders po
+            WHERE po.phone_digits = c.phone_digits
+              AND po.created_at < co.happened_at
+        )
+    ) AS is_repeat_client
+FROM public.cleaning_orders co
+JOIN public.clients c ON c.id = co.client_id
+LEFT JOIN public.cleaning_foremen f ON f.id = co.foreman_id
+WHERE co.deleted_at IS NULL
+  AND ($1::date IS NULL OR co.happened_at >= ($1::date AT TIME ZONE 'Europe/Moscow'))
+  AND ($2::bigint[] IS NULL OR co.id = ANY($2::bigint[]))
+ORDER BY co.happened_at, co.id
 """
 
 
@@ -109,13 +171,60 @@ async def fetch_orders_by_ids(bot_pool: asyncpg.Pool, order_ids: Sequence[int]) 
     return [_order_from_row(row) for row in rows]
 
 
-async def fetch_linked_order_ids(own_pool: asyncpg.Pool, order_ids: list[int]) -> set[int]:
-    """Какие из заказов уже взяты в работу (есть строка в adminbot.amo_links)."""
+def _cleaning_order_from_row(row: asyncpg.Record) -> Order:
+    """Уборка в том же виде, в каком движок получает заказ химчистки.
+
+    «Услуга» и «Специалист» проставлены здесь, а не выведены из мастера: у уборки
+    их задал владелец раз и навсегда, а бригадир меняется от смены к смене.
+    Оценки клиента у клининга нет вовсе — значит, задачу «Получить ОС» робот не
+    закрывает (решение владельца №9 без изменений).
+    """
+    phone10 = last10(row["client_phone_digits"]) or last10(row["client_phone"])
+    foreman = row["foreman_name"]
+    return Order(
+        order_id=row["id"],
+        kind="cleaning",
+        phone10=phone10,
+        created_at=row["happened_at"],
+        amount_total=Decimal(row["total_amount"] or 0),
+        masters=[(str(foreman), row["foreman_phone"])] if foreman else [],
+        rating_score=None,
+        payment_method=row["payment_method"],
+        awaiting_wire_payment=False,
+        is_repeat_client=bool(row["is_repeat_client"]),
+        client_name=row["client_full_name"],
+        address=row["address"],
+        service_kind="cleaning",
+        specialist_enums=(ids.SPECIALIST_ENUM_CLEANING,),
+    )
+
+
+async def fetch_cleaning_orders_since(bot_pool: asyncpg.Pool, since: date) -> list[Order]:
+    """Все уборки начиная с даты `since` (по московскому времени)."""
+    async with bot_pool.acquire() as conn:
+        rows = await conn.fetch(_SELECT_CLEANING_ORDERS, since, None)
+    return [_cleaning_order_from_row(row) for row in rows]
+
+
+async def fetch_cleaning_orders_by_ids(
+    bot_pool: asyncpg.Pool, order_ids: Sequence[int]
+) -> list[Order]:
+    """Уборки по номерам — наблюдателю, чтобы вернуться к незавершённым."""
+    if not order_ids:
+        return []
+    async with bot_pool.acquire() as conn:
+        rows = await conn.fetch(_SELECT_CLEANING_ORDERS, None, list(order_ids))
+    return [_cleaning_order_from_row(row) for row in rows]
+
+
+async def fetch_linked_order_ids(own_pool: asyncpg.Pool, order_ids: list[int],
+                                 *, table: str = LINKS_TABLE) -> set[int]:
+    """Какие из заказов уже взяты в работу (есть строка в таблице связок)."""
     if not order_ids:
         return set()
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT order_id FROM adminbot.amo_links WHERE order_id = ANY($1::bigint[])", order_ids
+            f"SELECT order_id FROM {table} WHERE order_id = ANY($1::bigint[])", order_ids
         )
     return {row["order_id"] for row in rows}
 
@@ -126,6 +235,16 @@ async def fetch_unprocessed_orders(
     """Заказы с даты `since`, по которым робот ещё ничего не начинал."""
     orders = await fetch_orders_since(bot_pool, since)
     linked = await fetch_linked_order_ids(own_pool, [o.order_id for o in orders])
+    return [o for o in orders if o.order_id not in linked]
+
+
+async def fetch_unprocessed_cleaning_orders(
+    bot_pool: asyncpg.Pool, own_pool: asyncpg.Pool, since: date
+) -> list[Order]:
+    """Уборки с даты `since`, по которым робот ещё ничего не начинал."""
+    orders = await fetch_cleaning_orders_since(bot_pool, since)
+    linked = await fetch_linked_order_ids(own_pool, [o.order_id for o in orders],
+                                          table=CLEANING_LINKS_TABLE)
     return [o for o in orders if o.order_id not in linked]
 
 
@@ -155,13 +274,14 @@ def _link_from_row(row: Optional[asyncpg.Record]) -> Optional[AmoLink]:
 
 
 async def create_link(
-    own_pool: asyncpg.Pool, order_id: int, phone10: Optional[str], status: str = "new"
+    own_pool: asyncpg.Pool, order_id: int, phone10: Optional[str], status: str = "new",
+    *, table: str = LINKS_TABLE,
 ) -> AmoLink:
     """Взять заказ в работу. Повторный вызов ничего не портит (идемпотентность)."""
     async with own_pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
-            INSERT INTO adminbot.amo_links (order_id, phone10, status)
+            f"""
+            INSERT INTO {table} (order_id, phone10, status)
             VALUES ($1, $2, $3)
             ON CONFLICT (order_id) DO UPDATE SET updated_at = now()
             RETURNING *
@@ -171,37 +291,40 @@ async def create_link(
     return _link_from_row(row)
 
 
-async def get_link(own_pool: asyncpg.Pool, order_id: int) -> Optional[AmoLink]:
+async def get_link(own_pool: asyncpg.Pool, order_id: int,
+                   *, table: str = LINKS_TABLE) -> Optional[AmoLink]:
     async with own_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM adminbot.amo_links WHERE order_id = $1", order_id)
+        row = await conn.fetchrow(f"SELECT * FROM {table} WHERE order_id = $1", order_id)
     return _link_from_row(row)
 
 
-async def update_link(own_pool: asyncpg.Pool, order_id: int, **fields: Any) -> Optional[AmoLink]:
+async def update_link(own_pool: asyncpg.Pool, order_id: int, *, table: str = LINKS_TABLE,
+                      **fields: Any) -> Optional[AmoLink]:
     """Обновить разрешённые поля привязки. Имена колонок — только из белого списка."""
     unknown = set(fields) - _UPDATABLE_LINK_FIELDS
     if unknown:
         raise ValueError(f"Недопустимые поля привязки: {sorted(unknown)}")
     if not fields:
-        return await get_link(own_pool, order_id)
+        return await get_link(own_pool, order_id, table=table)
 
     names = list(fields)
     assignments = ", ".join(f"{name} = ${i + 2}" for i, name in enumerate(names))
     async with own_pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE adminbot.amo_links SET {assignments}, updated_at = now() "
+            f"UPDATE {table} SET {assignments}, updated_at = now() "
             f"WHERE order_id = $1 RETURNING *",
             order_id, *[fields[name] for name in names],
         )
     return _link_from_row(row)
 
 
-async def mark_checklist_step(own_pool: asyncpg.Pool, order_id: int, step: str) -> None:
+async def mark_checklist_step(own_pool: asyncpg.Pool, order_id: int, step: str,
+                              *, table: str = LINKS_TABLE) -> None:
     """Отметить выполненный шаг чек-листа — робот продолжит с этого места после сбоя."""
     async with own_pool.acquire() as conn:
         await conn.execute(
-            """
-            UPDATE adminbot.amo_links
+            f"""
+            UPDATE {table}
             SET checklist = checklist || jsonb_build_object($2::text, to_jsonb(now())),
                 updated_at = now()
             WHERE order_id = $1
@@ -219,39 +342,52 @@ async def log_action(
     amo_entity: Optional[str] = None,
     amo_id: Optional[int] = None,
     payload: Optional[dict] = None,
+    table: str = ACTIONS_TABLE,
 ) -> None:
     """Записать в журнал, что робот сделал (или сделал бы в режиме репетиции)."""
     async with own_pool.acquire() as conn:
         await conn.execute(
-            """
-            INSERT INTO adminbot.amo_actions (order_id, action, amo_entity, amo_id, dry_run, payload)
+            f"""
+            INSERT INTO {table} (order_id, action, amo_entity, amo_id, dry_run, payload)
             VALUES ($1, $2, $3, $4, $5, $6)
             """,
             order_id, action, amo_entity, amo_id, dry_run, payload,
         )
 
 
-async def fetch_actions(own_pool: asyncpg.Pool, order_id: int) -> list[dict]:
+async def fetch_actions(own_pool: asyncpg.Pool, order_id: int,
+                        *, table: str = ACTIONS_TABLE) -> list[dict]:
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM adminbot.amo_actions WHERE order_id = $1 ORDER BY id", order_id
+            f"SELECT * FROM {table} WHERE order_id = $1 ORDER BY id", order_id
         )
     return [dict(row) for row in rows]
 
 
 async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
-                               exclude_order_id: int) -> set[int]:
-    """Сделки, уже закреплённые за другими заказами этого клиента.
+                               exclude_order_id: int,
+                               *, table: str = LINKS_TABLE) -> set[int]:
+    """Сделки, уже закреплённые за другими работами этого клиента.
 
-    Одна сделка не может закрывать два заказа: у клиента бывает несколько работ
+    Одна сделка не может закрывать две работы: у клиента бывает несколько работ
     подряд, и каждой полагается своя сделка.
+
+    Смотрим ОБЕ таблицы связок. Уборка и химчистка одному клиенту в один день —
+    это две сделки (памятка владельца 2026-09-02), и сделку, занятую химчисткой,
+    уборка брать не должна, и наоборот. Номер работы исключается только в своей
+    таблице: в чужой такой же номер — совсем другая работа.
     """
+    other = CLEANING_LINKS_TABLE if table == LINKS_TABLE else LINKS_TABLE
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
-            """
+            f"""
             SELECT primary_lead_id, real_lead_id
-            FROM adminbot.amo_links
+            FROM {table}
             WHERE phone10 = $1 AND order_id <> $2
+            UNION
+            SELECT primary_lead_id, real_lead_id
+            FROM {other}
+            WHERE phone10 = $1
             """,
             phone10, exclude_order_id,
         )
@@ -262,38 +398,39 @@ async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
 
 
 async def fetch_link_ids_by_status(
-    own_pool: asyncpg.Pool, statuses: Sequence[str]
+    own_pool: asyncpg.Pool, statuses: Sequence[str], *, table: str = LINKS_TABLE
 ) -> list[int]:
     """Номера заказов, работа по которым ещё не закончена."""
     if not statuses:
         return []
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT order_id FROM adminbot.amo_links WHERE status = ANY($1::text[]) ORDER BY order_id",
+            f"SELECT order_id FROM {table} WHERE status = ANY($1::text[]) ORDER BY order_id",
             list(statuses),
         )
     return [row["order_id"] for row in rows]
 
 
 async def fetch_links_for_orders(
-    own_pool: asyncpg.Pool, order_ids: Sequence[int]
+    own_pool: asyncpg.Pool, order_ids: Sequence[int], *, table: str = LINKS_TABLE
 ) -> list[AmoLink]:
     """Всё, что робот записал по этим заказам, — сырьё для вечерней сводки."""
     if not order_ids:
         return []
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM adminbot.amo_links WHERE order_id = ANY($1::bigint[]) ORDER BY order_id",
+            f"SELECT * FROM {table} WHERE order_id = ANY($1::bigint[]) ORDER BY order_id",
             list(order_ids),
         )
     return [_link_from_row(row) for row in rows]
 
 
-async def count_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]:
+async def count_links_by_status(own_pool: asyncpg.Pool,
+                                *, table: str = LINKS_TABLE) -> dict[str, int]:
     """Сводка очереди для команды /status и вечерней сверки."""
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT status, count(*) AS n FROM adminbot.amo_links GROUP BY status"
+            f"SELECT status, count(*) AS n FROM {table} GROUP BY status"
         )
     return {row["status"]: row["n"] for row in rows}
 

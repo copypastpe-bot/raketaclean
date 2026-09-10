@@ -85,28 +85,46 @@ class MemoryLinkStore:
 
 
 class PgLinkStore:
-    """Боевое хранилище: схема `adminbot` того же Postgres, что и у бота."""
+    """Боевое хранилище: схема `adminbot` того же Postgres, что и у бота.
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    Таблица задаётся при сборке: у заказов химчистки и у уборок они разные,
+    потому что номера работ в базе бота пересекаются. Движок про это не знает —
+    он получает хранилище и работает с ним одинаково.
+    """
+
+    def __init__(self, pool: asyncpg.Pool, *, links_table: str = db.LINKS_TABLE,
+                 actions_table: str = db.ACTIONS_TABLE) -> None:
         self._pool = pool
+        self._links = links_table
+        self._actions = actions_table
 
     async def get(self, order_id: int) -> Optional[AmoLink]:
-        return await db.get_link(self._pool, order_id)
+        return await db.get_link(self._pool, order_id, table=self._links)
 
     async def create(self, order_id: int, phone10: Optional[str]) -> AmoLink:
-        return await db.create_link(self._pool, order_id, phone10)
+        return await db.create_link(self._pool, order_id, phone10, table=self._links)
 
     async def update(self, order_id: int, **fields: Any) -> Optional[AmoLink]:
-        return await db.update_link(self._pool, order_id, **fields)
+        return await db.update_link(self._pool, order_id, table=self._links, **fields)
 
     async def mark_step(self, order_id: int, step: str) -> None:
-        await db.mark_checklist_step(self._pool, order_id, step)
+        await db.mark_checklist_step(self._pool, order_id, step, table=self._links)
 
     async def log(self, order_id: int, action: str, *, dry_run: bool,
                   entity: Optional[str] = None, amo_id: Optional[int] = None,
                   payload: Optional[Any] = None) -> None:
         await db.log_action(self._pool, order_id=order_id, action=action, dry_run=dry_run,
-                            amo_entity=entity, amo_id=amo_id, payload=payload)
+                            amo_entity=entity, amo_id=amo_id, payload=payload,
+                            table=self._actions)
 
     async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]:
-        return await db.fetch_taken_lead_ids(self._pool, phone10, exclude_order_id)
+        return await db.fetch_taken_lead_ids(self._pool, phone10, exclude_order_id,
+                                             table=self._links)
+
+
+class PgCleaningLinkStore(PgLinkStore):
+    """То же хранилище, но для уборок клининг-контура."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        super().__init__(pool, links_table=db.CLEANING_LINKS_TABLE,
+                         actions_table=db.CLEANING_ACTIONS_TABLE)
