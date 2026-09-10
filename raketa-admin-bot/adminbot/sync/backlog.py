@@ -90,8 +90,8 @@ def _planned(order: Order, link: Optional[AmoLink], actions: list[dict]) -> Plan
 
 
 def order_title(order: Order) -> str:
-    """Шапка заказа для владельца: с телефоном и датой, чтобы не искать в CRM."""
-    parts = [f"Заказ №{order.order_id}"]
+    """Шапка работы для владельца: с телефоном и датой, чтобы не искать в CRM."""
+    parts = [f"{order.label} №{order.order_id}"]
     if order.client_name:
         parts.append(order.client_name)
     parts.append(for_owner(order.phone10))

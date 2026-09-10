@@ -125,7 +125,7 @@ class Engine:
                     return link
             return await self._run_checklist(order, link)
         except AmoError as exc:
-            log.warning("Заказ №%s: ошибка амо — %s", order.order_id, exc)
+            log.warning("%s №%s: ошибка амо — %s", order.label, order.order_id, exc)
             return await self.store.update(
                 order.order_id, status="error", last_error=f"{type(exc).__name__}: {exc}")
 
@@ -144,7 +144,8 @@ class Engine:
             taken_lead_ids=taken,
             order_amount=order.amount_total,
         )
-        log.info("Заказ №%s (%s): решение — %s", order.order_id, mask(order.phone10), decision.kind)
+        log.info("%s №%s (%s): решение — %s",
+                 order.label, order.order_id, mask(order.phone10), decision.kind)
 
         if decision.kind in _ASK_KINDS:
             await self.store.log(order.order_id, "ask_owner", dry_run=self.dry_run,
@@ -236,7 +237,7 @@ class Engine:
         """Оставить в сделке след: провёл робот, вот по каким данным."""
         masters = ", ".join(order.master_names) or "не указан"
         lines = [
-            f"🤖 Проведено роботом amo_sync по заказу №{order.order_id} из бота.",
+            f"🤖 Проведено роботом amo_sync: {order.label} №{order.order_id} из бота.",
             f"Дата работы: {order.created_at:%d.%m.%Y %H:%M}. Чек: {order.amount_total} ₽.",
             f"Мастер: {masters}. Оплата: {order.payment_method or 'не указана'}.",
         ]
@@ -256,8 +257,8 @@ class Engine:
         return StepResult()
 
     async def _step_note_duplicates(self, order: Order, link: AmoLink) -> StepResult:
-        text = (f"Заказ №{order.order_id} проведён в сделке #{link.primary_lead_id}. "
-                f"Похоже на повторное обращение того же клиента.")
+        text = (f"{order.label} №{order.order_id} — работа проведена в сделке "
+                f"#{link.primary_lead_id}. Похоже на повторное обращение того же клиента.")
         for lead_id in self._duplicates.get(order.order_id, ()):
             await self._write("add_note", order, lead_id, self.amo.add_note(lead_id, text))
         return StepResult()
@@ -306,7 +307,7 @@ class Engine:
         intent = await self._write(
             "create_lead", order, None,
             self.amo.create_lead(
-                name=f"Заказ №{order.order_id}",
+                name=f"{order.label} №{order.order_id}",
                 pipeline_id=ids.PIPELINE_PRIMARY,
                 status_id=ids.PRIM_STAGE_NEW_LEAD,
                 price=order.amount_total,
@@ -398,6 +399,10 @@ class Engine:
         return ids.REAL_STAGE_DONE if self._payment_pending(order) else ids.STATUS_SUCCESS
 
     def _service_enum(self, order: Order) -> Optional[int]:
+        # Вид работы, заданный самим источником, побеждает вывод по мастеру:
+        # у уборки «Услуга» всегда «Уборка», кто бы ни был бригадиром.
+        if order.service_kind:
+            return SERVICE_ENUM_BY_KIND.get(order.service_kind)
         for name, _phone in order.masters:
             for key, enum_id in self.service_by_master.items():
                 if key in (name or "").lower():
@@ -405,6 +410,10 @@ class Engine:
         return None                       # мастер неизвестен — поле не выдумываем
 
     def _master_enums(self, order: Order) -> tuple[int, ...]:
+        # То же и со «Специалистом»: у уборки это всегда Ольга, а бригадир идёт
+        # в примечание сделки (решение владельца 2026-09-10).
+        if order.specialist_enums is not None:
+            return tuple(order.specialist_enums)
         return self.specialists.resolve_many(order.masters)
 
     async def _close_tasks(self, order: Order, lead_id: Optional[int],
@@ -457,13 +466,26 @@ class Engine:
 
 
 # Способы оплаты бота → значения поля «Вариант оплаты» в амо
-# (маппинг подтверждён владельцем 2026-08-25).
+# (маппинг подтверждён владельцем 2026-08-25, дополнен клинингом 2026-09-10).
+# Ключи пишутся без «ё»: в боте способ называется «Расчётный», а в переписке и
+# в старых записях встречается «Расчетный» — на выборе значения это сказываться
+# не должно (см. `_payment_key`).
 PAYMENT_ENUM_BY_METHOD = {
+    # химчистка
     "наличные": ids.PAYMENT_ENUM_CASH,
     "карта дима": ids.PAYMENT_ENUM_CARD,
     "карта женя": ids.PAYMENT_ENUM_CARD,
     "р/с": ids.PAYMENT_ENUM_WIRE,
+    # клининг: свои названия кнопок в боте бригадира
+    "карта": ids.PAYMENT_ENUM_CARD,
+    "расчетный": ids.PAYMENT_ENUM_WIRE,
+    "подарочный сертификат": ids.PAYMENT_ENUM_CERTIFICATE,
 }
+
+# Способы, которые в амо означают безнал: тип клиента — «Юр лицо», а у химчистки
+# ещё и «ждём оплату по счёту». У уборки такого ожидания нет: деньги вносят
+# при проведении, поэтому сделка идёт до конца.
+WIRE_METHODS = frozenset({"р/с", "расчетный"})
 
 # Названия контактов, которые амо ставит сама и которые не жалко заменить.
 _AUTO_NAME_PREFIXES = ("входящий", "пропущенный", "заявка", "сделка", "автосделка", "звонок")
@@ -482,12 +504,17 @@ def _option(info: LeadInfo) -> dict:
     }
 
 
+def _payment_key(method: Optional[str]) -> str:
+    """Способ оплаты в виде, пригодном для сравнения: без регистра и без «ё»."""
+    return (method or "").strip().lower().replace("ё", "е")
+
+
 def _payment_enum(method: Optional[str]) -> Optional[int]:
-    return PAYMENT_ENUM_BY_METHOD.get((method or "").strip().lower())
+    return PAYMENT_ENUM_BY_METHOD.get(_payment_key(method))
 
 
 def _is_wire(order: Order) -> bool:
-    return (order.payment_method or "").strip().lower() == "р/с"
+    return _payment_key(order.payment_method) in WIRE_METHODS
 
 
 def _is_autogenerated_name(name: str) -> bool:
