@@ -39,6 +39,7 @@ class FakeAmo:
         self.leads: dict[int, dict] = {}
         self.contacts: list[dict] = []
         self.tasks: dict[int, list[dict]] = {}
+        self.task_results: dict[int, str] = {}   # чем закрыта задача
         self.calls: list[tuple[str, Any]] = []
         self.fail_on: Optional[str] = None       # имя метода, который должен упасть
         self._next_id = 90000
@@ -133,6 +134,7 @@ class FakeAmo:
     async def complete_task(self, task_id: int, result_text: str = ROBOT_TASK_RESULT) -> Intent:
         self._maybe_fail("complete_task")
         self.calls.append(("complete_task", task_id))
+        self.task_results[task_id] = result_text
         return Intent(action="complete_task", entity="task", entity_id=task_id,
                       payload={"is_completed": True}, performed=not self.dry_run)
 

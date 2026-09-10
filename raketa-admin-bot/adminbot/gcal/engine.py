@@ -31,7 +31,7 @@ from typing import Any, Callable, Optional
 from adminbot.amo import ids
 from adminbot.amo.client import AmoError
 from adminbot.amo.fields import (
-    MOSCOW_TZ, checkbox_field, datetime_field, enums_field, field_value,
+    MOSCOW_TZ, checkbox_field, datetime_field, enum_field, enums_field, field_value,
     lead_contact_ids, order_date_msk, text_field,
 )
 from adminbot.gcal.event import EventKind, ParsedEvent
@@ -82,6 +82,10 @@ FINAL_AFTER_MARK: dict[str, str] = {
     OWNER_KEEPS_REASON: "cancelled",
     OWNER_HANDLES_REASON: "skipped",
 }
+
+# Чем робот закрывает задачи отменённого заказа (решение владельца 2026-09-10):
+# висящая задача по отменённому заказу требует внимания зря.
+CANCEL_TASK_RESULT = "🤖 Заказ отменён: запись удалена из календаря"
 
 
 def _hands_off(link: CalendarLink) -> bool:
@@ -258,12 +262,39 @@ class CalendarEngine:
             return await self.store.update(link.event_id, status="cancelled",
                                            skip_reason="сделка уже закрыта")
 
+        # Сначала задачи и причина, закрытие — последним: это единственный
+        # необратимый шаг, и порядок совпадает с тем, как закрывает человек.
+        # Сбой посередине не страшен: следующий проход начнёт заново, а уже
+        # закрытые задачи амо открытыми больше не отдаст.
+        closed_tasks = 0
+        for task in await self.amo.get_lead_tasks(lead_id):
+            await self.store.log(link.event_id, "complete_task", dry_run=self.dry_run,
+                                 entity="task", amo_id=task["id"],
+                                 payload={"result": CANCEL_TASK_RESULT})
+            await self.amo.complete_task(task["id"], CANCEL_TASK_RESULT)
+            closed_tasks += 1
+
+        # «Причина закрытия» — как «Услуга»: заполненное человеком не трогаем.
+        # Само значение читает рабочий бот: по нему он пишет клиенту об отмене.
+        if field_value(lead, ids.FIELD_CLOSE_REASON) is None:
+            await self.store.log(link.event_id, "update_lead", dry_run=self.dry_run,
+                                 entity="lead", amo_id=lead_id,
+                                 payload={"field": ids.FIELD_CLOSE_REASON})
+            await self.amo.update_lead(lead_id, custom_fields=[
+                enum_field(ids.FIELD_CLOSE_REASON, ids.CLOSE_REASON_ENUM_NO_NEED)])
+            reason_note = "Причина: «Пропала потребность»."
+        else:
+            reason_note = "Причина закрытия оставлена как была."
+
         await self.store.log(link.event_id, "move_lead", dry_run=self.dry_run,
                              entity="lead", amo_id=lead_id,
                              payload={"status_id": ids.STATUS_CLOSED})
         await self.amo.move_lead(lead_id, pipeline_id, ids.STATUS_CLOSED)
-        await self.amo.add_note(lead_id, "🤖 Заказ отменён: запись удалена из календаря. "
-                                         "Закрыто по подтверждению владельца.")
+        await self.amo.add_note(
+            lead_id,
+            "🤖 Заказ отменён: запись удалена из календаря. "
+            "Закрыто по подтверждению владельца. "
+            f"Закрыто задач: {closed_tasks}. {reason_note}")
         return await self.store.update(link.event_id, status="cancelled",
                                        skip_reason="сделка закрыта по вашему подтверждению")
 

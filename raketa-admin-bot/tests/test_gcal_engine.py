@@ -17,7 +17,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from adminbot.amo import ids
-from adminbot.gcal.engine import CalendarEngine
+from adminbot.amo.fields import enum_field
+from adminbot.gcal.engine import CANCEL_TASK_RESULT, CalendarEngine
 from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.store import MemoryCalendarStore
 from tests.fakes import FakeAmo
@@ -276,6 +277,90 @@ async def test_confirmed_cancellation_closes_the_deal(amo):
     assert amo.calls_of("move_lead") == [
         (41400001, ids.PIPELINE_REALIZATION, ids.STATUS_CLOSED)]
     assert link.status == "cancelled"
+
+
+async def test_confirmed_cancellation_closes_tasks_and_sets_the_reason(amo):
+    """Отмена по кнопке: задачи закрыты, причина стоит, и только потом — закрытие.
+
+    Решение владельца 2026-09-10: висящие задачи отменённого заказа требуют
+    внимания зря, а «Причина закрытия = Пропала потребность» — ещё и сигнал
+    рабочему боту написать клиенту.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.add_task(41400001, task_id=7, task_type_id=2270740)
+    amo.add_task(41400001, task_id=8, task_type_id=2270746)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="closing", real_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert amo.calls_of("complete_task") == [7, 8]
+    assert amo.task_results == {7: CANCEL_TASK_RESULT, 8: CANCEL_TASK_RESULT}
+    lead_id, payload = amo.calls_of("update_lead")[0]
+    assert lead_id == 41400001
+    assert payload["custom_fields"] == [
+        enum_field(ids.FIELD_CLOSE_REASON, ids.CLOSE_REASON_ENUM_NO_NEED)]
+    writes = [name for name, _ in amo.calls
+              if name in ("complete_task", "update_lead", "move_lead")]
+    assert writes == ["complete_task", "complete_task", "update_lead", "move_lead"]
+    _, note = amo.calls_of("add_note")[0]
+    assert "Закрыто задач: 2" in note and "Пропала потребность" in note
+    assert store.actions_of("complete_task") and store.actions_of("update_lead")
+    assert link.status == "cancelled"
+
+
+async def test_filled_close_reason_is_kept(amo):
+    """Причину, которую человек уже поставил, робот не переписывает."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_CLOSE_REASON,
+                      "values": [{"value": "Дорого", "enum_id": 8317}]}])
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="closing", real_lead_id=41400001)
+
+    await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert amo.calls_of("update_lead") == []
+    assert amo.calls_of("move_lead") == [
+        (41400001, ids.PIPELINE_REALIZATION, ids.STATUS_CLOSED)]
+    _, note = amo.calls_of("add_note")[0]
+    assert "оставлена как была" in note
+
+
+async def test_cancellation_without_tasks_still_sets_the_reason(amo):
+    """Задач нет — закрывать нечего, остальное как обычно."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="closing", real_lead_id=41400001)
+
+    await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert amo.calls_of("complete_task") == []
+    assert len(amo.calls_of("update_lead")) == 1
+    assert len(amo.calls_of("move_lead")) == 1
+
+
+async def test_deal_closed_by_hand_gets_neither_tasks_nor_reason(amo):
+    """Сделку закрыли руками, пока карточка висела: чужое закрытие не дополняем."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)
+    amo.add_task(41400001, task_id=7, task_type_id=2270740)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="closing", real_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert link.status == "cancelled"
+    assert amo.calls_of("complete_task") == []
+    assert amo.calls_of("update_lead") == []
+    assert amo.calls_of("move_lead") == []
 
 
 async def test_boat_deal_is_created_after_confirmation(amo):
