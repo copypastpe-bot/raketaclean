@@ -101,3 +101,23 @@
 | 1108 | `fetch_owner_letters_for` | незаконченные долги по одной записи |
 | 1129 | `mark_owner_letter_sent` / 1142 `postpone_owner_letter` / 1156 `drop_owner_letter` | исход попытки |
 | 1170 | `count_owner_letters_waiting` | строка «жду отправки» для /status |
+| 515 | `get_carpet_link` | прочитать связку ковра с партнёром по partner_id |
+| 522 | `update_carpet_link` | обновить поля связки ковра (только известные поля) |
+| 541 | `mark_carpet_step` | отметить пройденный шаг обработки ковра |
+| 554 | `log_carpet_action` | записать действие робота по ковру (с dry_run и сущностью амо) |
+| 619 | `letter_was_processed` | было ли письмо с этим uid уже обработано |
+| 631 | `set_setting` | записать настройку key=value в схему adminbot |
+| 701 | `get_calendar_link` | прочитать связку события календаря по event_id |
+| 708 | `create_calendar_link` | создать связку события календаря (вид, телефон, поля) |
+| 737 | `update_calendar_link` | обновить поля связки события календаря |
+| 756 | `_gcal_value` | кортеж услуг в text[] уходит списком: asyncpg кортежи не принимает |
+| 763 | `mark_calendar_step` | отметить пройденный шаг обработки события календаря |
+| 776 | `log_calendar_action` | записать действие робота по событию календаря |
+| 886 | `save_calendar_cursor` | сохранить курсор синхронизации календаря (sync_token, sync_from) |
+| 968 | `get_autocall_lead` | прочитать заявку автообзвона по lead_id |
+| 975 | `create_autocall_lead` | создать заявку автообзвона (телефон, поля) |
+| 999 | `update_autocall_lead` | обновить поля заявки автообзвона |
+| 1051 | `fetch_autocall_actions` | что робот делал по заявке: последние действия, limit |
+| 1142 | `postpone_owner_letter` | попытка отправки письма владельцу не удалась: отложить до next_try_at с ошибкой |
+| 1156 | `drop_owner_letter` | снять долг по письму владельцу: протух или больше не нужен |
+| 1188 | `save_autocall_cursor` | сохранить курсор автообзвона (в репетиции не вызывается) |
