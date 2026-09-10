@@ -22,7 +22,11 @@ from adminbot.phone import for_owner, mask
 from adminbot.sync.backlog import PlannedOrder, money
 
 # Приставка callback-данных карточки-вопроса: amosync:{номер заказа}:{выбор}.
+# У уборок приставка своя: номера работ в базе бота пересекаются, и без неё
+# ответ по «Уборке №5» ушёл бы в «Заказ №5».
 CHOICE_PREFIX = "amosync"
+CLEANING_CHOICE_PREFIX = "amoclean"
+PREFIX_BY_KIND = {"order": CHOICE_PREFIX, "cleaning": CLEANING_CHOICE_PREFIX}
 BACKLOG_GO = "backlog:go"
 BACKLOG_HOLD = "backlog:hold"
 
@@ -56,9 +60,10 @@ ACTION_WORDS = {
 # --- карточка-вопрос ---
 
 def question_card(order: Any, question: Optional[dict]) -> tuple[str, InlineKeyboardMarkup]:
-    """Вопрос по одному заказу: что за заказ и между чем выбирать."""
+    """Вопрос по одной работе: что за работа и между чем выбирать."""
     reason = (question or {}).get("reason", "")
     options = (question or {}).get("options") or []
+    prefix = PREFIX_BY_KIND.get(getattr(order, "kind", "order"), CHOICE_PREFIX)
 
     text = "\n".join([
         _order_line(order),
@@ -66,26 +71,30 @@ def question_card(order: Any, question: Optional[dict]) -> tuple[str, InlineKeyb
         REASON_TEXTS.get(reason, DEFAULT_REASON),
     ])
 
-    rows = [[_option_button(order.order_id, option)] for option in options]
+    rows = [[_option_button(order.order_id, option, prefix)] for option in options]
     if reason == "сейлзбот не создал автосделку":
-        rows.append([InlineKeyboardButton(text="🔄 Проверить ещё раз",
-                                          callback_data=_choice(order.order_id, "retry"))])
+        rows.append([InlineKeyboardButton(
+            text="🔄 Проверить ещё раз",
+            callback_data=_choice(order.order_id, "retry", prefix))])
     rows.append([
         InlineKeyboardButton(text="➕ Создать новую",
-                             callback_data=_choice(order.order_id, "new")),
+                             callback_data=_choice(order.order_id, "new", prefix)),
         InlineKeyboardButton(text="✋ Сам разберусь",
-                             callback_data=_choice(order.order_id, "manual")),
+                             callback_data=_choice(order.order_id, "manual", prefix)),
     ])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def parse_choice(data: Optional[str]) -> Optional[tuple[int, str, Optional[int]]]:
-    """Разобрать нажатие: (номер заказа, что выбрали, id сделки).
+def parse_choice(data: Optional[str],
+                 prefix: str = CHOICE_PREFIX) -> Optional[tuple[int, str, Optional[int]]]:
+    """Разобрать нажатие: (номер работы, что выбрали, id сделки).
 
-    Мусор и чужие кнопки → None: робот молча ничего не делает.
+    Мусор и чужие кнопки → None: робот молча ничего не делает. Приставка — часть
+    проверки: карточка уборки и карточка заказа с одним номером не должны
+    отвечать друг за друга.
     """
     parts = (data or "").split(":")
-    if len(parts) != 3 or parts[0] != CHOICE_PREFIX or not parts[1].isdigit():
+    if len(parts) != 3 or parts[0] != prefix or not parts[1].isdigit():
         return None
 
     order_id, choice = int(parts[1]), parts[2]
@@ -96,9 +105,10 @@ def parse_choice(data: Optional[str]) -> Optional[tuple[int, str, Optional[int]]
     return None
 
 
-def _option_button(order_id: int, option: dict) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=_option_label(option),
-                                callback_data=_choice(order_id, str(option["lead_id"])))
+def _option_button(order_id: int, option: dict, prefix: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text=_option_label(option),
+        callback_data=_choice(order_id, str(option["lead_id"]), prefix))
 
 
 def _option_label(option: dict) -> str:
@@ -110,12 +120,12 @@ def _option_label(option: dict) -> str:
     return " ".join(parts)
 
 
-def _choice(order_id: int, value: str) -> str:
-    return f"{CHOICE_PREFIX}:{order_id}:{value}"
+def _choice(order_id: int, value: str, prefix: str = CHOICE_PREFIX) -> str:
+    return f"{prefix}:{order_id}:{value}"
 
 
 def _order_line(order: Any) -> str:
-    parts = [f"Заказ №{order.order_id}"]
+    parts = [f"{getattr(order, 'label', 'Заказ')} №{order.order_id}"]
     if getattr(order, "client_name", None):
         parts.append(order.client_name)
     parts.append(for_owner(order.phone10))
@@ -127,8 +137,24 @@ def _order_line(order: Any) -> str:
 # --- вечерняя сводка ---
 
 def summary_text(summary: Any) -> str:
-    """Отчёт за день. Сначала то, что требует внимания владельца."""
-    lines = ["📊 Вечерняя сверка"]
+    """Отчёт за день. Сначала то, что требует внимания владельца.
+
+    Уборки идут отдельным разделом того же сообщения: работы разные, но день
+    один, и владельцу нужна одна картина, а не два сообщения подряд.
+    """
+    cleaning = getattr(summary, "cleaning", None)
+    lines = ["📊 Вечерняя сверка"] + _summary_block(summary)
+    if cleaning is not None:
+        lines += ["", "🧹 Уборки"] + _summary_block(cleaning)
+
+    if summary.is_quiet and (cleaning is None or cleaning.is_quiet):
+        lines += ["", "Хвостов нет — разбираться не с чем."]
+    return "\n".join(lines)
+
+
+def _summary_block(summary: Any) -> list[str]:
+    """Один поток работ: сначала то, что требует внимания, потом сделанное."""
+    lines: list[str] = []
 
     if summary.waiting_owner:
         lines += ["", f"❓ Ждут вашего ответа: {len(summary.waiting_owner)}"]
@@ -151,10 +177,7 @@ def summary_text(summary: Any) -> str:
         lines += _rows_block(summary.already_done)
     if summary.in_flight:
         lines.append(f"⏳ В работе прямо сейчас: {len(summary.in_flight)}")
-
-    if summary.is_quiet:
-        lines += ["", "Хвостов нет — разбираться не с чем."]
-    return "\n".join(lines)
+    return lines
 
 
 def _rows_block(rows: Sequence[Any], *, with_lead: bool = True) -> list[str]:
@@ -367,9 +390,10 @@ PATH_WORDS = {
 
 
 def order_done_text(order: Any, link: Any, *, base_url: str) -> str:
-    """Сообщение о проведённом заказе — чтобы проверить по горячим следам."""
+    """Сообщение о проведённой работе — чтобы проверить по горячим следам."""
+    label = getattr(order, "label", "Заказ")
     lines = [
-        "✅ Заказ из бота · " + PATH_WORDS.get(link.path or "", "провёл сделку"),
+        f"✅ {label} из бота · " + PATH_WORDS.get(link.path or "", "провёл сделку"),
         _order_line(order),
     ]
     lead_id = link.real_lead_id or link.primary_lead_id

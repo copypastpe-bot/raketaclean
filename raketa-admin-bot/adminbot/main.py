@@ -49,10 +49,10 @@ from adminbot.control import PgControlPanel, sync_allowed
 from adminbot.mail import MailBox, mail_settings_from_env
 from adminbot.sync.backlog import BacklogRunner
 from adminbot.sync.engine import Engine, service_enums
-from adminbot.sync.reconcile import PgSummarySource, Reconciler
+from adminbot.sync.reconcile import PgCleaningSummarySource, PgSummarySource, Reconciler
 from adminbot.sync.specialists import SpecialistIndex
-from adminbot.sync.store import MemoryLinkStore, PgLinkStore
-from adminbot.sync.watcher import PgOrderSource, Watcher
+from adminbot.sync.store import MemoryLinkStore, PgCleaningLinkStore, PgLinkStore
+from adminbot.sync.watcher import PgCleaningSource, PgOrderSource, Watcher
 from adminbot.tg.autocall_cards import (
     connected_text, manager_text, no_phone_text, rehearsal_text as autocall_rehearsal_text)
 from adminbot.tg.bot import CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router
@@ -60,8 +60,8 @@ from adminbot.tg.calendar_cards import (
     boat_card, calendar_question_card, calendar_summary_text, cancellation_card,
     done_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
-    carpet_question_card, carpet_report_text, order_done_text, question_card,
-    summary_text)
+    CLEANING_CHOICE_PREFIX, carpet_question_card, carpet_report_text, order_done_text,
+    question_card, summary_text)
 from adminbot.tg.outbox import (
     SUMMARY_TTL_SEC, MemoryMailStore, OwnerMail, PgMailStore, Purpose)
 from adminbot.tg.session import build_session
@@ -76,6 +76,8 @@ TELEGRAM_RETRY_SEC = 30
 MAIL_SUMMARY = "summary"                       # вечерняя сводка — устаревает за часы
 MAIL_ORDER_DONE = "order_done"
 MAIL_ORDER_QUESTION = "order_question"
+MAIL_CLEANING_DONE = "cleaning_done"
+MAIL_CLEANING_QUESTION = "cleaning_question"
 MAIL_GCAL_DONE = "gcal_done"
 MAIL_GCAL_QUESTION = "gcal_question"
 MAIL_GCAL_UPDATED = "gcal_updated"
@@ -109,6 +111,7 @@ class App:
     calendar_watcher: Optional[Any] = None
     calendar_token: Optional[Any] = None
     autocall_watcher: Optional[Any] = None
+    cleaning_watcher: Optional[Any] = None
     # Отдельный send-only бот для сообщений менеджеру (WORKER_TG_TOKEN) — не участвует
     # в опросе, но его aiohttp-сессия открывается лениво при первой отправке и должна
     # закрыться вместе с сервисом, как и сессия self.bot.
@@ -136,6 +139,9 @@ class App:
         if self.autocall_watcher is not None:
             background.append(asyncio.create_task(
                 self.autocall_watcher.run_forever(self.stop), name="autocall"))
+        if self.cleaning_watcher is not None:
+            background.append(asyncio.create_task(
+                self.cleaning_watcher.run_forever(self.stop), name="cleaning"))
         if self.mail is not None:
             background.append(asyncio.create_task(
                 self.mail.run_forever(self.stop), name="mail"))
@@ -244,11 +250,23 @@ async def build_app(settings: Settings) -> App:
     )
     mail.register(MAIL_ORDER_QUESTION, _question_purpose(store))
 
+    # Уборки клининг-контура: тот же движок и тот же справочник специалистов,
+    # но своя таблица связок, свои выключатели и своя очередь. Пауза — общая:
+    # владелец останавливает робота одной кнопкой.
+    cleaning_watcher, cleaning_store, cleaning_backlog_from = _build_cleaning(
+        settings, bot_pool, own_pool, mail, control, specialists, services,
+        live_amo, rehearsal_amo)
+    if cleaning_store is not None:
+        mail.register(MAIL_CLEANING_QUESTION, _question_purpose(cleaning_store))
+
     reconciler = Reconciler(
         watcher=watcher,
         source=PgSummarySource(bot_pool, own_pool, settings.backlog_from),
         on_summary=_make_summary_sender(mail),
         hour_msk=settings.reconcile_hour_msk,
+        cleaning_watcher=cleaning_watcher,
+        cleaning_source=(PgCleaningSummarySource(bot_pool, own_pool, cleaning_backlog_from)
+                         if cleaning_watcher is not None else None),
     )
     # Календарь собирается ниже, но в вечернюю сверку он попадает здесь же:
     # владелец получает одну картину дня, а не два разрозненных сообщения.
@@ -307,6 +325,8 @@ async def build_app(settings: Settings) -> App:
             calendar_dry_run=settings.gcal_dry_run,
             autocall_enabled=settings.autocall_enabled,
             autocall_dry_run=settings.autocall_dry_run,
+            cleaning_enabled=settings.cleaning_sync_enabled,
+            cleaning_dry_run=settings.cleaning_sync_dry_run,
             mail=mail,
         ),
         OwnerAnswers(owner_tg_id=settings.owner_tg_id, store=store, backlog=backlog),
@@ -314,6 +334,9 @@ async def build_app(settings: Settings) -> App:
         if carpet_store else None,
         CalendarAnswers(owner_tg_id=settings.owner_tg_id, store=calendar_store)
         if calendar_store else None,
+        OwnerAnswers(owner_tg_id=settings.owner_tg_id, store=cleaning_store,
+                     prefix=CLEANING_CHOICE_PREFIX, label="Уборка")
+        if cleaning_store else None,
     ))
 
     return App(settings=settings, bot_pool=bot_pool, own_pool=own_pool,
@@ -324,8 +347,53 @@ async def build_app(settings: Settings) -> App:
                calendar_token=calendar_token,
                autocall_watcher=autocall_watcher,
                autocall_manager_bot=autocall_manager_bot,
+               cleaning_watcher=cleaning_watcher,
                mail=mail,
                stop=asyncio.Event())
+
+
+def _build_cleaning(settings: Settings, bot_pool: Any, own_pool: Any, mail: OwnerMail,
+                    control: Any, specialists: SpecialistIndex, services: dict[str, int],
+                    live_amo: AmoClient, rehearsal_amo: AmoClient):
+    """Собрать проведение уборок. Возвращает (наблюдатель, хранилище, дата хвоста).
+
+    Функция выключена — уборки просто не поднимаются, а заказы, ковры, календарь
+    и автозвонок работают как ни в чём не бывало.
+
+    Движок здесь тот же класс, что и у заказов: уборка отличается не ходом работы,
+    а источником и подписью. Хвост по умолчанию начинается днём включения —
+    старые уборки владелец закрывает сам (его решение 2026-09-10).
+    """
+    if not settings.cleaning_sync_enabled:
+        log.info("Уборки: функция выключена настройкой CLEANING_SYNC_ENABLED")
+        return None, None, None
+
+    backlog_from = settings.cleaning_backlog_from or datetime.now(MOSCOW_TZ).date()
+
+    # Та же тонкость, что у заказов, ковров и календаря: в репетиции отметки
+    # шагов не должны попадать в базу, иначе боевой прогон сочтёт работу
+    # сделанной и молча пропустит её.
+    store = (MemoryLinkStore() if settings.cleaning_sync_dry_run
+             else PgCleaningLinkStore(own_pool))
+    engine = Engine(
+        amo=rehearsal_amo if settings.cleaning_sync_dry_run else live_amo,
+        store=store, specialists=specialists,
+        dry_run=settings.cleaning_sync_dry_run,
+        salesbot_wait_sec=settings.salesbot_wait_sec,
+        service_by_master=services,
+    )
+    watcher = Watcher(
+        engine=engine,
+        source=PgCleaningSource(bot_pool, own_pool, backlog_from),
+        # Пауза общая с заказами: владелец жмёт одну кнопку /pause.
+        is_enabled=sync_allowed(sync_enabled=settings.cleaning_sync_enabled, control=control),
+        poll_interval_sec=settings.poll_interval_sec,
+        on_question=_make_cleaning_question_sender(mail),
+        on_done=_make_cleaning_done_sender(mail, settings.amo_base_url),
+    )
+    log.info("Уборки: включены, режим %s, хвост с %s",
+             "репетиция" if settings.cleaning_sync_dry_run else "БОЕВОЙ", backlog_from)
+    return watcher, store, backlog_from
 
 
 def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
@@ -547,6 +615,27 @@ def _make_order_done_sender(mail: OwnerMail, amo_base_url: str):
     async def send(order, link) -> None:
         await mail.send(order_done_text(order, link, base_url=amo_base_url),
                         kind=MAIL_ORDER_DONE, ref=order.order_id)
+
+    return send
+
+
+def _make_cleaning_done_sender(mail: OwnerMail, amo_base_url: str):
+    """Сообщение о проведённой уборке. Подпись берётся из самой работы."""
+
+    async def send(order, link) -> None:
+        await mail.send(order_done_text(order, link, base_url=amo_base_url),
+                        kind=MAIL_CLEANING_DONE, ref=order.order_id)
+
+    return send
+
+
+def _make_cleaning_question_sender(mail: OwnerMail):
+    """Карточка-вопрос по уборке: те же кнопки, своя приставка (см. tg/cards.py)."""
+
+    async def send(order, link) -> Optional[int]:
+        text, keyboard = question_card(order, link.question)
+        return await mail.send(text, kind=MAIL_CLEANING_QUESTION, ref=order.order_id,
+                               reply_markup=keyboard)
 
     return send
 

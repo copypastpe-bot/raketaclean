@@ -28,7 +28,7 @@ from adminbot.tg.calendar_cards import (
     CHOICE_PREFIX as GCAL_PREFIX, calendar_status_text, calendar_summary_text,
     parse_calendar_choice)
 from adminbot.tg.cards import (
-    CARPET_PREFIX, carpet_report_text, parse_carpet_choice,
+    CARPET_PREFIX, CLEANING_CHOICE_PREFIX, carpet_report_text, parse_carpet_choice,
     BACKLOG_GO, BACKLOG_HOLD, CHOICE_PREFIX, PATH_BY_PIPELINE, live_report_text,
     parse_choice, preview_card,
 )
@@ -92,6 +92,8 @@ class OwnerCommands:
         calendar_dry_run: bool = True,
         autocall_enabled: bool = False,
         autocall_dry_run: bool = True,
+        cleaning_enabled: bool = False,
+        cleaning_dry_run: bool = True,
         mail: Optional[Any] = None,
     ) -> None:
         self.owner_tg_id = owner_tg_id
@@ -106,6 +108,8 @@ class OwnerCommands:
         self.calendar_dry_run = calendar_dry_run
         self.autocall_enabled = autocall_enabled
         self.autocall_dry_run = autocall_dry_run
+        self.cleaning_enabled = cleaning_enabled
+        self.cleaning_dry_run = cleaning_dry_run
         # Почта владельца — чтобы в /status было видно, копятся ли неотправленные
         # сообщения. Тишина в Telegram и тишина робота выглядят одинаково.
         self.mail = mail
@@ -124,7 +128,9 @@ class OwnerCommands:
             report=getattr(self.calendar_watcher, "last_report", None))
         autocall = _autocall_status_line(
             enabled=self.autocall_enabled, dry_run=self.autocall_dry_run)
-        parts = [text, calendar, autocall]
+        cleaning = _cleaning_status_line(
+            enabled=self.cleaning_enabled, dry_run=self.cleaning_dry_run)
+        parts = [text, calendar, autocall, cleaning]
         waiting = await self._mail_waiting()
         if waiting:
             parts.append(f"✉️ Жду отправки: {waiting} — Telegram не отвечал, дошлю сам.")
@@ -354,17 +360,25 @@ class OwnerAnswers:
     Ответ владельца никогда не идёт в amoCRM напрямую: он записывается рядом
     с заказом, а работу доделает обычный проход наблюдателя. Поэтому решение
     не потеряется, даже если робота перезапустят сразу после нажатия.
+
+    Приставка кнопок и подпись задаются при сборке: заказы химчистки и уборки
+    ведут два одинаковых обработчика с разными хранилищами, а номера работ
+    в базе бота пересекаются. Без своей приставки ответ по «Уборке №5» ушёл бы
+    в «Заказ №5».
     """
 
-    def __init__(self, *, owner_tg_id: int, store: Any, backlog: Optional[Any] = None) -> None:
+    def __init__(self, *, owner_tg_id: int, store: Any, backlog: Optional[Any] = None,
+                 prefix: str = CHOICE_PREFIX, label: str = "Заказ") -> None:
         self.owner_tg_id = owner_tg_id
         self.store = store
         self.backlog = backlog
+        self.prefix = prefix
+        self.label = label
 
     async def on_choice(self, callback: Any) -> None:
         if not self._is_owner(callback):
             return
-        choice = parse_choice(getattr(callback, "data", None))
+        choice = parse_choice(getattr(callback, "data", None), self.prefix)
         if choice is None:
             await callback.answer()
             return
@@ -372,15 +386,15 @@ class OwnerAnswers:
         order_id, kind, lead_id = choice
         link = await self.store.get(order_id)
         if link is None:
-            log.warning("Ответ по заказу №%s, которого нет в базе", order_id)
-            await callback.answer("Этого заказа у меня уже нет.")
+            log.warning("Ответ: %s №%s, которого нет в базе", self.label.lower(), order_id)
+            await callback.answer("Этой работы у меня уже нет.")
             return
 
         fields, reply = self._apply_choice(link, kind, lead_id)
         await self.store.update(order_id, **fields)
-        log.info("Заказ №%s: владелец выбрал %s", order_id, kind)
+        log.info("%s №%s: владелец выбрал %s", self.label, order_id, kind)
         await callback.answer()
-        await callback.message.edit_text(f"Заказ №{order_id}: {reply}")
+        await callback.message.edit_text(f"{self.label} №{order_id}: {reply}")
 
     async def on_backlog(self, callback: Any) -> None:
         if not self._is_owner(callback):
@@ -439,7 +453,8 @@ class OwnerAnswers:
 
 def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None,
                  carpets: Optional[CarpetAnswers] = None,
-                 calendar: Optional[CalendarAnswers] = None) -> Router:
+                 calendar: Optional[CalendarAnswers] = None,
+                 cleaning: Optional[OwnerAnswers] = None) -> Router:
     """Собрать роутер: сначала команды владельца, последним — отказ всем прочим."""
     router = Router(name="owner")
     owner = OwnerOnly(commands.owner_tg_id)
@@ -466,6 +481,9 @@ def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None
     if calendar is not None:
         router.callback_query.register(calendar.on_choice, owner,
                                        F.data.startswith(f"{GCAL_PREFIX}:"))
+    if cleaning is not None:
+        router.callback_query.register(cleaning.on_choice, owner,
+                                       F.data.startswith(f"{CLEANING_CHOICE_PREFIX}:"))
     return router
 
 
@@ -513,6 +531,13 @@ def _autocall_status_line(*, enabled: bool, dry_run: bool) -> str:
     if not enabled:
         return "Автозвонок: выключен"
     return f"Автозвонок: {'репетиция' if dry_run else 'БОЕВОЙ'}"
+
+
+def _cleaning_status_line(*, enabled: bool, dry_run: bool) -> str:
+    """Строка про уборки клининг-контура — включена ли и в каком режиме."""
+    if not enabled:
+        return "Уборки: выключены"
+    return f"Уборки: {'репетиция' if dry_run else 'БОЕВОЙ'}"
 
 
 def _queue_block(counts: dict[str, int]) -> str:

@@ -191,6 +191,15 @@ class Settings:
     # Мастер заказа → вид работ для поля «Услуга»
     service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
+    # Уборки клининг-контура: свой выключатель и своя репетиция.
+    # Работы приходят из отдельной таблицы бота (`public.cleaning_orders`),
+    # поэтому и поток свой — со своей таблицей связок.
+    cleaning_sync_enabled: bool = False
+    cleaning_sync_dry_run: bool = True
+    # С какой даты проводить уборки. Пусто — со дня включения: старые уборки
+    # владелец закрывает сам (его решение 2026-09-10).
+    cleaning_backlog_from: Optional[date] = None
+
     # Ковры от партнёра: свой выключатель и свой режим репетиции.
     carpets_enabled: bool = False
     carpets_dry_run: bool = True
@@ -276,6 +285,9 @@ class Settings:
                                                  DEFAULT_SERVICE_BY_MASTER),
             telegram_api_ips=tuple(parse_ip_pool(os.environ.get("TELEGRAM_API_IPS"))),
             telegram_proxy_url=(os.environ.get("TELEGRAM_PROXY_URL") or "").strip(),
+            cleaning_sync_enabled=_flag("CLEANING_SYNC_ENABLED", False),
+            cleaning_sync_dry_run=_flag("CLEANING_SYNC_DRY_RUN", True),
+            cleaning_backlog_from=_optional_date("CLEANING_BACKLOG_FROM"),
             carpets_enabled=_flag("CARPETS_ENABLED", False),
             carpets_dry_run=_flag("CARPETS_DRY_RUN", True),
             carpets_poll_interval_sec=_int("CARPETS_POLL_INTERVAL_SEC", 3600),

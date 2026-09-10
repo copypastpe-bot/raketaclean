@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
@@ -84,6 +84,10 @@ class DailySummary:
     in_flight: tuple[int, ...] = ()             # в работе прямо сейчас — это норма
     missed: tuple[SummaryRow, ...] = ()         # заказы, до которых робот не добрался
     total_orders: int = 0
+    # Уборки клининг-контура за тот же день. Отдельная сводка, но внутри той же:
+    # владелец должен получить одну картину дня, а не два сообщения подряд.
+    # None — функция уборок выключена, и раздела в сообщении нет вовсе.
+    cleaning: Optional["DailySummary"] = None
 
     @property
     def is_quiet(self) -> bool:
@@ -162,6 +166,8 @@ class Reconciler:
         on_summary: Callable[[DailySummary], Awaitable[None]],
         calendar_watcher: Optional[Any] = None,
         on_calendar: Optional[Callable[[Any], Awaitable[None]]] = None,
+        cleaning_watcher: Optional[Any] = None,
+        cleaning_source: Optional[SummarySource] = None,
         hour_msk: int = 21,
         stale_after_sec: int = STALE_AFTER_SEC,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
@@ -172,6 +178,9 @@ class Reconciler:
         self.on_summary = on_summary
         self.calendar_watcher = calendar_watcher
         self.on_calendar = on_calendar
+        # Уборки идут в том же вечернем сообщении, что и заказы: одна картина дня.
+        self.cleaning_watcher = cleaning_watcher
+        self.cleaning_source = cleaning_source
         self.hour_msk = hour_msk
         self.stale_after_sec = stale_after_sec
         self.now = now
@@ -186,9 +195,27 @@ class Reconciler:
         await self.watcher.tick()
         snapshot = await self.source.collect()
         summary = build_summary(snapshot, now=self.now(), stale_after_sec=self.stale_after_sec)
+        summary = replace(summary, cleaning=await self._cleaning_summary())
         await self.on_summary(summary)
         await self._report_calendar()
         return summary
+
+    async def _cleaning_summary(self) -> Optional[DailySummary]:
+        """Уборки за тот же день. Функция выключена — раздела нет вовсе.
+
+        Сбой здесь не должен съесть сводку по заказам: она — главное сообщение
+        вечера, а уборки к ней добавляются.
+        """
+        if self.cleaning_source is None:
+            return None
+        try:
+            if self.cleaning_watcher is not None:
+                await self.cleaning_watcher.tick()
+            return build_summary(await self.cleaning_source.collect(), now=self.now(),
+                                 stale_after_sec=self.stale_after_sec)
+        except Exception:                              # noqa: BLE001
+            log.exception("Вечерний проход по уборкам не удался")
+            return None
 
     async def _report_calendar(self) -> None:
         """Отдельная строка про календарь — если функция вообще включена.
@@ -227,6 +254,26 @@ class PgSummarySource:
         orders = await db.fetch_orders_since(self.bot_pool, self.backlog_from)
         links = await db.fetch_links_for_orders(
             self.own_pool, [order.order_id for order in orders])
+        return Snapshot(
+            links=tuple(links),
+            orders=tuple(OrderBrief(order.order_id, order.phone10, order.created_at)
+                         for order in orders),
+        )
+
+
+class PgCleaningSummarySource:
+    """Тот же срез, но по уборкам: своя таблица бота и своя таблица связок."""
+
+    def __init__(self, bot_pool: asyncpg.Pool, own_pool: asyncpg.Pool, backlog_from: date) -> None:
+        self.bot_pool = bot_pool
+        self.own_pool = own_pool
+        self.backlog_from = backlog_from
+
+    async def collect(self) -> Snapshot:
+        orders = await db.fetch_cleaning_orders_since(self.bot_pool, self.backlog_from)
+        links = await db.fetch_links_for_orders(
+            self.own_pool, [order.order_id for order in orders],
+            table=db.CLEANING_LINKS_TABLE)
         return Snapshot(
             links=tuple(links),
             orders=tuple(OrderBrief(order.order_id, order.phone10, order.created_at)

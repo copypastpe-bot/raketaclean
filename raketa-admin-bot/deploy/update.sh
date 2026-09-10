@@ -9,6 +9,10 @@
 #   sudo raketa-admin-bot-update --report      что робот записал (ничего не меняет)
 #   sudo raketa-admin-bot-update --carpets-on --carpets-rehearsal   ковры: репетиция
 #   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
+#   sudo raketa-admin-bot-update --cleaning-on --cleaning-rehearsal уборки: репетиция
+#   sudo raketa-admin-bot-update --cleaning-live                    уборки: боевой режим
+#   sudo raketa-admin-bot-update --cleaning-off                     уборки: выключить
+#   sudo raketa-admin-bot-update --cleaning-from=2026-09-11         с какой даты проводить уборки
 #   sudo raketa-admin-bot-update --gcal-on --gcal-rehearsal         календарь: репетиция
 #   sudo raketa-admin-bot-update --gcal-live                        календарь: боевой режим
 #   sudo raketa-admin-bot-update --gcal-check                       проверить доступ к календарям
@@ -36,6 +40,9 @@ REPORT=""
 BACKLOG_FROM=""
 CARPETS=""
 CARPETS_DRY=""
+CLEANING=""
+CLEANING_DRY=""
+CLEANING_FROM=""
 GCAL=""
 GCAL_DRY=""
 GCAL_CHECK=""
@@ -71,6 +78,11 @@ for arg in "$@"; do
         --carpets-off)       CARPETS=0 ;;
         --carpets-live)      CARPETS_DRY=0 ;;
         --carpets-rehearsal) CARPETS_DRY=1 ;;
+        --cleaning-on)        CLEANING=1 ;;
+        --cleaning-off)       CLEANING=0 ;;
+        --cleaning-live)      CLEANING_DRY=0 ;;
+        --cleaning-rehearsal) CLEANING_DRY=1 ;;
+        --cleaning-from=*)    CLEANING_FROM="${arg#*=}" ;;
         --gcal-on)        GCAL=1 ;;
         --gcal-off)       GCAL=0 ;;
         --gcal-live)      GCAL_DRY=0 ;;
@@ -212,6 +224,9 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$BACKLOG_FROM" ] && set_flag AMO_SYNC_BACKLOG_FROM "$BACKLOG_FROM"
 [ -n "$CARPETS" ] && set_flag CARPETS_ENABLED "$CARPETS"
 [ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
+[ -n "$CLEANING" ] && set_flag CLEANING_SYNC_ENABLED "$CLEANING"
+[ -n "$CLEANING_DRY" ] && set_flag CLEANING_SYNC_DRY_RUN "$CLEANING_DRY"
+[ -n "$CLEANING_FROM" ] && set_flag CLEANING_BACKLOG_FROM "$CLEANING_FROM"
 [ -n "$TELEGRAM_PROXY_SET" ] && set_flag TELEGRAM_PROXY_URL "$TELEGRAM_PROXY"
 [ -n "$GCAL" ] && set_flag GCAL_ENABLED "$GCAL"
 [ -n "$GCAL_DRY" ] && set_flag GCAL_DRY_RUN "$GCAL_DRY"
@@ -252,6 +267,10 @@ echo "хвост с: $(flag_of AMO_SYNC_BACKLOG_FROM)"
 now_carpets=$(flag_of CARPETS_ENABLED)
 now_carpets_dry=$(flag_of CARPETS_DRY_RUN)
 echo "ковры:   $([ "$now_carpets" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_carpets_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
+now_cleaning=$(flag_of CLEANING_SYNC_ENABLED)
+now_cleaning_dry=$(flag_of CLEANING_SYNC_DRY_RUN)
+echo "уборки:  $([ "$now_cleaning" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_cleaning_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
+echo "уборки с: $(flag_of CLEANING_BACKLOG_FROM)"
 now_gcal=$(flag_of GCAL_ENABLED)
 now_gcal_dry=$(flag_of GCAL_DRY_RUN)
 echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
