@@ -54,3 +54,4 @@ scripts/sync_wahelp_contacts.py
 
 # Recon (разведка) — не коммитить данные с ПД
 recon/data/
+/recon/
