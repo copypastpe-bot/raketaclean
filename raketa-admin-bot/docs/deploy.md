@@ -86,10 +86,13 @@ Settings → Deploy keys → Add deploy key (галочку «Allow write access
 sudo -u adminbot git clone git@github.com:copypastpe-bot/raketa-admin-bot.git /opt/raketa-admin-bot/app
 ```
 
+С 2026-09-14 код живёт в `copypastpe-bot/raketaclean`, подпапка `raketa-admin-bot/`;
+старый репозиторий остаётся только для чтения.
+
 Запасной путь, если с ключом не сложилось, — скопировать код с ноутбука:
 
 ```bash
-rsync -a --exclude '.venv' --exclude '.git' ~/Projects/raketa-admin-bot/ admin@91.200.150.68:/tmp/adminbot-src/
+rsync -a --exclude '.venv' --exclude '.git' ~/Projects/raketaclean/raketa-admin-bot/ admin@91.200.150.68:/tmp/adminbot-src/
 sudo rsync -a /tmp/adminbot-src/ /opt/raketa-admin-bot/app/
 sudo chown -R adminbot:adminbot /opt/raketa-admin-bot
 ```
@@ -425,10 +428,10 @@ sudo raketa-admin-bot-update --telegram-proxy-off
 там выполнить нельзя. Два шага, оба обязательны:
 
 ```bash
-# 1. Перенести код в рабочую копию на сервере (с локальной машины, из корня репозитория)
+# 1. Перенести код в рабочую копию на сервере (с локальной машины, откуда угодно)
 rsync -a --delete --exclude '.venv' --exclude '.git' --exclude '__pycache__' \
       --exclude '.pytest_cache' --exclude '.env' --exclude '.DS_Store' \
-      ./ admin@91.200.150.68:/home/admin/raketa-admin-bot/
+      ~/Projects/raketaclean/raketa-admin-bot/ admin@91.200.150.68:/home/admin/raketa-admin-bot/
 
 # 2. Обновить службу: код → зависимости → миграции → перезапуск
 ssh admin@91.200.150.68 'sudo raketa-admin-bot-update'

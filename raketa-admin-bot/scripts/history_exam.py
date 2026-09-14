@@ -21,7 +21,7 @@
     python -m scripts.history_exam --days 90
 
 Доступы (оба на чтение):
-    DB_DSN            — из ~/Projects/tgbot-v1/.env (--bot-env)
+    DB_DSN            — из ~/Projects/raketaclean/.env (--bot-env)
     AMOCRM_API_TOKEN  — из ./.env.exam (--amo-env)
 """
 

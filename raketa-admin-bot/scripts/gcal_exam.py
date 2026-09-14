@@ -6,7 +6,7 @@
 
 Запуск (файлы разведки содержат ПД и в git не попадают):
 
-    GCAL_FIXTURES_DIR=~/Projects/tgbot-v1/recon/data \\
+    GCAL_FIXTURES_DIR=~/Projects/raketaclean/recon/data \\
         .venv/bin/python -m scripts.gcal_exam
 
 Гейт перед следующей фазой (docs/plans/2026-08-26-calendar-plan.md):
