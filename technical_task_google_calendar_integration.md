@@ -4,7 +4,7 @@
 Первая редакция: 2026-04-09.
 
 ## 0) Обязательный контекст
-Перед началом работы агент обязан прочитать [project.md](/Users/evgenijpastusenko/Projects/tgbot-v1/project.md).
+Перед началом работы агент обязан прочитать [project.md](/Users/evgenijpastusenko/Projects/raketaclean/project.md).
 
 Это ТЗ дополняет `project.md` и определяет конкретную реализацию календарного потока.
 
