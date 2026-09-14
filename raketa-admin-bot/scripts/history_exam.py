@@ -53,7 +53,7 @@ from adminbot.sync.matcher import (
 )
 from adminbot.sync.specialists import SpecialistIndex
 
-DEFAULT_BOT_ENV = Path.home() / "Projects" / "tgbot-v1" / ".env"
+DEFAULT_BOT_ENV = Path.home() / "Projects" / "raketaclean" / ".env"
 DEFAULT_AMO_ENV = Path(__file__).resolve().parent.parent / ".env.exam"
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "docs" / "plans" / "history-exam-result.md"
 

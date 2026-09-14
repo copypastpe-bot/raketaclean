@@ -5,7 +5,7 @@
 в репозиторий не попадают — путь задаётся переменной CARPET_FIXTURES_DIR,
 без неё тесты пропускаются (как тесты базы без TEST_DB_DSN).
 
-    CARPET_FIXTURES_DIR=~/Projects/tgbot-v1/recon/data pytest tests/test_carpet_report.py
+    CARPET_FIXTURES_DIR=~/Projects/raketaclean/recon/data pytest tests/test_carpet_report.py
 """
 
 import os
