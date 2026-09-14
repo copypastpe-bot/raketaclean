@@ -106,6 +106,9 @@ on schema `public` (since 2026-08-26).
 - If required facts are missing, ask the user directly.
 - Do not enumerate speculative options by default.
 - Use detective mode only when the user explicitly asks to find a solution or process.
+- Prefer real code and config over documentation when facts conflict.
+- Keep changes aligned with the current project direction in AGENT_STATE.md.
+- Record uncertainty explicitly instead of guessing.
 
 - Treat `bot.py` as the main runtime source unless a refactor clearly changes the entrypoint.
 - Keep notification behavior consistent across `notifications/` code and `docs/notification_rules.json`.
@@ -211,6 +214,8 @@ Files longer than 500 lines and their function maps:
 - Run `git status --short` before editing, before committing, and before deploy.
 - Commit completed logical steps in small, focused commits.
 - Keep `bot.py` fixes, notification-rule changes, and operational script changes separated when possible.
+- Do not mix unrelated changes into one commit.
+- Do not leave finished commits unpushed without saying so: pushing is the owner's call, the state must be stated.
 - Do not deploy from a dirty worktree.
 
 ## Deploy Rules
