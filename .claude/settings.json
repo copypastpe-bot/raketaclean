@@ -27,7 +27,12 @@
       "Bash(ruff:*)",
       "Bash(.venv/bin/ruff:*)",
       "Bash(scripts/*)",
-      "Bash(./scripts/*)"
+      "Bash(./scripts/*)",
+      "Bash(bash -n deploy/*)",
+      "Bash(bash -n raketa-admin-bot/deploy/*)",
+      "Bash(raketa-admin-bot/scripts/*)",
+      "Bash(raketa-admin-bot/.venv/bin/python:*)",
+      "Bash(raketa-admin-bot/.venv/bin/pytest:*)"
     ]
   }
 }
