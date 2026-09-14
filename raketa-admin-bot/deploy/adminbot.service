@@ -1,0 +1,26 @@
+[Unit]
+Description=Raketa Admin Bot (amo_sync)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=adminbot
+Group=adminbot
+WorkingDirectory=/opt/raketa-admin-bot/app
+EnvironmentFile=/opt/raketa-admin-bot/.env
+ExecStart=/opt/raketa-admin-bot/.venv/bin/python -m adminbot.main
+Restart=always
+RestartSec=5s
+
+# Сервис пишет в боевую CRM, поэтому прав на сервере ему нужно как можно меньше.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+# Postgres на этом сервере без TLS: иначе psycopg/asyncpg пробуют SSL и падают.
+Environment=PGSSLMODE=disable
+
+[Install]
+WantedBy=multi-user.target
