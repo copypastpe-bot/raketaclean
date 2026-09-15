@@ -1,6 +1,6 @@
 # Карта функций: adminbot/db.py
 
-Обновлено 2026-09-10 (добавлено чтение уборок). Строк в файле: 1200.
+Обновлено 2026-09-15 (отложенные письма партнёра). Строк в файле: 1260.
 
 Правило файла: в схему `public` (таблицы рабочего бота) не пишем никогда —
 для неё здесь только SELECT. Всё собственное состояние живёт в схеме `adminbot`.
@@ -16,8 +16,8 @@
 |---|---|---|
 | 130 | `_init_connection` | jsonb ↔ dict без ручного json.dumps на каждом вызове |
 | 137 | `create_pool` | пул соединений с нашим кодеком jsonb |
-| 642 | `apply_migration` | применить SQL-файл миграции (тесты и развёртывание) |
-| 625 | `get_setting` / 631 `set_setting` | настройки владельца (пауза) |
+| 702 | `apply_migration` | применить SQL-файл миграции (тесты и развёртывание) |
+| 685 | `get_setting` / 691 `set_setting` | настройки владельца (пауза) |
 
 ## Заказы химчистки и уборки
 
@@ -53,7 +53,7 @@
 | 414 | `fetch_links_for_orders` | сырьё для вечерней сводки |
 | 428 | `count_links_by_status` | очередь для /status |
 
-## Ковры от партнёра (`carpet_links`)
+## Ковры от партнёра (`carpet_links`, `carpet_letters`)
 
 | Строка | Функция | Назначение |
 |---|---|---|
@@ -64,40 +64,44 @@
 | 570 | `fetch_carpet_taken_leads` | занятые ковровые сделки клиента |
 | 584 | `fetch_carpet_links_by_status` | незаконченные заказы партнёра |
 | 598 | `count_carpet_links_by_status` | очередь ковров |
-| 605 | `remember_letter` / 619 `letter_was_processed` | письмо разобрано: страховка от повторного разбора |
+| 605 | `remember_letter` | письмо разобрано: страховка от повторного разбора; снимает отметки об отложении |
+| 624 | `letter_state` | что робот помнит о письме: `processed` / `held` / `released` / ничего |
+| 642 | `hold_letter` | отложить письмо: робот его не проводит и ждёт владельца |
+| 659 | `release_letter` | владелец разрешил провести отложенное письмо |
+| 672 | `held_letters` | что сейчас отложено — для `--carpets-held` |
 
 ## Календарь (`gcal_events`, `gcal_cursor`)
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 660 | `_as_dict` / 756 `_gcal_value` | jsonb и text[] в виде, который принимает asyncpg |
-| 667 | `_calendar_from_row` | строка → `CalendarLink` |
-| 701–776 | `get_/create_/update_calendar_link`, `mark_calendar_step`, `log_calendar_action` | ход работы по записи |
-| 792 | `fetch_calendar_taken_leads` | сделки, занятые ДРУГИМИ записями того же клиента |
-| 813 | `fetch_pending_calendar_links` | записи, работа по которым не закончена |
-| 827 | `fetch_calendar_links_without_report` | сделано, а владельцу не отчитались |
-| 850 | `count_calendar_links_by_status` | очередь календаря |
-| 857 | `get_calendar_cursor` / 886 `save_calendar_cursor` | закладка обмена, своя у каждого календаря |
-| 903 | `find_calendar_link_by_question_msg` | запись по номеру карточки в Telegram |
-| 919 | `delete_calendar_link` | забыть запись (ручной разбор последствий) |
-| 925 | `fetch_calendar_actions` | что робот делал по записи |
+| 720 | `_as_dict` / 816 `_gcal_value` | jsonb и text[] в виде, который принимает asyncpg |
+| 727 | `_calendar_from_row` | строка → `CalendarLink` |
+| 761–836 | `get_/create_/update_calendar_link`, `mark_calendar_step`, `log_calendar_action` | ход работы по записи |
+| 852 | `fetch_calendar_taken_leads` | сделки, занятые ДРУГИМИ записями того же клиента |
+| 873 | `fetch_pending_calendar_links` | записи, работа по которым не закончена |
+| 887 | `fetch_calendar_links_without_report` | сделано, а владельцу не отчитались |
+| 910 | `count_calendar_links_by_status` | очередь календаря |
+| 917 | `get_calendar_cursor` / 946 `save_calendar_cursor` | закладка обмена, своя у каждого календаря |
+| 963 | `find_calendar_link_by_question_msg` | запись по номеру карточки в Telegram |
+| 979 | `delete_calendar_link` | забыть запись (ручной разбор последствий) |
+| 985 | `fetch_calendar_actions` | что робот делал по записи |
 
 ## Автозвонок (`autocall_leads`, курсор опроса)
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 949 | `_autocall_from_row` | строка → `AutocallLead` |
-| 968–999 | `get_/create_/update_autocall_lead` | цепочка попыток дозвона |
-| 1018 | `fetch_due_autocall_leads` | созревшие цепочки, просроченные первыми |
-| 1039 | `log_autocall_action` / 1051 `fetch_autocall_actions` | журнал по заявке |
-| 1180 | `get_autocall_cursor` / 1188 `save_autocall_cursor` | с какого `created_at` читать амо |
+| 1009 | `_autocall_from_row` | строка → `AutocallLead` |
+| 1028–1059 | `get_/create_/update_autocall_lead` | цепочка попыток дозвона |
+| 1078 | `fetch_due_autocall_leads` | созревшие цепочки, просроченные первыми |
+| 1099 | `log_autocall_action` / 1111 `fetch_autocall_actions` | журнал по заявке |
+| 1240 | `get_autocall_cursor` / 1248 `save_autocall_cursor` | с какого `created_at` читать амо |
 
 ## Почта владельца (`owner_outbox`)
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1066 | `add_owner_letter` | положить недоставленное сообщение в долг |
-| 1086 | `fetch_due_owner_letters` | созревшие долги, старые первыми |
-| 1108 | `fetch_owner_letters_for` | незаконченные долги по одной записи |
-| 1129 | `mark_owner_letter_sent` / 1142 `postpone_owner_letter` / 1156 `drop_owner_letter` | исход попытки |
-| 1170 | `count_owner_letters_waiting` | строка «жду отправки» для /status |
+| 1126 | `add_owner_letter` | положить недоставленное сообщение в долг |
+| 1146 | `fetch_due_owner_letters` | созревшие долги, старые первыми |
+| 1168 | `fetch_owner_letters_for` | незаконченные долги по одной записи |
+| 1189 | `mark_owner_letter_sent` / 1202 `postpone_owner_letter` / 1216 `drop_owner_letter` | исход попытки |
+| 1230 | `count_owner_letters_waiting` | строка «жду отправки» для /status |
