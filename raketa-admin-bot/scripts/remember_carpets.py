@@ -7,9 +7,11 @@
 принял бы за работу.
 
 Скрипт помечает такие номера как уже сделанные: заводит привязку со статусом
-`done` и путём `remembered`. В amoCRM он не ходит вовсе и существующие записи
-не трогает — заказ, который робот когда-то провёл по-настоящему, останется
-с прежним путём и прежними сделками.
+`done` и путём `remembered` одной записью, без промежуточного состояния.
+В amoCRM он не ходит вовсе и существующие записи не трогает — заказ, который
+робот когда-то провёл по-настоящему, останется с прежним путём и прежними
+сделками. Исключение одно: строка, оставшаяся от оборванной загрузки
+(не `done`, без сделок и без отметок в чек-листе), доводится до конца.
 
 Запуск на сервере:
 
@@ -30,6 +32,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import Any, NamedTuple, Optional, Sequence
 
 from adminbot import db
 from adminbot.carpets.report import parse_report, rows_to_process
@@ -38,7 +41,53 @@ from adminbot.config import Settings
 
 # Путь, которым помечены заказы, загруженные из архива: робот их не проводил,
 # он о них просто знает. По этому слову их видно в `--report`.
-REMEMBERED_PATH = "remembered"
+REMEMBERED_PATH = db.CARPET_REMEMBERED_PATH
+
+
+class RememberCounts(NamedTuple):
+    """Что скрипт сделал со строками файла (или сделал бы в режиме просмотра)."""
+
+    known: int      # про этот заказ робот уже знает
+    fresh: int      # заказ для робота новый
+    fixed: int      # строка от оборванной загрузки, доводим до конца
+
+
+def is_unfinished(link) -> bool:
+    """След оборванной загрузки, а не настоящая работа робота.
+
+    Прежняя версия писала строку в два шага: сначала `new`, потом `done`.
+    Обрыв между шагами оставлял строку, которую движок принял бы за работу,
+    а повторный запуск считал бы её уже известной и мимо неё прошёл. Такую
+    строку видно по тому, что робот по ней не сделал ничего: ни сделок,
+    ни отметок в чек-листе.
+    """
+    return (link.status != "done" and not link.lead_id
+            and not link.primary_lead_id and not link.checklist)
+
+
+async def remember_rows(rows: Sequence[Any], *, store: Any, live: bool,
+                        source_file: Optional[str] = None) -> RememberCounts:
+    """Пройти наши строки файла: новые запомнить, недоделанные починить.
+
+    Саму строку отчёта не сохраняем: её хранят, чтобы продолжить незаконченную
+    работу, а здесь продолжать нечего — и лишние ФИО с адресами в базе не нужны.
+    """
+    known = fresh = fixed = 0
+    for row in rows:
+        link = await store.get(row.partner_id)
+        if link is None:
+            fresh += 1
+            if live:
+                await store.remember_partner_row(row.partner_id, row.phone10,
+                                                 source_file=source_file)
+        elif is_unfinished(link):
+            fixed += 1
+            if live:
+                await store.update(row.partner_id, status="done",
+                                   path=REMEMBERED_PATH)
+        else:
+            known += 1
+    return RememberCounts(known=known, fresh=fresh, fixed=fixed)
 
 
 async def main() -> int:
@@ -70,28 +119,16 @@ async def main() -> int:
     settings = Settings.from_env()
     pool = await db.create_pool(settings.own_db_dsn)
     store = PgCarpetStore(pool)
-    known = 0
-    fresh = 0
 
     try:
-        for row in ours:
-            if await store.get(row.partner_id) is not None:
-                known += 1
-                continue
-            fresh += 1
-            if live:
-                # Саму строку отчёта не сохраняем: её хранят, чтобы продолжить
-                # незаконченную работу, а здесь продолжать нечего — и лишние
-                # ФИО с адресами в базе не нужны.
-                await store.create(row.partner_id, row.phone10,
-                                   source_file=path.name)
-                await store.update(row.partner_id, status="done",
-                                   path=REMEMBERED_PATH)
+        counts = await remember_rows(ours, store=store, live=live,
+                                     source_file=path.name)
     finally:
         await pool.close()
 
-    print(f"Робот уже знает: {known}")
-    print(f"{'Запомнил' if live else 'Новых для робота'}: {fresh}")
+    print(f"Робот уже знает: {counts.known}")
+    print(f"{'Запомнил' if live else 'Новых для робота'}: {counts.fresh}")
+    print(f"{'Починил недоделанных' if live else 'Недоделанных (починю)'}: {counts.fixed}")
     if not live:
         print("\nЧтобы записать их в память робота, повторите команду "
               "с --carpets-remember-live.")

@@ -437,6 +437,10 @@ async def count_links_by_status(own_pool: asyncpg.Pool,
 
 # --- ковры от партнёра ---
 
+# Путь строки, которую робот не проводил, а принял на веру из архивного файла
+# партнёра: в амо по ней не уходило ничего.
+CARPET_REMEMBERED_PATH = "remembered"
+
 # Колонки adminbot.carpet_links, которые разрешено менять.
 _UPDATABLE_CARPET_FIELDS = frozenset(
     {"phone10", "status", "path", "lead_id", "primary_lead_id", "question",
@@ -489,6 +493,31 @@ async def create_carpet_link(own_pool: asyncpg.Pool, partner_id: int,
             """,
             partner_id, phone10 or "", source_file, row_data,
         )
+    return _carpet_from_row(row)
+
+
+async def remember_carpet_link(own_pool: asyncpg.Pool, partner_id: int,
+                               phone10: Optional[str],
+                               source_file: Optional[str] = None) -> Optional[CarpetLink]:
+    """Запомнить заказ из архива партнёра сразу как сделанный — одной операцией.
+
+    Двумя шагами (создать, потом перевести в `done`) строка между ними остаётся
+    в `new`, и обрыв загрузки оставил бы её движку как работу. Существующую
+    запись не трогаем вовсе: заказ, который робот когда-то провёл по-настоящему,
+    сохраняет свой путь и свои сделки.
+    """
+    async with own_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO adminbot.carpet_links (partner_id, phone10, source_file, status, path)
+            VALUES ($1, $2, $3, 'done', $4)
+            ON CONFLICT (partner_id) DO NOTHING
+            RETURNING *
+            """,
+            partner_id, phone10 or "", source_file, CARPET_REMEMBERED_PATH,
+        )
+    if row is None:                       # кто-то успел раньше — отдаём, что есть
+        return await get_carpet_link(own_pool, partner_id)
     return _carpet_from_row(row)
 
 

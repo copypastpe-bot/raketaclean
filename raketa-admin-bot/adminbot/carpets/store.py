@@ -66,6 +66,21 @@ class MemoryCarpetStore:
             self.links[partner_id] = link
         return link
 
+    async def remember_partner_row(self, partner_id: int, phone10: Optional[str],
+                                   source_file: Optional[str] = None) -> Optional[CarpetLink]:
+        """Заказ из архива партнёра: сразу «сделано», одной операцией.
+
+        Существующую строку не трогаем — как и боевое хранилище.
+        """
+        link = self.links.get(partner_id)
+        if link is not None:
+            return link
+        link = CarpetLink(partner_id=partner_id, phone10=phone10 or "", status="done",
+                          path=db.CARPET_REMEMBERED_PATH, source_file=source_file,
+                          checklist={}, created_at=self._now(), updated_at=self._now())
+        self.links[partner_id] = link
+        return link
+
     async def update(self, partner_id: int, **fields: Any) -> Optional[CarpetLink]:
         link = self.links.get(partner_id)
         if link is None:
@@ -139,6 +154,10 @@ class PgCarpetStore:
                                            source_file, row_data)
 
     # --- что нужно наблюдателю почты ---
+
+    async def remember_partner_row(self, partner_id: int, phone10: Optional[str],
+                                   source_file: Optional[str] = None) -> Optional[CarpetLink]:
+        return await db.remember_carpet_link(self._pool, partner_id, phone10, source_file)
 
     async def letter_state(self, uid: str) -> Optional[str]:
         return await db.letter_state(self._pool, uid)
