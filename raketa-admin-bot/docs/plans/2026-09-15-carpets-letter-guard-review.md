@@ -51,6 +51,8 @@
 
 ### Правка 5. Документация прогона из файла
 
+**Выполнено** cd0c5ac
+
 `docs/deploy.md:577,581`. Команда без `cd /opt/raketa-admin-bot/app` не найдёт пакет
 `scripts`; доступы (`--bot-env`, `--amo-env`) при `sudo -u adminbot` без `-H` не
 найдутся. Записать рабочий вариант: `cd /opt/raketa-admin-bot/app && sudo -u adminbot
