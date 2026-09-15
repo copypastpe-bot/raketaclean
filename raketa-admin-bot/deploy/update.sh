@@ -156,12 +156,18 @@ if [ -n "$REPORT" ]; then
                to_char(updated_at AT TIME ZONE 'Europe/Moscow', 'DD.MM HH24:MI') AS обновлено
         FROM adminbot.amo_links ORDER BY order_id"
     echo "=== Ковры от партнёра ==="
+    # Заказы из архивных файлов партнёра робот не проводил, он их просто помнит,
+    # и их сотни. В таблицу они не идут — иначе за ними не видно настоящей работы.
+    REMEMBERED=$(sudo -u adminbot psql "$DSN" -tAc \
+        "SELECT count(*) FROM adminbot.carpet_links WHERE path = 'remembered'")
+    echo "Запомнено из файлов партнёра: $REMEMBERED (в таблицу ниже не входят)"
     sudo -u adminbot psql "$DSN" -P pager=off -c "
         SELECT partner_id AS \"заказ партнёра\", status AS состояние, path AS путь,
                lead_id AS \"ковровая сделка\", primary_lead_id AS лид,
                left(coalesce(last_error, ''), 30) AS ошибка,
                to_char(updated_at AT TIME ZONE 'Europe/Moscow', 'DD.MM HH24:MI') AS обновлено
-        FROM adminbot.carpet_links ORDER BY partner_id"
+        FROM adminbot.carpet_links
+        WHERE path IS DISTINCT FROM 'remembered' ORDER BY partner_id"
     echo "=== Записи календаря ==="
     sudo -u adminbot psql "$DSN" -P pager=off -c "
         SELECT event_id AS запись, kind AS вид, status AS состояние,
