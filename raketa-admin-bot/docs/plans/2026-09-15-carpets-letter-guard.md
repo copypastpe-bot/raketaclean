@@ -73,6 +73,8 @@
 
 ### Задача 1. Письма адресуются постоянным UID, а не порядковым номером
 
+**Выполнено** 9907f98
+
 Файлы: `adminbot/mail.py`, `scripts/verify_carpets.py`, `tests/test_mail.py`.
 
 - В `_fetch_new`, `_read_letter`, `_mark_seen` перейти на команды `box.uid("search", …)`,
