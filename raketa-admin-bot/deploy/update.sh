@@ -359,7 +359,10 @@ if [ -n "$CARPETS_REMEMBER" ]; then
     chmod 600 "$CARPETS_TMP"
     cd "$APP_DIR"
     ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    # В базе должно остаться имя файла партнёра, а не временной копии:
+    # по нему потом видно, откуда взялась запись.
     sudo -u adminbot env $ENV_VARS CARPETS_REMEMBER_FILE="$CARPETS_TMP" \
+        CARPETS_REMEMBER_NAME="$(basename "$CARPETS_REMEMBER")" \
         CARPETS_REMEMBER_LIVE="${CARPETS_REMEMBER_LIVE:-0}" \
         "$HOME_DIR/.venv/bin/python" -m scripts.remember_carpets || true
     rm -f "$CARPETS_TMP"

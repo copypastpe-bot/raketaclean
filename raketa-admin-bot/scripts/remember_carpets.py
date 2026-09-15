@@ -18,6 +18,10 @@
     sudo raketa-admin-bot-update --carpets-remember=<путь к файлу>   посчитать
     sudo raketa-admin-bot-update --carpets-remember=<файл> --carpets-remember-live   записать
 
+Путь к файлу приходит в `CARPETS_REMEMBER_FILE` (на сервере это временная копия,
+доступная пользователю `adminbot`), а имя, под которым запись видна в базе, —
+в `CARPETS_REMEMBER_NAME`.
+
 Без `--carpets-remember-live` печатаются только счётчики: сколько в файле наших
 строк, сколько новых для робота и сколько он уже знает.
 
@@ -101,6 +105,11 @@ async def main() -> int:
         print(f"Файла нет: {path}")
         return 2
 
+    # Скрипт читает временную копию, доступную пользователю adminbot, а в базу
+    # пишет имя исходного файла партнёра: `carpets_remember_XXXXXX.xlsx`
+    # в отчёте ничего не объясняет.
+    source_file = os.environ.get("CARPETS_REMEMBER_NAME", "").strip() or path.name
+
     live = os.environ.get("CARPETS_REMEMBER_LIVE", "").strip() in ("1", "true")
     print("Режим:", "ЗАПИСЫВАЮ (память робота меняется)" if live
           else "просмотр (ничего не меняю)")
@@ -122,7 +131,7 @@ async def main() -> int:
 
     try:
         counts = await remember_rows(ours, store=store, live=live,
-                                     source_file=path.name)
+                                     source_file=source_file)
     finally:
         await pool.close()
 
