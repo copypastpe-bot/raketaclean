@@ -11,6 +11,8 @@
 #   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
 #   sudo raketa-admin-bot-update --carpets-held                     ковры: какие письма отложены и почему
 #   sudo raketa-admin-bot-update --carpets-release=UID              ковры: провести отложенное письмо
+#   sudo raketa-admin-bot-update --carpets-remember=ФАЙЛ             ковры: посчитать заказы в архивном файле партнёра
+#   sudo raketa-admin-bot-update --carpets-remember=ФАЙЛ --carpets-remember-live   ковры: запомнить их как сделанные
 #   sudo raketa-admin-bot-update --cleaning-on --cleaning-rehearsal уборки: репетиция
 #   sudo raketa-admin-bot-update --cleaning-live                    уборки: боевой режим
 #   sudo raketa-admin-bot-update --cleaning-off                     уборки: выключить
@@ -44,6 +46,8 @@ CARPETS=""
 CARPETS_DRY=""
 CARPETS_HELD=""
 CARPETS_RELEASE=""
+CARPETS_REMEMBER=""
+CARPETS_REMEMBER_LIVE=""
 CLEANING=""
 CLEANING_DRY=""
 CLEANING_FROM=""
@@ -84,6 +88,8 @@ for arg in "$@"; do
         --carpets-rehearsal) CARPETS_DRY=1 ;;
         --carpets-held)      CARPETS_HELD=1 ;;
         --carpets-release=*) CARPETS_RELEASE="${arg#*=}" ;;
+        --carpets-remember=*) CARPETS_REMEMBER="${arg#*=}" ;;
+        --carpets-remember-live) CARPETS_REMEMBER_LIVE=1 ;;
         --cleaning-on)        CLEANING=1 ;;
         --cleaning-off)       CLEANING=0 ;;
         --cleaning-live)      CLEANING_DRY=0 ;;
@@ -336,6 +342,30 @@ if [ -n "$CARPETS_HELD" ] || [ -n "$CARPETS_RELEASE" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.held_letters || true
 fi
 
+# Архивный файл партнёра: пометить его заказы как уже сделанные, чтобы повтор
+# старых строк в новых отчётах робот пропускал. В амо не ходит.
+# Файл лежит у admin и пользователю adminbot недоступен, поэтому работаем
+# с временной копией и убираем её в любом исходе: в файле телефоны клиентов.
+if [ -n "$CARPETS_REMEMBER" ]; then
+    say "Архивный файл партнёра: $([ -n "$CARPETS_REMEMBER_LIVE" ] && echo 'ЗАПОМИНАЮ' || echo 'просмотр')"
+    if [ ! -f "$CARPETS_REMEMBER" ]; then
+        echo "Файла нет: $CARPETS_REMEMBER" >&2
+        exit 2
+    fi
+    CARPETS_TMP=$(mktemp /tmp/carpets_remember_XXXXXX.xlsx)
+    trap 'rm -f "$CARPETS_TMP"' EXIT
+    cp "$CARPETS_REMEMBER" "$CARPETS_TMP"
+    chown adminbot "$CARPETS_TMP"
+    chmod 600 "$CARPETS_TMP"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS CARPETS_REMEMBER_FILE="$CARPETS_TMP" \
+        CARPETS_REMEMBER_LIVE="${CARPETS_REMEMBER_LIVE:-0}" \
+        "$HOME_DIR/.venv/bin/python" -m scripts.remember_carpets || true
+    rm -f "$CARPETS_TMP"
+    trap - EXIT
+fi
+
 # Диагностика: какие сделки у клиента в CRM. Ничего не меняет.
 if [ -n "$SHOW_LEADS" ] || [ -n "$SHOW_LEAD_IDS" ]; then
     say "Сделки клиента"
@@ -378,7 +408,7 @@ if [ -n "$AUTOCALL_EXAM" ]; then
 fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
