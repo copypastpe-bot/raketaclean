@@ -46,7 +46,7 @@ class AllLettersBox(MailBox):
         box = self._connect()
         try:
             self._select(box, readonly=True)
-            ok, data = box.search(None, "ALL")
+            ok, data = box.uid("search", None, "ALL")
             letters = []
             for uid in (data[0] or b"").split():
                 letter = self._read_letter(box, uid)

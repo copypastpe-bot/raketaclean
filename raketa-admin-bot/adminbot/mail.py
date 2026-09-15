@@ -11,7 +11,11 @@
 - письмо помечается прочитанным ТОЛЬКО отдельной командой, после того как строки
   разобраны. Робот упал посередине — письмо остаётся непрочитанным и разберётся
   снова. Потерять отчёт хуже, чем обработать его дважды: от повторной обработки
-  защищает номер заказа партнёра в базе.
+  защищает номер заказа партнёра в базе;
+- письма адресуются постоянным UID (`box.uid(...)`), а не порядковым номером.
+  Порядковый номер — это место письма в папке: удалили одно письмо, и у всех
+  следующих номер сдвинулся. Робот же помнит отложенное письмо неделями (оно
+  лежит непрочитанным), и по сдвинутому номеру он пометил бы чужое письмо.
 """
 
 from __future__ import annotations
@@ -72,7 +76,7 @@ def mail_settings_from_env() -> MailSettings:
 class Letter:
     """Письмо с отчётами: то, что нужно роботу, и ничего лишнего."""
 
-    uid: str
+    uid: str                                       # постоянный UID письма в папке
     subject: str
     sender: str
     date: Optional[str] = None
@@ -100,7 +104,7 @@ class MailBox:
             # Папку открываем только на чтение: даже случайная команда не должна
             # изменить состояние ящика владельца.
             self._select(box, readonly=True)
-            ok, data = box.search(None, "UNSEEN")
+            ok, data = box.uid("search", None, "UNSEEN")
             if ok != "OK":
                 raise MailError(f"Почта не отдала список писем: {data}")
 
@@ -117,7 +121,7 @@ class MailBox:
         box = self._connect()
         try:
             self._select(box, readonly=False)
-            box.store(uid.encode(), "+FLAGS", "\\Seen")
+            box.uid("store", uid.encode(), "+FLAGS", "\\Seen")
         finally:
             _close(box)
 
@@ -131,7 +135,7 @@ class MailBox:
         # и письмо пропало бы из работы ещё до того, как строки разобраны.
         # Поймано на боевой почте 2026-08-26: проверка «что там лежит» съела
         # непрочитанность обоих отчётов партнёра.
-        ok, raw = box.fetch(uid, "(BODY.PEEK[])")
+        ok, raw = box.uid("fetch", uid, "(BODY.PEEK[])")
         if ok != "OK" or not raw or not isinstance(raw[0], tuple):
             log.warning("Письмо %s прочитать не удалось", uid)
             return None

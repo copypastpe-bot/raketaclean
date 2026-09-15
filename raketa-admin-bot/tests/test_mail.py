@@ -26,16 +26,28 @@ def make_letter(subject: str, attachments: dict[str, bytes] | None = None,
 
 
 class FakeImap:
-    """Двойник imaplib: отвечает теми же кортежами ('OK', [...])."""
+    """Двойник imaplib: отвечает теми же кортежами ('OK', [...]).
+
+    Письма живут под постоянными UID, а порядковый номер — это место письма
+    в папке: удалили одно, и у следующих номер сдвинулся. Команды без `uid`
+    адресуют письмо номером, команды `uid(...)` — постоянным UID. Поэтому
+    возврат к номерам виден в тестах сразу, а не на проде.
+    """
 
     def __init__(self, letters: dict[bytes, bytes], unseen: list[bytes] | None = None):
-        self.letters = letters
-        self.unseen = unseen if unseen is not None else list(letters)
+        self.letters = dict(letters)
+        self.unseen = list(unseen) if unseen is not None else list(self.letters)
         self.selected = None
         self.marked: list[bytes] = []
         self.fetched: list[bytes] = []
         self.logged_out = False
         self.fail_on_select = False
+
+    def remove(self, uid: bytes) -> None:
+        """Письмо удалили из папки: порядковые номера остальных сдвинулись."""
+        self.letters.pop(uid, None)
+        if uid in self.unseen:
+            self.unseen.remove(uid)
 
     def select(self, folder, readonly=False):
         if self.fail_on_select:
@@ -43,21 +55,63 @@ class FakeImap:
         self.selected = (folder, readonly)
         return "OK", [str(len(self.letters)).encode()]
 
+    # --- команды по порядковому номеру ---
+
     def search(self, charset, *criteria):
         assert "UNSEEN" in criteria                # берём только неразобранные
-        return "OK", [b" ".join(self.unseen)]
+        order = list(self.letters)
+        numbers = [str(order.index(uid) + 1).encode() for uid in self.unseen]
+        return "OK", [b" ".join(numbers)]
 
-    def fetch(self, uid, parts):
+    def fetch(self, number, parts):
+        return self._fetch(self._by_number(number), parts)
+
+    def store(self, number, command, flags):
+        return self._store(self._by_number(number), command, flags)
+
+    # --- команды по постоянному UID ---
+
+    def uid(self, command, *args):
+        name = command.lower()
+        if name == "search":
+            criteria = [arg for arg in args if arg is not None]
+            assert criteria and criteria[-1] in ("UNSEEN", "ALL")
+            wanted = self.unseen if criteria[-1] == "UNSEEN" else list(self.letters)
+            return "OK", [b" ".join(wanted)]
+        if name == "fetch":
+            target, parts = args
+            return self._fetch(self._as_uid(target), parts)
+        if name == "store":
+            target, command_name, flags = args
+            return self._store(self._as_uid(target), command_name, flags)
+        raise AssertionError(f"двойник не знает команду UID {command}")
+
+    # --- общее ---
+
+    def _fetch(self, uid, parts):
         # Настоящий сервер на «(RFC822)» пометил бы письмо прочитанным. Двойник
         # этого не делает, поэтому проверяем сам запрос — иначе ошибка не видна.
         assert "PEEK" in parts, "письмо нужно читать через BODY.PEEK, иначе оно «съедается»"
         self.fetched.append(uid)
         return "OK", [(b"1 (BODY[] {%d}" % len(self.letters[uid]), self.letters[uid]), b")"]
 
-    def store(self, uid, command, flags):
+    def _store(self, uid, command, flags):
         assert command == "+FLAGS" and flags == "\\Seen"
+        assert uid in self.letters, f"письма {uid!r} в папке нет"
         self.marked.append(uid)
         return "OK", [b""]
+
+    def _by_number(self, number) -> bytes:
+        text = number.decode() if isinstance(number, bytes) else str(number)
+        order = list(self.letters)
+        index = int(text) - 1
+        assert 0 <= index < len(order), f"в папке нет письма с номером {text}"
+        return order[index]
+
+    def _as_uid(self, target) -> bytes:
+        uid = target if isinstance(target, bytes) else str(target).encode()
+        assert uid in self.letters, f"письма с UID {uid!r} в папке нет"
+        return uid
 
     def logout(self):
         self.logged_out = True
@@ -127,6 +181,29 @@ async def test_letter_is_marked_read_on_demand():
 
     await box.mark_seen(letters[0].uid)
     assert fake.marked == [b"4"]
+
+
+async def test_uid_survives_deletion_of_another_letter():
+    """Удалили письмо из папки — у остальных сдвинулся номер, но не UID.
+
+    Отложенное письмо лежит в папке непрочитанным неделями. Если адресовать его
+    порядковым номером, после удаления любого соседа робот пометил бы прочитанным
+    чужое письмо, а отложенное так и осталось бы висеть.
+    """
+    box, fake = box_with({
+        b"5": make_letter("старый отчёт", {"а.xlsx": b"PK"}),
+        b"6": make_letter("отчёт за неделю", {"б.xlsx": b"PK"}),
+        b"7": make_letter("отказы за месяц", {"в.xlsx": b"PK"}),
+    })
+
+    letters = await box.fetch_new()
+    assert [letter.uid for letter in letters] == ["5", "6", "7"]
+
+    fake.remove(b"5")                              # владелец удалил лишнее письмо
+
+    await box.mark_seen("7")
+
+    assert fake.marked == [b"7"]                   # по номеру попали бы в письмо 6
 
 
 # --- сбои ---
