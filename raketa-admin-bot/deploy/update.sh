@@ -9,6 +9,8 @@
 #   sudo raketa-admin-bot-update --report      что робот записал (ничего не меняет)
 #   sudo raketa-admin-bot-update --carpets-on --carpets-rehearsal   ковры: репетиция
 #   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
+#   sudo raketa-admin-bot-update --carpets-held                     ковры: какие письма отложены и почему
+#   sudo raketa-admin-bot-update --carpets-release=UID              ковры: провести отложенное письмо
 #   sudo raketa-admin-bot-update --cleaning-on --cleaning-rehearsal уборки: репетиция
 #   sudo raketa-admin-bot-update --cleaning-live                    уборки: боевой режим
 #   sudo raketa-admin-bot-update --cleaning-off                     уборки: выключить
@@ -40,6 +42,8 @@ REPORT=""
 BACKLOG_FROM=""
 CARPETS=""
 CARPETS_DRY=""
+CARPETS_HELD=""
+CARPETS_RELEASE=""
 CLEANING=""
 CLEANING_DRY=""
 CLEANING_FROM=""
@@ -78,6 +82,8 @@ for arg in "$@"; do
         --carpets-off)       CARPETS=0 ;;
         --carpets-live)      CARPETS_DRY=0 ;;
         --carpets-rehearsal) CARPETS_DRY=1 ;;
+        --carpets-held)      CARPETS_HELD=1 ;;
+        --carpets-release=*) CARPETS_RELEASE="${arg#*=}" ;;
         --cleaning-on)        CLEANING=1 ;;
         --cleaning-off)       CLEANING=0 ;;
         --cleaning-live)      CLEANING_DRY=0 ;;
@@ -319,6 +325,17 @@ if [ -n "$GCAL_FORGET" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.forget_calendar || true
 fi
 
+# Отложенные письма партнёра: показать список или снять отложение с одного
+# письма. Робот откладывает письмо, где наших строк больше порога или чьё
+# вложение не разобралось; после снятия ближайший проход проведёт его как обычное.
+if [ -n "$CARPETS_HELD" ] || [ -n "$CARPETS_RELEASE" ]; then
+    say "Отложенные письма партнёра"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS CARPETS_RELEASE_UID="$CARPETS_RELEASE" \
+        "$HOME_DIR/.venv/bin/python" -m scripts.held_letters || true
+fi
+
 # Диагностика: какие сделки у клиента в CRM. Ничего не меняет.
 if [ -n "$SHOW_LEADS" ] || [ -n "$SHOW_LEAD_IDS" ]; then
     say "Сделки клиента"
@@ -361,7 +378,7 @@ if [ -n "$AUTOCALL_EXAM" ]; then
 fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
