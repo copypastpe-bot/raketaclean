@@ -570,17 +570,40 @@ sudo raketa-admin-bot-update --carpets-remember=/home/admin/архив.xlsx --ca
 
 Обычно ковры идут сами: письмо из папки `robot_amo` → строки → сделки. Когда
 нужно провести строки из файла руками (письмо удалено, отчёт прислали иначе),
-это делает `scripts/run_carpets.py` на сервере, от пользователя `adminbot`:
+это делает `scripts/run_carpets.py` на сервере. Файл кладут рядом с собой
+(`scp отчёт.xlsx admin@91.200.150.68:/home/admin/`) и после прогона удаляют:
+в нём телефоны и адреса клиентов.
 
 ```bash
 # Репетиция: решения принимаются, в amoCRM не уходит ничего
-sudo -u adminbot /opt/raketa-admin-bot/.venv/bin/python -m scripts.run_carpets \
-    --file /tmp/отчёт.xlsx
+cd /opt/raketa-admin-bot/app && sudo /opt/raketa-admin-bot/.venv/bin/python \
+    -m scripts.run_carpets --file /home/admin/отчёт.xlsx \
+    --bot-env /opt/telegram-bot/.env --amo-env /home/admin/.amo_write.env
 
 # Боевой прогон: обязателен список сделок, которые разрешено менять
-sudo -u adminbot /opt/raketa-admin-bot/.venv/bin/python -m scripts.run_carpets \
-    --file /tmp/отчёт.xlsx --live --allow 31587353,31613297
+cd /opt/raketa-admin-bot/app && sudo /opt/raketa-admin-bot/.venv/bin/python \
+    -m scripts.run_carpets --file /home/admin/отчёт.xlsx \
+    --bot-env /opt/telegram-bot/.env --amo-env /home/admin/.amo_write.env \
+    --live --allow 31587353,31613297
+
+# После прогона
+rm -f /home/admin/отчёт.xlsx
 ```
+
+Три подробности, без которых команда не запустится:
+
+- `cd /opt/raketa-admin-bot/app` — из другого каталога `python -m scripts...`
+  не найдёт пакет `scripts`;
+- доступы скрипт берёт **из файлов**, а не из окружения: токен записи в амо —
+  из `--amo-env` (боевой прогон без него не начнётся), адрес CRM — из
+  `--bot-env`. Пути указываем явно: по умолчанию скрипт ищет `.amo_write.env`
+  в домашнем каталоге того, кто его запустил, а под `sudo` это уже не тот
+  каталог;
+- запускаем от `root` (`sudo` без `-u adminbot`): `~/.amo_write.env` лежит
+  у `admin` с правами 600, и пользователь `adminbot` его не прочитает.
+
+Прогон из файла в память робота ничего не записывает (в базе он не отмечается),
+поэтому повторный запуск по тому же файлу пройдёт те же строки заново.
 
 Без `--allow` боевой прогон из файла не запускается вовсе. Со списком клиент
 amoCRM проверяет каждый вызов сам: создавать сделки, контакты и закрывать задачи
