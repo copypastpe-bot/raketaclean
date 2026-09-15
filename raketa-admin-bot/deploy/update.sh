@@ -46,6 +46,7 @@ CARPETS=""
 CARPETS_DRY=""
 CARPETS_HELD=""
 CARPETS_RELEASE=""
+CARPETS_RELEASE_SET=""
 CARPETS_REMEMBER=""
 CARPETS_REMEMBER_LIVE=""
 CLEANING=""
@@ -87,7 +88,7 @@ for arg in "$@"; do
         --carpets-live)      CARPETS_DRY=0 ;;
         --carpets-rehearsal) CARPETS_DRY=1 ;;
         --carpets-held)      CARPETS_HELD=1 ;;
-        --carpets-release=*) CARPETS_RELEASE="${arg#*=}" ;;
+        --carpets-release=*) CARPETS_RELEASE="${arg#*=}"; CARPETS_RELEASE_SET=1 ;;
         --carpets-remember=*) CARPETS_REMEMBER="${arg#*=}" ;;
         --carpets-remember-live) CARPETS_REMEMBER_LIVE=1 ;;
         --cleaning-on)        CLEANING=1 ;;
@@ -125,6 +126,18 @@ for arg in "$@"; do
         *) echo "Неизвестный ключ: $arg" >&2; exit 2 ;;
     esac
 done
+
+# Ключ без своей пары — это опечатка, а не команда. Без проверки такой запуск
+# доходил бы до полного обновления кода и перезапуска боевой службы: владелец
+# просил показать письмо, а получил бы деплой.
+if [ -n "$CARPETS_REMEMBER_LIVE" ] && [ -z "$CARPETS_REMEMBER" ]; then
+    echo "--carpets-remember-live без --carpets-remember=<файл>: запоминать нечего." >&2
+    exit 2
+fi
+if [ -n "$CARPETS_RELEASE_SET" ] && [ -z "$CARPETS_RELEASE" ]; then
+    echo "--carpets-release= без UID письма: UID берут из --carpets-held." >&2
+    exit 2
+fi
 
 # Пробел внутри списка календарей позже разорвал бы строку при переносе настроек
 # в окружение диагностики (там xargs), и робот пошёл бы читать несуществующий
@@ -417,7 +430,7 @@ if [ -n "$AUTOCALL_EXAM" ]; then
 fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER$CARPETS_REMEMBER_LIVE" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
