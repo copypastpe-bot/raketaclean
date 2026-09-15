@@ -92,6 +92,8 @@
 
 ### Задача 2. Память робота: отложенные письма
 
+**Выполнено** 8648779
+
 Файлы: `migrations/011_carpet_letters_held.sql`, `adminbot/db.py`,
 `adminbot/carpets/store.py`, протокол в `adminbot/carpets/watcher.py`, тесты.
 
