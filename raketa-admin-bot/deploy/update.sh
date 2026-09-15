@@ -48,6 +48,7 @@ CARPETS_HELD=""
 CARPETS_RELEASE=""
 CARPETS_RELEASE_SET=""
 CARPETS_REMEMBER=""
+CARPETS_REMEMBER_SET=""
 CARPETS_REMEMBER_LIVE=""
 CLEANING=""
 CLEANING_DRY=""
@@ -89,7 +90,7 @@ for arg in "$@"; do
         --carpets-rehearsal) CARPETS_DRY=1 ;;
         --carpets-held)      CARPETS_HELD=1 ;;
         --carpets-release=*) CARPETS_RELEASE="${arg#*=}"; CARPETS_RELEASE_SET=1 ;;
-        --carpets-remember=*) CARPETS_REMEMBER="${arg#*=}" ;;
+        --carpets-remember=*) CARPETS_REMEMBER="${arg#*=}"; CARPETS_REMEMBER_SET=1 ;;
         --carpets-remember-live) CARPETS_REMEMBER_LIVE=1 ;;
         --cleaning-on)        CLEANING=1 ;;
         --cleaning-off)       CLEANING=0 ;;
@@ -132,6 +133,10 @@ done
 # просил показать письмо, а получил бы деплой.
 if [ -n "$CARPETS_REMEMBER_LIVE" ] && [ -z "$CARPETS_REMEMBER" ]; then
     echo "--carpets-remember-live без --carpets-remember=<файл>: запоминать нечего." >&2
+    exit 2
+fi
+if [ -n "$CARPETS_REMEMBER_SET" ] && [ -z "$CARPETS_REMEMBER" ]; then
+    echo "--carpets-remember= без пути к файлу: укажите архивный файл партнёра." >&2
     exit 2
 fi
 if [ -n "$CARPETS_RELEASE_SET" ] && [ -z "$CARPETS_RELEASE" ]; then
