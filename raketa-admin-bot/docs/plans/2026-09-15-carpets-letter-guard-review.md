@@ -24,6 +24,8 @@
 
 ### Правка 2. `source_file` — имя файла партнёра, а не временной копии
 
+**Выполнено** 7dca8fb
+
 `scripts/remember_carpets.py:87`, `deploy/update.sh:355`. В базу попадает
 `carpets_remember_XXXXXX.xlsx`. Передавать исходное имя через переменную окружения
 (например `CARPETS_REMEMBER_NAME`, basename пути из `--carpets-remember=`), скрипт
