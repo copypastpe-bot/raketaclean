@@ -11,8 +11,8 @@ Owner-only admin bot for the cleaning company (raketaclean): a separate service 
 
 Infra map (canonical, token-light): /Users/evgenijpastusenko/Projects/agent1/docs/INFRA_MAP_LITE.yaml
 
-1. central `AGENT_STATE.md` in `agent1/project_ai_context/raketaclean/`
-2. recent entries in central `SESSION_LOG.md` in the same directory
+1. `../AGENT_STATE.md` in the repository root (context of the whole monorepo)
+2. recent entries in `../SESSION_LOG.md` there
 3. `docs/plans/2026-08-24-amo-sync-design.md` (approved design)
 4. current implementation plan in `docs/plans/`
 5. recon facts: `docs/recon/` in the repository root (00-summary, 06-matching-metrics)
