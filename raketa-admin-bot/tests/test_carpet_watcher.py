@@ -66,6 +66,8 @@ class FakeStore:
     def __init__(self):
         self.links: dict[int, CarpetLink] = {}
         self.remembered: list[tuple] = []
+        self.held: dict[str, tuple] = {}
+        self.released: list[str] = []
         self.pending: list[tuple[CarpetRow, CarpetLink]] = []
 
     async def update(self, partner_id, **fields):
@@ -73,11 +75,26 @@ class FakeStore:
         self.links[partner_id] = replace(self.links[partner_id], **fields)
         return self.links[partner_id]
 
-    async def letter_processed(self, uid) -> bool:
-        return uid in [item[0] for item in self.remembered]
+    async def letter_state(self, uid):
+        if uid in self.held:
+            return "held"
+        if uid in [item[0] for item in self.remembered]:
+            return "processed"
+        return "released" if uid in self.released else None
 
     async def remember_letter(self, uid, subject, files, rows_total) -> None:
+        self.held.pop(uid, None)
+        if uid in self.released:
+            self.released.remove(uid)
         self.remembered.append((uid, subject, files, rows_total))
+
+    async def hold_letter(self, uid, subject, files, rows_total, reason) -> None:
+        self.held[uid] = (subject, list(files), rows_total, reason)
+
+    def release(self, uid) -> None:
+        """Владелец снял отложение: письмо разрешено провести."""
+        self.held.pop(uid, None)
+        self.released.append(uid)
 
     async def pending_rows(self):
         return list(self.pending)
@@ -142,8 +159,42 @@ async def test_letter_with_a_failed_row_is_not_marked_read():
     assert engine.store.remembered == []
 
 
-async def test_broken_attachment_does_not_stop_the_others():
+async def test_broken_attachment_holds_its_letter_but_not_the_others():
+    """Неразобранный файл откладывает своё письмо — соседнее разбирается как обычно."""
     mailbox, engine = FakeMailBox([letter(uid="1"), letter(uid="2")]), FakeEngine()
+    held = []
+
+    def parse(data):
+        if not parse.first_done:
+            parse.first_done = True
+            raise ValueError("В отчёте партнёра нет колонок: Телефон")
+        return [row(44535)]
+    parse.first_done = False
+
+    async def on_held(letter_, reason, rows_total, refused_total):
+        held.append((letter_.uid, reason))
+
+    watcher = CarpetWatcher(engine=engine, mailbox=mailbox, store=engine.store,
+                            parse=parse, on_held=on_held)
+    report = await watcher.tick()
+
+    assert engine.processed == [44535]                 # второе письмо разобрано
+    assert mailbox.seen == ["2"]
+    assert report.held == 1
+    assert [uid for uid, _ in held] == ["1"]
+    assert "нет колонок" in held[0][1] and "Договоры (11).xlsx" in held[0][1]
+    assert "1" in engine.store.held                    # первое письмо ждёт владельца
+
+
+async def test_broken_attachment_holds_the_whole_letter():
+    """Сбойный файл больше не пропускает вперёд остальные вложения того же письма.
+
+    Решение владельца 15.09.2026: неразобранный файл требует взгляда человека,
+    а не тихих повторов каждый час.
+    """
+    two_files = Letter(uid="9", subject="свод за месяц", sender="raketa@raketaclean.ru",
+                       attachments={"битый.xlsx": REPORT, "целый.xlsx": REPORT})
+    mailbox, engine = FakeMailBox([two_files]), FakeEngine()
 
     def parse(data):
         if not parse.first_done:
@@ -155,9 +206,87 @@ async def test_broken_attachment_does_not_stop_the_others():
     watcher = CarpetWatcher(engine=engine, mailbox=mailbox, store=engine.store, parse=parse)
     report = await watcher.tick()
 
-    assert engine.processed == [44535]                 # второе письмо разобрано
-    assert mailbox.seen == ["2"]
-    assert any("нет колонок" in text for _, text in report.failures)
+    assert engine.processed == []                      # второй файл тоже не проводим
+    assert mailbox.seen == [] and engine.store.remembered == []
+    assert report.held == 1
+
+
+# --- слишком большое письмо ---
+
+async def test_letter_over_the_limit_is_held():
+    """Архив за два года вместо недельного отчёта: не проводим ни одной строки."""
+    mailbox, engine = FakeMailBox([letter()]), FakeEngine()
+    held = []
+
+    async def on_held(letter_, reason, rows_total, refused_total):
+        held.append((letter_.uid, reason, rows_total, refused_total))
+
+    watcher = make_watcher(mailbox, engine, max_rows=2, on_held=on_held,
+                           rows=[row(1), row(2), row(3, is_refusal=True)])
+    report = await watcher.tick()
+
+    assert engine.processed == []                      # в амо не ушло ничего
+    assert mailbox.seen == []                          # письмо осталось в папке
+    assert engine.store.remembered == []
+    assert held == [("1", "строк 3, порог 2", 3, 1)]
+    assert report.held == 1 and report.processed == 0
+
+
+async def test_held_letter_is_skipped_on_the_next_tick():
+    """Владельцу говорим один раз: второй проход проходит мимо молча."""
+    mailbox, engine = FakeMailBox([letter()]), FakeEngine()
+    held = []
+
+    async def on_held(letter_, reason, rows_total, refused_total):
+        held.append(letter_.uid)
+
+    watcher = make_watcher(mailbox, engine, max_rows=1, on_held=on_held,
+                           rows=[row(1), row(2)])
+    await watcher.tick()
+    report = await watcher.tick()
+
+    assert held == ["1"]                               # без повторного сообщения
+    assert engine.processed == [] and mailbox.seen == []
+    assert report.held == 0
+
+
+async def test_letter_exactly_at_the_limit_is_processed():
+    """Порог — это «больше нельзя», ровно на пороге письмо проводится."""
+    mailbox, engine = FakeMailBox([letter()]), FakeEngine()
+
+    watcher = make_watcher(mailbox, engine, max_rows=2, rows=[row(1), row(2)])
+    report = await watcher.tick()
+
+    assert engine.processed == [1, 2]
+    assert mailbox.seen == ["1"] and report.held == 0
+
+
+async def test_released_letter_is_processed_on_the_next_tick():
+    """Владелец снял отложение — письмо разбирается как обычное."""
+    mailbox, engine = FakeMailBox([letter()]), FakeEngine()
+    watcher = make_watcher(mailbox, engine, max_rows=1, rows=[row(1), row(2)])
+    await watcher.tick()
+
+    engine.store.release("1")
+    report = await watcher.tick()
+
+    assert engine.processed == [1, 2]
+    assert mailbox.seen == ["1"]
+    assert engine.store.remembered[0][0] == "1"
+    assert report.held == 0
+
+
+async def test_rehearsal_holds_the_letter_too():
+    """В репетиции письмо тоже откладывается — и тоже остаётся непрочитанным."""
+    mailbox, engine = FakeMailBox([letter()]), FakeEngine()
+
+    watcher = make_watcher(mailbox, engine, max_rows=1, dry_run=True,
+                           rows=[row(1), row(2)])
+    await watcher.tick()
+
+    assert engine.processed == []
+    assert mailbox.seen == []
+    assert "1" in engine.store.held
 
 
 # --- незавершённые строки ---

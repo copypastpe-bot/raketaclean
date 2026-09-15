@@ -60,8 +60,8 @@ from adminbot.tg.calendar_cards import (
     boat_card, calendar_question_card, calendar_summary_text, cancellation_card,
     done_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
-    CLEANING_CHOICE_PREFIX, carpet_question_card, carpet_report_text, order_done_text,
-    question_card, summary_text)
+    CLEANING_CHOICE_PREFIX, carpet_held_text, carpet_question_card, carpet_report_text,
+    order_done_text, question_card, summary_text)
 from adminbot.tg.outbox import (
     SUMMARY_TTL_SEC, MemoryMailStore, OwnerMail, PgMailStore, Purpose)
 from adminbot.tg.session import build_session
@@ -84,6 +84,7 @@ MAIL_GCAL_UPDATED = "gcal_updated"
 MAIL_GCAL_REHEARSAL = "gcal_rehearsal"
 MAIL_CARPET_QUESTION = "carpet_question"
 MAIL_CARPET_REPORT = "carpet_report"
+MAIL_CARPET_HELD = "carpet_held"
 MAIL_AUTOCALL_REHEARSAL = "autocall_rehearsal"
 MAIL_AUTOCALL_CONNECTED = "autocall_connected"
 MAIL_AUTOCALL_NO_PHONE = "autocall_no_phone"
@@ -428,8 +429,10 @@ def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
         mailbox=MailBox(connect=mail_settings.connect, folder=mail_settings.folder),
         store=store,
         poll_interval_sec=settings.carpets_poll_interval_sec,
+        max_rows=settings.carpets_max_rows,
         on_question=_make_carpet_question_sender(mail),
         on_report=_make_carpet_report_sender(mail),
+        on_held=_make_carpet_hold_sender(mail),
         dry_run=settings.carpets_dry_run,
     )
     log.info("Ковры: включены, режим %s, почта %s/%s",
@@ -708,6 +711,16 @@ def _make_carpet_report_sender(mail: OwnerMail):
     async def send(letter, report) -> None:
         await mail.send(carpet_report_text(letter.subject, report),
                         kind=MAIL_CARPET_REPORT)
+
+    return send
+
+
+def _make_carpet_hold_sender(mail: OwnerMail):
+    """Письмо отложено: робот не провёл ни одной строки и ждёт решения владельца."""
+    async def send(letter, reason: str, rows_total: int, refused_total: int) -> None:
+        await mail.send(carpet_held_text(letter.subject, reason, rows_total,
+                                         refused_total, letter.uid),
+                        kind=MAIL_CARPET_HELD)
 
     return send
 

@@ -2,7 +2,7 @@
 
 Опрашивает почту редко — раз в час: отчёты приходят раз в неделю, чаще незачем.
 
-Три правила, которые определяют устройство цикла:
+Четыре правила, которые определяют устройство цикла:
 
 1. **Письмо помечается разобранным только целиком.** Если хоть одна строка
    не прошла, письмо остаётся в работе: лучше разобрать его повторно (от двойной
@@ -11,6 +11,11 @@
    поставиться — тогда сработает вторая страховка, и робот не начнёт заново.
 3. **Незавершённые строки живут своей жизнью.** Пока робот ждёт автосделку
    сейлзбота, письмо давно разобрано; строка берётся из базы, где её сохранили.
+4. **Письмо проверяется целиком до первой строки.** Партнёр прислал 15.09.2026
+   отчёт за два года (536 строк), и робот принял его за недельный: за три минуты
+   в амо появилось 30 лишних сделок. Теперь письмо, где наших строк больше
+   порога, и письмо с неразобранным вложением робот откладывает: не проводит
+   ни одной строки, один раз говорит владельцу и ждёт его решения.
 """
 
 from __future__ import annotations
@@ -32,6 +37,11 @@ log = logging.getLogger(__name__)
 # Пока есть незаконченная работа, следующий проход делаем скоро, а не через час.
 QUICK_RETRY_SEC = 60
 
+# Сколько наших строк в письме робот считает нормальным. Недельный отчёт —
+# 5–15 строк, месячный свод — до 50. Всё, что больше, скорее архив или чужой
+# файл: такое письмо разбирает человек, а не робот.
+MAX_ROWS_DEFAULT = 100
+
 ACTIVE_STATUSES: tuple[str, ...] = (
     "new", "in_progress", "waiting_salesbot", "error", "waiting_owner",
 )
@@ -40,8 +50,7 @@ ACTIVE_STATUSES: tuple[str, ...] = (
 class CarpetStateStore(Protocol):
     """Что наблюдателю нужно от хранилища сверх того, что нужно движку."""
 
-    async def letter_processed(self, uid: str) -> bool: ...
-
+    # `processed` | `held` | `released` | None (письмо роботу незнакомо)
     async def letter_state(self, uid: str) -> Optional[str]: ...
 
     async def remember_letter(self, uid: str, subject: Optional[str],
@@ -61,6 +70,7 @@ class CarpetTickReport:
 
     paused: bool = False
     letters: int = 0
+    held: int = 0                                     # писем отложено за проход
     processed: int = 0
     by_status: dict[str, int] = field(default_factory=dict)
     questions: tuple[int, ...] = ()                   # заказы, по которым ушёл вопрос
@@ -77,8 +87,10 @@ class CarpetWatcher:
         parse: Callable[[bytes], list[CarpetRow]] = parse_report,
         is_enabled: Optional[Callable[[], Any]] = None,
         poll_interval_sec: int = 3600,
+        max_rows: int = MAX_ROWS_DEFAULT,
         on_question: Optional[Callable[[CarpetRow, CarpetLink], Awaitable[Optional[int]]]] = None,
         on_report: Optional[Callable[[Any, CarpetTickReport], Awaitable[None]]] = None,
+        on_held: Optional[Callable[..., Awaitable[None]]] = None,
         dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -88,8 +100,10 @@ class CarpetWatcher:
         self.parse = parse
         self.is_enabled = is_enabled
         self.poll_interval_sec = poll_interval_sec
+        self.max_rows = max_rows
         self.on_question = on_question
         self.on_report = on_report
+        self.on_held = on_held
         # В репетиции письмо нельзя помечать прочитанным: пометка уходит в почтовый
         # ящик по-настоящему, и отчёт исчез бы из работы, ничего не сделав в CRM.
         self.dry_run = dry_run
@@ -104,17 +118,18 @@ class CarpetWatcher:
         statuses: Counter[str] = Counter()
         questions: list[int] = []
         failures: list[tuple[Any, str]] = []
+        held: list[str] = []
 
         letters = await self.mailbox.fetch_new()
         for letter in letters:
-            await self._handle_letter(letter, statuses, questions, failures)
+            await self._handle_letter(letter, statuses, questions, failures, held)
 
         # Незавершённое из прошлых писем: ожидание автосделки, ошибки, вопросы.
         for row, link in await self.store.pending_rows():
             await self._handle_row(row, None, statuses, questions, failures)
 
         return self._remember(CarpetTickReport(
-            letters=len(letters), processed=sum(statuses.values()),
+            letters=len(letters), held=len(held), processed=sum(statuses.values()),
             by_status=dict(statuses), questions=tuple(questions),
             failures=tuple(failures)))
 
@@ -141,27 +156,50 @@ class CarpetWatcher:
     # --- внутреннее ---
 
     async def _handle_letter(self, letter: Any, statuses: Counter,
-                             questions: list, failures: list) -> None:
-        if await self.store.letter_processed(letter.uid):
+                             questions: list, failures: list, held: list) -> None:
+        state = await self.store.letter_state(letter.uid)
+        if state == "processed":
             log.info("Письмо %s уже разобрано — помечаю прочитанным", letter.uid)
             await self.mailbox.mark_seen(letter.uid)
             return
+        if state == "held":
+            log.debug("Письмо %s отложено — жду решения владельца", letter.uid)
+            return
+        # Владелец снял отложение (`--carpets-release`) — значит, он это письмо
+        # видел и разрешил. Порог строк к нему больше не применяем, иначе робот
+        # отложил бы его снова и снятие ничего бы не меняло.
+        released = state == "released"
 
-        letter_report = CarpetTickReport()
-        before_failures = len(failures)
-        rows_total = 0
+        # Письмо проверяется целиком до того, как тронута первая строка: файлы
+        # разбираются все сразу, строки считаются, и только потом что-то уходит
+        # в амо. Иначе «слишком большой файл» выяснился бы на тридцатой сделке.
+        parsed: list[tuple[str, list[CarpetRow]]] = []
+        completed_total = 0
+        refused_total = 0
 
         for name, data in letter.attachments.items():
             try:
                 rows = self.parse(data)
-            except Exception as exc:                   # noqa: BLE001 — кривой файл не роняет проход
+            except Exception as exc:                   # noqa: BLE001 — кривой файл откладывает письмо
                 log.exception("Отчёт %s разобрать не удалось", name)
-                failures.append((name, f"{type(exc).__name__}: {exc}"))
-                continue
+                await self._hold(letter, f"файл {name}: {type(exc).__name__}: {exc}",
+                                 completed_total + refused_total, refused_total, held)
+                return
 
             completed, refused = rows_to_process(rows)
-            rows_total += len(completed) + len(refused)
-            for row in completed + refused:
+            parsed.append((name, completed + refused))
+            completed_total += len(completed)
+            refused_total += len(refused)
+
+        rows_total = completed_total + refused_total
+        if rows_total > self.max_rows and not released:
+            await self._hold(letter, f"строк {rows_total}, порог {self.max_rows}",
+                             rows_total, refused_total, held)
+            return
+
+        before_failures = len(failures)
+        for name, rows_of_file in parsed:
+            for row in rows_of_file:
                 await self._handle_row(row, name, statuses, questions, failures)
 
         if len(failures) > before_failures:
@@ -179,6 +217,22 @@ class CarpetWatcher:
             await self.on_report(letter, CarpetTickReport(
                 letters=1, processed=rows_total, by_status=dict(statuses),
                 questions=tuple(questions), failures=()))
+
+    async def _hold(self, letter: Any, reason: str, rows_total: int,
+                    refused_total: int, held: list) -> None:
+        """Отложить письмо: ни одной строки не проводим, ждём решения владельца.
+
+        Прочитанным письмо не помечается ни в боевом режиме, ни в репетиции: оно
+        лежит в папке, пока владелец не снимет отложение (`--carpets-release`)
+        или не удалит письмо. Сообщение владельцу уходит один раз — на следующем
+        проходе состояние `held` отсекает письмо в самом начале.
+        """
+        log.warning("Ковры: письмо %s отложено, %s", letter.uid, reason)
+        await self.store.hold_letter(letter.uid, letter.subject,
+                                     list(letter.attachments), rows_total, reason)
+        held.append(letter.uid)
+        if self.on_held:
+            await self.on_held(letter, reason, rows_total, refused_total)
 
     async def _handle_row(self, row: CarpetRow, source_file: Optional[str],
                           statuses: Counter, questions: list, failures: list) -> None:

@@ -622,10 +622,11 @@ async def remember_letter(own_pool: asyncpg.Pool, uid: str, subject: Optional[st
 
 
 async def letter_state(own_pool: asyncpg.Pool, uid: str) -> Optional[str]:
-    """Что робот помнит о письме: `processed`, `held` или ничего.
+    """Что робот помнит о письме: `processed`, `held`, `released` или ничего.
 
-    `None` значит «письмо для робота новое»: записи нет вовсе или отложение
-    снято владельцем — такое письмо проводится заново.
+    `None` — письмо роботу незнакомо. `released` — владелец снял отложение:
+    письмо проводится, и порог строк к нему уже не применяется (иначе снятие
+    ничего бы не меняло и робот отложил бы письмо снова).
     """
     async with own_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -635,11 +636,7 @@ async def letter_state(own_pool: asyncpg.Pool, uid: str) -> Optional[str]:
         return None
     if row["held_reason"] is None:
         return "processed"
-    return "held" if row["released_at"] is None else None
-
-
-async def letter_was_processed(own_pool: asyncpg.Pool, uid: str) -> bool:
-    return await letter_state(own_pool, uid) == "processed"
+    return "held" if row["released_at"] is None else "released"
 
 
 async def hold_letter(own_pool: asyncpg.Pool, uid: str, subject: Optional[str],

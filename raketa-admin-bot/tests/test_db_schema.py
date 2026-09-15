@@ -340,12 +340,12 @@ async def test_unfinished_carpet_rows_are_found(pool):
 
 async def test_processed_letter_is_remembered(pool):
     """Страховка на случай, если пометка в почтовом ящике не поставилась."""
-    assert await db.letter_was_processed(pool, "17") is False
+    assert await db.letter_state(pool, "17") is None
 
     await db.remember_letter(pool, "17", "отчёт с 17.08 по 23.08",
                              ["Договоры (11).xlsx"], rows_total=4)
 
-    assert await db.letter_was_processed(pool, "17") is True
+    assert await db.letter_state(pool, "17") == "processed"
     await db.remember_letter(pool, "17", "тот же", ["Договоры (11).xlsx"], 4)   # без дублей
 
 
@@ -362,7 +362,7 @@ async def test_held_letter_waits_for_the_owner(pool):
 
     assert await db.release_letter(pool, "42") is True
     assert await db.release_letter(pool, "42") is False      # снимать больше нечего
-    assert await db.letter_state(pool, "42") is None         # письмо снова обычное
+    assert await db.letter_state(pool, "42") == "released"   # владелец разрешил провести
     assert await db.held_letters(pool) == []
 
     await db.remember_letter(pool, "42", "отчёт за два года", ["архив.xlsx"], 536)

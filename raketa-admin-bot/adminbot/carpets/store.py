@@ -46,6 +46,7 @@ class MemoryCarpetStore:
         self.actions: list[dict] = []
         self.letters: dict[str, tuple] = {}
         self.held: dict[str, tuple] = {}           # отложенные письма: uid → (тема, файлы, строк, причина)
+        self.released: set[str] = set()            # отложение снято владельцем
         self.rows: dict[int, dict] = {}
         self._now = now or (lambda: datetime.now(timezone.utc))
 
@@ -94,10 +95,9 @@ class MemoryCarpetStore:
 
     # --- что нужно наблюдателю почты ---
 
-    async def letter_processed(self, uid: str) -> bool:
-        return await self.letter_state(uid) == "processed"
-
     async def letter_state(self, uid: str) -> Optional[str]:
+        if uid in self.released:
+            return "released"
         if uid in self.held:
             return "held"
         return "processed" if uid in self.letters else None
@@ -105,10 +105,12 @@ class MemoryCarpetStore:
     async def remember_letter(self, uid: str, subject: Optional[str],
                               files: list, rows_total: int) -> None:
         self.held.pop(uid, None)
+        self.released.discard(uid)
         self.letters[uid] = (subject, list(files), rows_total)
 
     async def hold_letter(self, uid: str, subject: Optional[str], files: list,
                           rows_total: int, reason: str) -> None:
+        self.released.discard(uid)
         self.held[uid] = (subject, list(files), rows_total, reason)
 
     async def pending_rows(self):
@@ -137,9 +139,6 @@ class PgCarpetStore:
                                            source_file, row_data)
 
     # --- что нужно наблюдателю почты ---
-
-    async def letter_processed(self, uid: str) -> bool:
-        return await db.letter_was_processed(self._pool, uid)
 
     async def letter_state(self, uid: str) -> Optional[str]:
         return await db.letter_state(self._pool, uid)

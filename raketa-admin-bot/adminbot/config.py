@@ -204,6 +204,10 @@ class Settings:
     carpets_enabled: bool = False
     carpets_dry_run: bool = True
     carpets_poll_interval_sec: int = 3600
+    # Сколько наших строк в письме робот считает нормальным. Недельный отчёт —
+    # 5–15 строк, месячный свод — до 50. Больше порога: письмо откладывается
+    # и ждёт владельца (после архива за два года 15.09.2026).
+    carpets_max_rows: int = 100
 
     # Календарь (этап 2): свой выключатель и своя репетиция.
     # Опрос раз в пять минут: записи появляются в рабочее время, чаще незачем,
@@ -291,6 +295,7 @@ class Settings:
             carpets_enabled=_flag("CARPETS_ENABLED", False),
             carpets_dry_run=_flag("CARPETS_DRY_RUN", True),
             carpets_poll_interval_sec=_int("CARPETS_POLL_INTERVAL_SEC", 3600),
+            carpets_max_rows=_int("CARPETS_MAX_ROWS", 100),
             gcal_enabled=_flag("GCAL_ENABLED", False),
             gcal_dry_run=_flag("GCAL_DRY_RUN", True),
             gcal_poll_interval_sec=_int("GCAL_POLL_INTERVAL_SEC", 300),

@@ -374,6 +374,24 @@ def carpet_report_text(subject: Optional[str], report: Any) -> str:
     return "\n".join(lines)
 
 
+def carpet_held_text(subject: Optional[str], reason: str, rows_total: int,
+                     refused_total: int, uid: str) -> str:
+    """Письмо партнёра отложено: робот его не проводил и ждёт решения владельца.
+
+    Сообщение уходит один раз на письмо. Владельцу нужны две вещи: почему робот
+    остановился и что с этим делать — поэтому обе команды прямо в тексте.
+    """
+    completed = max(rows_total - refused_total, 0)
+    return "\n".join([
+        f"🧶 Ковры: письмо «{subject or 'без темы'}» отложено, не проведено.",
+        f"Причина: {reason}.",
+        f"В файле: {completed} выполненных, {refused_total} отказ(ов).",
+        "",
+        f"Если это нормальный отчёт: sudo raketa-admin-bot-update --carpets-release={uid}",
+        "Если архив или чужой файл: удалите письмо из папки robot_amo.",
+    ])
+
+
 def _carpet_choice(partner_id: int, value: str) -> str:
     return f"{CARPET_PREFIX}:{partner_id}:{value}"
 
