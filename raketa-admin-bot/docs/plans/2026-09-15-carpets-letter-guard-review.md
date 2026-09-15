@@ -8,6 +8,8 @@
 
 ### Правка 1. `remember_carpets`: запись в один шаг и лечение недоделанных строк
 
+**Выполнено** ef4fc01
+
 `scripts/remember_carpets.py:82-89`. Сейчас `store.create(...)` (строка появляется со
 `status='new'`) и потом `store.update(..., status="done", path="remembered")`. Обрыв
 между шагами оставляет строку `new`, которую движок (`engine.py:103`) проведёт в амо, а
