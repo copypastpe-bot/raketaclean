@@ -604,22 +604,85 @@ async def count_carpet_links_by_status(own_pool: asyncpg.Pool) -> dict[str, int]
 
 async def remember_letter(own_pool: asyncpg.Pool, uid: str, subject: Optional[str],
                           files: Sequence[str], rows_total: int) -> None:
-    """Записать, что письмо разобрано: страховка на случай сбоя пометки в почте."""
+    """Записать, что письмо разобрано: страховка на случай сбоя пометки в почте.
+
+    Письмо было отложено и владелец снял отложение — отметки об этом снимаются:
+    письмо проведено, и вспоминать, что когда-то оно ждало решения, незачем.
+    """
     async with own_pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO adminbot.carpet_letters (uid, subject, files, rows_total)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (uid) DO UPDATE SET processed_at = now()
+            ON CONFLICT (uid) DO UPDATE SET processed_at = now(),
+                held_reason = NULL, held_at = NULL, released_at = NULL
             """,
             uid, subject, list(files), rows_total,
         )
 
 
-async def letter_was_processed(own_pool: asyncpg.Pool, uid: str) -> bool:
+async def letter_state(own_pool: asyncpg.Pool, uid: str) -> Optional[str]:
+    """Что робот помнит о письме: `processed`, `held` или ничего.
+
+    `None` значит «письмо для робота новое»: записи нет вовсе или отложение
+    снято владельцем — такое письмо проводится заново.
+    """
     async with own_pool.acquire() as conn:
-        return bool(await conn.fetchval(
-            "SELECT 1 FROM adminbot.carpet_letters WHERE uid = $1", uid))
+        row = await conn.fetchrow(
+            "SELECT held_reason, released_at FROM adminbot.carpet_letters WHERE uid = $1",
+            uid)
+    if row is None:
+        return None
+    if row["held_reason"] is None:
+        return "processed"
+    return "held" if row["released_at"] is None else None
+
+
+async def letter_was_processed(own_pool: asyncpg.Pool, uid: str) -> bool:
+    return await letter_state(own_pool, uid) == "processed"
+
+
+async def hold_letter(own_pool: asyncpg.Pool, uid: str, subject: Optional[str],
+                      files: Sequence[str], rows_total: int, reason: str) -> None:
+    """Отложить письмо: робот его не проводит и ждёт решения владельца."""
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.carpet_letters
+                (uid, subject, files, rows_total, held_reason, held_at)
+            VALUES ($1, $2, $3, $4, $5, now())
+            ON CONFLICT (uid) DO UPDATE SET subject = EXCLUDED.subject,
+                files = EXCLUDED.files, rows_total = EXCLUDED.rows_total,
+                held_reason = EXCLUDED.held_reason, held_at = now(), released_at = NULL
+            """,
+            uid, subject, list(files), rows_total, reason,
+        )
+
+
+async def release_letter(own_pool: asyncpg.Pool, uid: str) -> bool:
+    """Снять отложение. Отвечает, было ли что снимать."""
+    async with own_pool.acquire() as conn:
+        released = await conn.fetchval(
+            """
+            UPDATE adminbot.carpet_letters SET released_at = now()
+            WHERE uid = $1 AND held_reason IS NOT NULL AND released_at IS NULL
+            RETURNING uid
+            """,
+            uid)
+    return released is not None
+
+
+async def held_letters(own_pool: asyncpg.Pool) -> list[dict]:
+    """Письма, которые робот отложил и ждёт решения владельца."""
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT uid, subject, rows_total, held_reason, held_at
+            FROM adminbot.carpet_letters
+            WHERE held_reason IS NOT NULL AND released_at IS NULL
+            ORDER BY held_at
+            """)
+    return [dict(row) for row in rows]
 
 
 async def get_setting(own_pool: asyncpg.Pool, key: str) -> Optional[str]:

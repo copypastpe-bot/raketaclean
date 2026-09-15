@@ -45,6 +45,7 @@ class MemoryCarpetStore:
         self.links: dict[int, CarpetLink] = {}
         self.actions: list[dict] = []
         self.letters: dict[str, tuple] = {}
+        self.held: dict[str, tuple] = {}           # отложенные письма: uid → (тема, файлы, строк, причина)
         self.rows: dict[int, dict] = {}
         self._now = now or (lambda: datetime.now(timezone.utc))
 
@@ -94,11 +95,21 @@ class MemoryCarpetStore:
     # --- что нужно наблюдателю почты ---
 
     async def letter_processed(self, uid: str) -> bool:
-        return uid in self.letters
+        return await self.letter_state(uid) == "processed"
+
+    async def letter_state(self, uid: str) -> Optional[str]:
+        if uid in self.held:
+            return "held"
+        return "processed" if uid in self.letters else None
 
     async def remember_letter(self, uid: str, subject: Optional[str],
                               files: list, rows_total: int) -> None:
+        self.held.pop(uid, None)
         self.letters[uid] = (subject, list(files), rows_total)
+
+    async def hold_letter(self, uid: str, subject: Optional[str], files: list,
+                          rows_total: int, reason: str) -> None:
+        self.held[uid] = (subject, list(files), rows_total, reason)
 
     async def pending_rows(self):
         """В репетиции незавершённые строки живут здесь же, в памяти."""
@@ -130,9 +141,16 @@ class PgCarpetStore:
     async def letter_processed(self, uid: str) -> bool:
         return await db.letter_was_processed(self._pool, uid)
 
+    async def letter_state(self, uid: str) -> Optional[str]:
+        return await db.letter_state(self._pool, uid)
+
     async def remember_letter(self, uid: str, subject: Optional[str],
                               files: list, rows_total: int) -> None:
         await db.remember_letter(self._pool, uid, subject, files, rows_total)
+
+    async def hold_letter(self, uid: str, subject: Optional[str], files: list,
+                          rows_total: int, reason: str) -> None:
+        await db.hold_letter(self._pool, uid, subject, files, rows_total, reason)
 
     async def pending_rows(self):
         from adminbot.carpets.report import CarpetRow

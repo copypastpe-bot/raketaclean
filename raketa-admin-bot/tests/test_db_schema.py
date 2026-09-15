@@ -349,6 +349,32 @@ async def test_processed_letter_is_remembered(pool):
     await db.remember_letter(pool, "17", "тот же", ["Договоры (11).xlsx"], 4)   # без дублей
 
 
+async def test_held_letter_waits_for_the_owner(pool):
+    """Отложенное письмо: робот его не проводит, пока владелец не снимет отложение."""
+    await db.hold_letter(pool, "42", "отчёт за два года", ["архив.xlsx"],
+                         rows_total=536, reason="строк 536, порог 100")
+
+    assert await db.letter_state(pool, "42") == "held"
+    held = await db.held_letters(pool)
+    assert [(row["uid"], row["rows_total"], row["held_reason"]) for row in held] == [
+        ("42", 536, "строк 536, порог 100")]
+    assert held[0]["held_at"] is not None
+
+    assert await db.release_letter(pool, "42") is True
+    assert await db.release_letter(pool, "42") is False      # снимать больше нечего
+    assert await db.letter_state(pool, "42") is None         # письмо снова обычное
+    assert await db.held_letters(pool) == []
+
+    await db.remember_letter(pool, "42", "отчёт за два года", ["архив.xlsx"], 536)
+
+    assert await db.letter_state(pool, "42") == "processed"
+
+
+async def test_release_of_an_unknown_letter_changes_nothing(pool):
+    assert await db.release_letter(pool, "нет такого") is False
+    assert await db.letter_state(pool, "нет такого") is None
+
+
 # --- календарь (этап 2) ---
 
 
