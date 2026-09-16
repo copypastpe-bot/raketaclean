@@ -95,7 +95,7 @@ ALTER TABLE adminbot.cleaning_links ADD COLUMN IF NOT EXISTS deal_address text;
 **Проверка:** провести заказ на стенде, убедиться, что в связке появился адрес;
 прогнать тесты админ-бота.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 

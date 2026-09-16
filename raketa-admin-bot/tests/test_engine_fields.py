@@ -81,6 +81,32 @@ async def test_empty_address_is_filled_from_the_order():
     assert fields_of(amo)[ids.FIELD_ADDRESS]["values"][0]["value"] == "ул. Ленина, 5"
 
 
+async def test_deal_address_is_saved_to_the_link():
+    """Задача 1 (ТЗ 2026-09-16): адрес сделки уходит в связку — рядом с real_lead_id.
+
+    В связку пишем то, что реально стояло в сделке амо, а не то, что бот сам
+    туда дописал из заказа.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo, custom_fields_values=[
+        {"field_id": ids.FIELD_ADDRESS,
+         "values": [{"value": "Менделеева д 15а, кв 99, п 3, эт 4, со стороны двора"}]}])
+
+    link = await make_engine(amo, store).process_order(make_order())
+
+    assert link.deal_address == "Менделеева д 15а, кв 99, п 3, эт 4, со стороны двора"
+
+
+async def test_deal_address_stays_empty_when_the_deal_has_none():
+    """Сделка без адреса — связка тоже без адреса: адрес заказа сюда не идёт."""
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo)
+
+    link = await make_engine(amo, store).process_order(make_order())
+
+    assert link.deal_address is None
+
+
 async def test_payment_type_and_date_are_filled():
     amo, store = FakeAmo(), FakeStore()
     open_realization_lead(amo)

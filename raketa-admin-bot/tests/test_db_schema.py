@@ -152,6 +152,21 @@ async def test_link_lifecycle_and_checklist(pool):
     assert await db.get_link(pool, 999999) is None
 
 
+async def test_deal_address_is_stored_on_the_link(pool):
+    """Колонка `deal_address` (миграция 012) — своя у каждой таблицы связок."""
+    link = await db.create_link(pool, order_id=596, phone10="9601861067")
+    assert link.deal_address is None                       # пока в сделке ничего не читали
+
+    await db.update_link(pool, 596, deal_address="ул. Ленина, 5")
+    assert (await db.get_link(pool, 596)).deal_address == "ул. Ленина, 5"
+
+    # то же самое — для уборок, своя таблица связок
+    await db.create_link(pool, order_id=5, phone10="9601861067", table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 5, table=db.CLEANING_LINKS_TABLE, deal_address="Менделеева, 15")
+    cleaning_link = await db.get_link(pool, 5, table=db.CLEANING_LINKS_TABLE)
+    assert cleaning_link.deal_address == "Менделеева, 15"
+
+
 async def test_actions_journal(pool):
     await db.create_link(pool, order_id=596, phone10="9601861067")
     await db.log_action(

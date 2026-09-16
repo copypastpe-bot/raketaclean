@@ -322,6 +322,12 @@ class Engine:
 
     async def _fill_lead(self, order: Order, lead_id: Optional[int]) -> None:
         existing = await self._get_lead(lead_id)
+        # Адрес сделки — своей связке, рядом с real_lead_id/primary_lead_id: то,
+        # что реально стоит в амо сейчас, а не то, что бот только собрался туда
+        # дописать. Пусто в сделке — пусто и в связке, выдумывать нечего (ПД,
+        # в лог не идёт; задача 1, ТЗ 2026-09-16).
+        await self.store.update(order.order_id,
+                                deal_address=field_value(existing, ids.FIELD_ADDRESS))
         await self._write("update_lead", order, lead_id,
                           self.amo.update_lead(lead_id, price=order.amount_total,
                                                custom_fields=self._lead_fields(order, existing)))

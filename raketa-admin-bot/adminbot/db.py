@@ -19,8 +19,8 @@ from adminbot.phone import last10
 
 # Колонки adminbot.amo_links, которые разрешено менять через update_link.
 _UPDATABLE_LINK_FIELDS = frozenset(
-    {"phone10", "status", "path", "primary_lead_id", "real_lead_id", "question",
-     "question_msg_id", "last_error"}
+    {"phone10", "status", "path", "primary_lead_id", "real_lead_id", "deal_address",
+     "question", "question_msg_id", "last_error"}
 )
 
 # Два потока работы — две таблицы связок. Номера `orders.id` и `cleaning_orders.id`
@@ -264,6 +264,7 @@ def _link_from_row(row: Optional[asyncpg.Record]) -> Optional[AmoLink]:
         path=row["path"],
         primary_lead_id=row["primary_lead_id"],
         real_lead_id=row["real_lead_id"],
+        deal_address=row["deal_address"],
         checklist=checklist or {},
         question=question,
         question_msg_id=row["question_msg_id"],

@@ -85,6 +85,17 @@ async def test_cleaning_sets_olga_and_cleaning_service_whoever_the_foreman_is():
     assert fields_of(amo, ids.FIELD_SPECIALIST)[0]["values"] == [{"enum_id": OLGA_ENUM}]
 
 
+async def test_cleaning_deal_address_is_saved_to_the_link():
+    """Задача 1 (ТЗ 2026-09-16): у уборки адрес сделки уходит в связку так же, как у заказа."""
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo, custom_fields_values=[
+        {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "Менделеева 15, кв 3"}]}])
+
+    link = await make_engine(amo, store).process_order(make_cleaning())
+
+    assert link.deal_address == "Менделеева 15, кв 3"
+
+
 async def test_overrides_beat_the_lookup_by_master_name():
     """Бригадира зовут Дмитрий — но это всё равно уборка, а не чистка мебели.
 
