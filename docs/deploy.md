@@ -10,6 +10,31 @@
 - Сервер: `admin@91.200.150.68`, рабочая копия `/opt/telegram-bot`, служба
   `telegram-bot.service` (перезапуск разрешён без пароля).
 
+## Права на схему adminbot (разовая установка)
+
+Рабочий бот (роль `bot`) читает две таблицы связок админ-бота — оттуда он
+дозаполняет у себя адрес заказа (задача 4 ТЗ «адреса до конца», ещё не сделана
+на момент этой записи). Выполняется один раз от суперпользователя Postgres,
+после того как в `raketa-admin-bot` накатана миграция 012 (см.
+`raketa-admin-bot/docs/deploy.md` §4.1 — там же и эти же команды):
+
+```sql
+GRANT USAGE ON SCHEMA adminbot TO bot;
+GRANT SELECT ON adminbot.amo_links, adminbot.cleaning_links TO bot;
+```
+
+Чтение только в эту сторону: правило «админ-бот в схему `public` не пишет»
+эти команды не затрагивают и не ослабляют.
+
+Проверка:
+
+```bash
+psql "$DSN_AS_BOT" -c "SELECT count(*) FROM adminbot.amo_links"
+# ожидаемо: работает
+psql "$DSN_AS_BOT" -c "UPDATE adminbot.amo_links SET status = 'x' WHERE false"
+# ожидаемый ответ: ERROR: permission denied for table amo_links
+```
+
 ## Обычный выезд
 
 ```bash

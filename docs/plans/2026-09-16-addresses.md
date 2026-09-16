@@ -117,7 +117,7 @@ GRANT SELECT ON adminbot.amo_links, adminbot.cleaning_links TO bot;
 **Проверка:** из-под роли `bot` выполнить `SELECT count(*) FROM adminbot.amo_links` —
 должно работать; `UPDATE` той же таблицы — должен быть отказ.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 

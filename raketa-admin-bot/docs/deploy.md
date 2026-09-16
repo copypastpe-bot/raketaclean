@@ -149,6 +149,32 @@ psql "$ADMINBOT_DB_DSN" -c "UPDATE public.orders SET amount_total = amount_total
 # ожидаемый ответ: ERROR: permission denied for table orders
 ```
 
+### 4.1. Обратное чтение: рабочий бот читает связки админ-бота
+
+Разовая установка, выполняется после того как миграция 012 применена (в связках
+появилась колонка `deal_address`). Рабочий бот (роль `bot`) читает две таблицы
+связок, чтобы дозаполнить у себя адрес заказа — писать он туда не может, только
+SELECT:
+
+```sql
+GRANT USAGE ON SCHEMA adminbot TO bot;
+GRANT SELECT ON adminbot.amo_links, adminbot.cleaning_links TO bot;
+```
+
+Это чтение в обратную сторону: правило «админ-бот в схему `public` не пишет»
+(шаг 2 выше) остаётся нетронутым и абсолютным — эти команды его не затрагивают.
+
+Проверка — DSN под ролью `bot`, не путать с `$BOT_DB_DSN` из §5 (это переменная
+админ-бота и под ней сидит роль `adminbot`, а не `bot`):
+
+```bash
+export DSN_AS_BOT='postgresql://bot:ПАРОЛЬ_РОЛИ_BOT@127.0.0.1:5432/clients_db'
+psql "$DSN_AS_BOT" -c "SELECT count(*) FROM adminbot.amo_links"
+# ожидаемо: работает
+psql "$DSN_AS_BOT" -c "UPDATE adminbot.amo_links SET status = 'x' WHERE false"
+# ожидаемый ответ: ERROR: permission denied for table amo_links
+```
+
 ## 5. Настройки
 
 ```bash
