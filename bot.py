@@ -322,6 +322,11 @@ CLIENT_BOT_HEALTH_MAX_AGE_SEC = int(
 # решает владелец руками.
 ADDRESS_BACKFILL_INTERVAL_SEC = max(30, _env_int("ADDRESS_BACKFILL_INTERVAL_SEC", 60))
 ADDRESS_BACKFILL_LOOKBACK_DAYS = 7
+# Очередь отчёта в чат и сообщения о деньгах: обе рассылки ждут связку с CRM
+# (та же adminbot.amo_links/cleaning_links) и уходят с адресом либо без него,
+# если связка не появилась за отведённое время (ТЗ 2026-09-16, задача 5).
+PENDING_ORDER_REPORTS_INTERVAL_SEC = max(15, _env_int("PENDING_ORDER_REPORTS_INTERVAL_SEC", 60))
+DEAL_LINK_WAIT_TIMEOUT_SEC = max(60, _env_int("DEAL_LINK_WAIT_TIMEOUT_SEC", 1800))
 
 # env rules
 MIN_CASH = Decimal(os.getenv("MIN_CASH", "2500"))
@@ -521,6 +526,7 @@ deferred_retry_task: asyncio.Task | None = None      # добор заказов
 client_bot_health_task: asyncio.Task | None = None
 amocrm_api_task: asyncio.Task | None = None
 address_backfill_task: asyncio.Task | None = None  # дозаполнение адреса из связки админ-бота
+pending_order_reports_task: asyncio.Task | None = None  # отложенный отчёт и сообщение о деньгах
 BONUS_CHANGE_NOTIFICATIONS_ENABLED = False
 
 # === Ignore group/supergroup/channel updates; work only in private chats ===
@@ -3518,6 +3524,28 @@ async def ensure_orders_address_schema(conn: asyncpg.Connection) -> None:
         """
         ALTER TABLE orders
         ADD COLUMN IF NOT EXISTS address text;
+        """
+    )
+
+
+async def ensure_pending_order_reports_schema(conn: asyncpg.Connection) -> None:
+    """Очередь отложенного отчёта в чат и сообщения о деньгах (задача 5 ТЗ
+    «адреса до конца», 2026-09-16) — см. app/migrations/0009_pending_order_reports.sql."""
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pending_order_reports (
+            order_id    integer PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+            payload     jsonb NOT NULL,
+            created_at  timestamptz NOT NULL DEFAULT now(),
+            sent_at     timestamptz
+        );
+        """
+    )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_pending_order_reports_pending
+        ON pending_order_reports (created_at)
+        WHERE sent_at IS NULL;
         """
     )
 
@@ -7078,6 +7106,92 @@ async def run_address_backfill() -> None:
         )
 
 
+def _order_report_payload_from_db(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except Exception:
+            return {}
+        if isinstance(loaded, Mapping):
+            return dict(loaded)
+    return {}
+
+
+async def _dispatch_order_report(
+    conn: asyncpg.Connection,
+    order_id: int,
+    payload: Mapping[str, Any],
+    resolved_address: str | None,
+) -> None:
+    """Отправляет отчёт в чат и сообщение о деньгах по одному заказу — с тем
+    адресом, который уже известен (или без него)."""
+    lines = _build_order_report_lines(payload, resolved_address)
+    if ORDERS_CONFIRM_CHAT_ID:
+        try:
+            await bot.send_message(
+                ORDERS_CONFIRM_CHAT_ID,
+                "\n".join(lines),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("order confirm notify failed for order_id=%s: %s", order_id, exc)
+    if payload.get("has_non_wire_income"):
+        street = extract_street(resolved_address)
+        notify_label = street or payload.get("client_display_masked")
+        total_non_wire_amount = Decimal(str(payload.get("total_non_wire_amount", "0")))
+        await _notify_order_income(conn, total_non_wire_amount, order_id, notify_label)
+
+
+async def run_pending_order_reports() -> None:
+    """Досылает отчёт в чат и сообщение о деньгах, отложенные в `commit_order`
+    (задача 5 ТЗ «адреса до конца», 2026-09-16).
+
+    Условие отправки — не адрес, а появление связки заказа со сделкой CRM
+    (`adminbot.amo_links`): появилась — уходит с адресом или без него (если
+    в сделке адреса ещё нет). Не появилась за DEAL_LINK_WAIT_TIMEOUT_SEC —
+    уходит как есть, без адреса: это предохранитель, а не обычный путь.
+    """
+    if pool is None:
+        return
+    now_utc = datetime.now(timezone.utc)
+    timeout_cutoff = now_utc - timedelta(seconds=DEAL_LINK_WAIT_TIMEOUT_SEC)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT order_id, payload, created_at
+            FROM pending_order_reports
+            WHERE sent_at IS NULL
+            ORDER BY created_at
+            LIMIT 50
+            """
+        )
+        for row in rows:
+            order_id = row["order_id"]
+            payload = _order_report_payload_from_db(row["payload"])
+            link = await conn.fetchrow(
+                "SELECT path, deal_address FROM adminbot.amo_links WHERE order_id=$1",
+                order_id,
+            )
+            timed_out = row["created_at"] <= timeout_cutoff
+            if link is None and not timed_out:
+                continue  # связки ещё нет, и 30 минут ещё не прошло — ждём дальше
+            resolved_address = (link["deal_address"] or "").strip() or None if link is not None else None
+            try:
+                await _dispatch_order_report(conn, order_id, payload, resolved_address)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning(
+                    "pending order report dispatch failed for order_id=%s: %s", order_id, exc,
+                )
+                continue
+            await conn.execute(
+                "UPDATE pending_order_reports SET sent_at=now() WHERE order_id=$1",
+                order_id,
+            )
+
+
 async def schedule_daily_job(hour_msk: int, minute_msk: int, job_coro, job_name: str) -> None:
     next_run: datetime | None = None
     while True:
@@ -7617,6 +7731,103 @@ async def _record_order_income(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to sync Jenya card for order income #%s: %s", tx["id"], exc)
     return tx
+
+
+def _build_order_report_lines(payload: Mapping[str, Any], resolved_address: str | None) -> list[str]:
+    """Текст отчёта о заказе для ORDERS_CONFIRM_CHAT_ID.
+
+    `payload` собран в commit_order в момент проведения; `resolved_address` —
+    адрес сделки CRM (adminbot.amo_links/cleaning_links.deal_address),
+    прочитанный заново непосредственно перед отправкой (задача 5 ТЗ «адреса
+    до конца», 2026-09-16): подпись с адресом формируется в момент отправки,
+    а не в момент проведения.
+    """
+    order_id = payload["order_id"]
+    client_display_masked = payload.get("client_display_masked") or "Клиент"
+    birthday_display = payload.get("birthday_display") or "—"
+    payment_parts_text = _format_payment_parts(payload.get("payment_parts") or [])
+    cash_payment = Decimal(str(payload.get("cash_payment", "0")))
+    amount_total = Decimal(str(payload.get("amount_total", "0")))
+    bonus_spent = int(payload.get("bonus_spent") or 0)
+    bonus_earned = int(payload.get("bonus_earned") or 0)
+    upsell = Decimal(str(payload.get("upsell", "0")))
+    payment_method = payload.get("payment_method")
+    master_names = payload.get("master_names") or "—"
+
+    lines = [
+        f"🧾 <b>Заказ №{order_id}</b>",
+        f"👤 Клиент: {_bold_html(client_display_masked)}",
+    ]
+    if resolved_address:
+        lines.append(f"📍 Адрес: {_escape_html(resolved_address)}")
+    lines.append(f"🎂 ДР: {_escape_html(birthday_display)}")
+    payment_summary = f"{format_money(cash_payment)}₽"
+    if payment_parts_text:
+        lines.append(
+            f"💳 Оплата: {_bold_html(payment_summary)} ({_escape_html(payment_parts_text)})"
+        )
+    else:
+        lines.append(
+            f"💳 Оплата: {_bold_html(f'{payment_method} — {payment_summary}')}"
+        )
+    lines.append(f"💰 Итоговый чек: {_bold_html(f'{format_money(amount_total)}₽')}")
+    lines.append(
+        f"🎁 Бонусы: списано {_bold_html(bonus_spent)} / начислено {_bold_html(bonus_earned)}"
+    )
+    lines.append(f"🧺 Доп. продажа: {_bold_html(f'{format_money(upsell)}₽')}")
+    lines.append(f"👨‍🔧 Мастер: {_bold_html(master_names)}")
+    if payment_method == "р/с":
+        lines.append("💼 Оплата по р/с (ожидаем поступление)")
+    return lines
+
+
+async def _enqueue_order_report(
+    pool_: asyncpg.Pool,
+    *,
+    order_id: int,
+    client_display_masked: str | None,
+    birthday_display: str | None,
+    payment_parts: list[dict[str, str]],
+    payment_method: str | None,
+    cash_payment: Decimal,
+    amount_total: Decimal,
+    bonus_spent: int,
+    bonus_earned: int,
+    upsell: Decimal,
+    master_names: str | None,
+    is_wire_payment: bool,
+    has_non_wire_income: bool,
+    total_non_wire_amount: Decimal,
+) -> None:
+    """Кладёт заказ в очередь `pending_order_reports`. Отчёт в чат и
+    сообщение в «Ракета деньги» уйдут из `run_pending_order_reports`, когда
+    появится связка с CRM или сработает предохранитель (задача 5)."""
+    payload = {
+        "order_id": order_id,
+        "client_display_masked": client_display_masked,
+        "birthday_display": birthday_display,
+        "payment_parts": payment_parts,
+        "payment_method": payment_method,
+        "cash_payment": str(cash_payment),
+        "amount_total": str(amount_total),
+        "bonus_spent": int(bonus_spent),
+        "bonus_earned": int(bonus_earned),
+        "upsell": str(upsell),
+        "master_names": master_names,
+        "is_wire_payment": bool(is_wire_payment),
+        "has_non_wire_income": bool(has_non_wire_income),
+        "total_non_wire_amount": str(total_non_wire_amount),
+    }
+    async with pool_.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO pending_order_reports (order_id, payload)
+            VALUES ($1, $2::jsonb)
+            ON CONFLICT (order_id) DO NOTHING
+            """,
+            order_id,
+            json.dumps(payload, ensure_ascii=False),
+        )
 
 
 async def _record_withdrawal(
@@ -14364,7 +14575,9 @@ async def commit_order(msg: Message, state: FSMContext):
                 effective_master_id = int(master_shares[0]["id"])
             if effective_master_id is None:
                 raise RuntimeError("Не удалось определить master_id для записи кассы.")
-            # Записываем каждую часть оплаты отдельно
+            # Записываем каждую часть оплаты отдельно — деньги в кассу пишутся
+            # сразу и ничего не ждут (задача 5 ТЗ «адреса до конца»: не трогать).
+            total_non_wire_amount = Decimal("0")
             if non_wire_entries:
                 for income_method, income_amount in non_wire_entries:
                     await _record_order_income(
@@ -14376,12 +14589,9 @@ async def commit_order(msg: Message, state: FSMContext):
                         notify_label,
                     )
                 total_non_wire_amount = sum((income_amount for _, income_amount in non_wire_entries), Decimal("0"))
-                await _notify_order_income(
-                    conn,
-                    total_non_wire_amount,
-                    order_id,
-                    notify_label,
-                )
+                # Сообщение в «Ракета деньги» отсюда убрано: оно ставится в очередь
+                # ниже и уходит из run_pending_order_reports, когда появится связка
+                # с CRM (или по предохранителю в 30 минут) — задача 5.
             await _enqueue_order_completed_notification(
                 conn,
                 order_id=order_id,
@@ -14406,43 +14616,33 @@ async def commit_order(msg: Message, state: FSMContext):
     if isinstance(client_birthday_val, date):
         birthday_display = client_birthday_val.strftime("%d.%m")
 
-    if ORDERS_CONFIRM_CHAT_ID:
-        try:
-            payment_parts = payment_parts_data
-            payment_parts_text = _format_payment_parts(payment_parts)
-            lines = [
-                f"🧾 <b>Заказ №{order_id}</b>",
-                f"👤 Клиент: {_bold_html(client_display_masked)}",
-            ]
-            if order_address_val:
-                lines.append(f"📍 Адрес: {_escape_html(order_address_val)}")
-            lines.append(f"🎂 ДР: {_escape_html(birthday_display)}")
-            payment_summary = f"{format_money(cash_payment)}₽"
-            if payment_parts_text:
-                lines.append(
-                    f"💳 Оплата: {_bold_html(payment_summary)} ({_escape_html(payment_parts_text)})"
-                )
-            else:
-                lines.append(
-                    f"💳 Оплата: {_bold_html(f'{payment_method} — {payment_summary}')}"
-                )
-            lines.append(f"💰 Итоговый чек: {_bold_html(f'{format_money(amount_total)}₽')}")
-            lines.append(
-                f"🎁 Бонусы: списано {_bold_html(bonus_spent)} / начислено {_bold_html(bonus_earned)}"
-            )
-            lines.append(f"🧺 Доп. продажа: {_bold_html(f'{format_money(upsell)}₽')}")
-            master_names = ", ".join(entry["name"] for entry in master_shares) if master_shares else master_display_name
-            lines.append(f"👨‍🔧 Мастер: {_bold_html(master_names)}")
-            if payment_method == "р/с":
-                lines.append("💼 Оплата по р/с (ожидаем поступление)")
-            await bot.send_message(
-                ORDERS_CONFIRM_CHAT_ID,
-                "\n".join(lines),
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-        except Exception as e:  # noqa: BLE001
-            logging.warning("order confirm notify failed for order_id=%s: %s", order_id, e)
+    # Отчёт в чат и сообщение в «Ракета деньги» не уходят отсюда напрямую:
+    # оба ставятся в очередь и ждут связку заказа со сделкой CRM (адрес
+    # приезжает вместе с ней), максимум DEAL_LINK_WAIT_TIMEOUT_SEC — задача 5
+    # ТЗ «адреса до конца» (2026-09-16). Отправка — в run_pending_order_reports.
+    master_names_for_report = (
+        ", ".join(entry["name"] for entry in master_shares) if master_shares else master_display_name
+    )
+    try:
+        await _enqueue_order_report(
+            pool,
+            order_id=order_id,
+            client_display_masked=client_display_masked,
+            birthday_display=birthday_display,
+            payment_parts=payment_parts_data,
+            payment_method=payment_method,
+            cash_payment=cash_payment,
+            amount_total=amount_total,
+            bonus_spent=bonus_spent,
+            bonus_earned=bonus_earned,
+            upsell=upsell,
+            master_names=master_names_for_report,
+            is_wire_payment=is_wire_payment,
+            has_non_wire_income=bool(non_wire_entries),
+            total_non_wire_amount=total_non_wire_amount,
+        )
+    except Exception as e:  # noqa: BLE001
+        logging.warning("order report enqueue failed for order_id=%s: %s", order_id, e)
 
     await state.clear()
     await msg.answer("Готово ✅ Заказ сохранён.\nСпасибо!", reply_markup=master_kb)
@@ -14822,7 +15022,7 @@ async def unknown(msg: Message, state: FSMContext):
     await msg.answer("Команда не распознана. Выберите действие на клавиатуре ниже.", reply_markup=kb)
 
 async def main():
-    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task
+    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task
     notification_rules = _load_notification_rules()
     pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=5)
     dp["pool"] = pool
@@ -14838,6 +15038,7 @@ async def main():
         await ensure_order_masters_schema(_conn)
         await ensure_orders_wire_schema(_conn)
         await ensure_orders_address_schema(_conn)
+        await ensure_pending_order_reports_schema(_conn)
         await ensure_cashbook_wire_schema(_conn)
         await ensure_orders_rating_schema(_conn)
         await ensure_order_payments_schema(_conn)
@@ -14888,6 +15089,12 @@ async def main():
     if address_backfill_task is None:
         address_backfill_task = asyncio.create_task(
             schedule_periodic_job(ADDRESS_BACKFILL_INTERVAL_SEC, run_address_backfill, "address_backfill")
+        )
+    if pending_order_reports_task is None:
+        pending_order_reports_task = asyncio.create_task(
+            schedule_periodic_job(
+                PENDING_ORDER_REPORTS_INTERVAL_SEC, run_pending_order_reports, "pending_order_reports"
+            )
         )
     if exchange_task is None and AMOCRM_EXCHANGE_ENABLED:
         exchange_task = asyncio.create_task(
