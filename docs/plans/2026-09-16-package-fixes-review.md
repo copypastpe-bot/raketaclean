@@ -21,6 +21,13 @@
 
 Что сделать: пробросить `dry_run` в этот вызов и закрыть путь тестом.
 
+Выполнено: в `raketa-admin-bot/adminbot/tg/bot.py:200` в вызов `carpet_report_text`
+добавлен `dry_run=self.carpet_watcher.dry_run`. Тест
+`test_carpets_marks_rehearsal_in_the_report` (плюс парная проверка боевого режима
+`test_carpets_stays_silent_about_rehearsal_when_live`) в
+`raketa-admin-bot/tests/test_tg_commands.py` — до правки падал (метки «РЕПЕТИЦИЯ»
+не было в тексте), после правки зелёный. Коммит `9855bc7`.
+
 ## На потом (решает владелец)
 
 - `bot.py.map.md` пересчитана частично: правка задачи 1 сдвинула номера строк всех
