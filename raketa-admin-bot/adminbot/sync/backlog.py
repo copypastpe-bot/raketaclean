@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
+from adminbot.amo.fields import as_msk
 from adminbot.models import AmoLink, Order
 from adminbot.phone import for_owner
 from adminbot.sync.store import LinkStore, MemoryLinkStore
@@ -96,7 +97,7 @@ def order_title(order: Order) -> str:
         parts.append(order.client_name)
     parts.append(for_owner(order.phone10))
     parts.append(f"{money(order.amount_total)} ₽")
-    parts.append(f"заказ {order.created_at:%d.%m.%Y %H:%M}")
+    parts.append(f"заказ {as_msk(order.created_at):%d.%m.%Y %H:%M}")
     return " · ".join(parts)
 
 

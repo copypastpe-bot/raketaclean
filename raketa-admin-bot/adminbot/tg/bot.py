@@ -197,7 +197,8 @@ class OwnerCommands:
         if not report.letters and not report.processed:
             await message.answer("Новых отчётов от партнёра нет.")
             return
-        await message.answer(carpet_report_text(f"писем: {report.letters}", report))
+        await message.answer(carpet_report_text(f"писем: {report.letters}", report,
+                                                 dry_run=self.carpet_watcher.dry_run))
 
     async def calendar(self, message: Any) -> None:
         """Что нового в календаре и что робот с этим сделал."""

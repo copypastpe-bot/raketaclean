@@ -120,8 +120,20 @@ class AllowListAmo(AmoClient):
 
 
 def parse_allow(value: str) -> set[int]:
-    """«31587353,31613297» → множество номеров сделок."""
-    return {int(item.strip()) for item in (value or "").split(",") if item.strip()}
+    """«31587353,31613297» → множество номеров сделок.
+
+    Нечисловой токен — опечатка в ключе, а не команда: понятная ошибка вместо
+    падения стеком (задача 4, 16.09).
+    """
+    result: set[int] = set()
+    for item in (value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if not item.isdigit():
+            raise ValueError(f"--allow: «{item}» не похоже на номер сделки")
+        result.add(int(item))
+    return result
 
 
 def letter_from_file(path: Path) -> Letter:
@@ -143,7 +155,11 @@ async def main() -> int:
     parser.add_argument("--amo-env", type=Path, default=DEFAULT_AMO_ENV)
     args = parser.parse_args()
 
-    allowed = parse_allow(args.allow)
+    try:
+        allowed = parse_allow(args.allow)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     if args.file and args.live and not allowed:
         print("боевой прогон из файла только с белым списком сделок (--allow)",
               file=sys.stderr)

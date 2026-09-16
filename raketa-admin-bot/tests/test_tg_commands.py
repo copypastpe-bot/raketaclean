@@ -7,6 +7,7 @@
 from datetime import datetime
 
 from adminbot.amo.fields import MOSCOW_TZ
+from adminbot.carpets.watcher import CarpetTickReport
 from adminbot.control import MemoryControlPanel
 from adminbot.sync.watcher import TickReport
 from adminbot.tg.bot import OwnerCommands
@@ -194,6 +195,44 @@ async def test_help_lists_commands_in_plain_language():
     for command in ("/status", "/pause", "/resume", "/help"):
         assert command in text
     assert "amoCRM" in text
+
+
+class FakeCarpetWatcher:
+    """Как настоящий CarpetWatcher: помнит режим и отдаёт готовый отчёт."""
+
+    def __init__(self, report, dry_run=True):
+        self.dry_run = dry_run
+        self._report = report
+
+    async def tick(self):
+        return self._report
+
+
+async def test_carpets_marks_rehearsal_in_the_report():
+    """Ковры в репетиции — ручная команда должна отвечать так же, как автоотправка.
+
+    Иначе владелец вызывает /carpets и получает отчёт, неотличимый от боевого,
+    хотя ничего в CRM на самом деле не проведено.
+    """
+    report = CarpetTickReport(letters=1, processed=1, by_status={"done": 1})
+    commands = make_commands(carpet_watcher=FakeCarpetWatcher(report, dry_run=True))
+
+    message = FakeMessage()
+    await commands.carpets(message)
+    text = message.replies[-1]
+
+    assert "РЕПЕТИЦИЯ" in text
+
+
+async def test_carpets_stays_silent_about_rehearsal_when_live():
+    report = CarpetTickReport(letters=1, processed=1, by_status={"done": 1})
+    commands = make_commands(carpet_watcher=FakeCarpetWatcher(report, dry_run=False))
+
+    message = FakeMessage()
+    await commands.carpets(message)
+    text = message.replies[-1]
+
+    assert "РЕПЕТИЦИЯ" not in text
 
 
 async def test_commands_can_run_without_a_watcher():

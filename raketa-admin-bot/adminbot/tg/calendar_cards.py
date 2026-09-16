@@ -20,6 +20,7 @@ from typing import Any, Optional, Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adminbot.phone import for_owner
+from adminbot.tg.cards import mark_rehearsal
 
 CHOICE_PREFIX = "gcal"
 
@@ -52,18 +53,18 @@ def _choice(value: str) -> str:
     return f"{CHOICE_PREFIX}:{value}"
 
 
-def cancellation_card(link: Any) -> tuple[str, InlineKeyboardMarkup]:
+def cancellation_card(link: Any, *, dry_run: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     """Запись удалена — значит заказ отменён (решение владельца 2).
 
     Робот сам сделку не закрывает: удаление бывает переносом и случайностью,
     а закрытая сделка портит статистику.
     """
     lead_id = link.real_lead_id or link.primary_lead_id
-    text = "\n".join([
+    text = mark_rehearsal("\n".join([
         "❌ Заказ отменён — запись удалена из календаря",
         _client_line(link),
         f"Сделка #{lead_id} — закрыть её как несостоявшуюся?",
-    ])
+    ]), dry_run)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔒 Закрыть сделку", callback_data=_choice("close")),
         InlineKeyboardButton(text="✋ Оставить как есть", callback_data=_choice("keep")),
@@ -71,17 +72,17 @@ def cancellation_card(link: Any) -> tuple[str, InlineKeyboardMarkup]:
     return text, keyboard
 
 
-def boat_card(link: Any) -> tuple[str, InlineKeyboardMarkup]:
+def boat_card(link: Any, *, dry_run: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     """Теплоход: ни телефона, ни цены — заводим только по кнопке (решение 7)."""
     question = link.question or {}
     name = question.get("boat") or link.client_name or "теплоход"
     when = question.get("when") or (
         f"{link.order_date:%d.%m}" if link.order_date else "дата не указана")
 
-    text = "\n".join([
+    text = mark_rehearsal("\n".join([
         f"🚢 Теплоход «{name}», {when}",
         "Телефона и суммы в записи нет — заведу сделку на юрлицо, остальное за вами.",
-    ])
+    ]), dry_run)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="➕ Завести сделку", callback_data=_choice("boat_create")),
         InlineKeyboardButton(text="🚫 Пропустить", callback_data=_choice("boat_skip")),
@@ -89,18 +90,18 @@ def boat_card(link: Any) -> tuple[str, InlineKeyboardMarkup]:
     return text, keyboard
 
 
-def calendar_question_card(link: Any) -> tuple[str, InlineKeyboardMarkup]:
+def calendar_question_card(link: Any, *, dry_run: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     """Робот не смог выбрать сделку сам."""
     question = link.question or {}
     reason = question.get("reason", "")
     options = question.get("options") or []
 
-    text = "\n".join([
+    text = mark_rehearsal("\n".join([
         "📅 Запись календаря",
         _client_line(link),
         "",
         REASON_TEXTS.get(reason, DEFAULT_REASON),
-    ])
+    ]), dry_run)
 
     # По закрытой сделке работать нечего: её можно только признать «той самой».
     prefix = "linked" if reason == "ask_owner_closed" else "lead"
@@ -372,7 +373,8 @@ def _since(value: Optional[str]) -> str:
     return f" от {when:%d.%m.%Y}"
 
 
-def updated_text(link: Any, changed: Sequence[str], *, base_url: str) -> str:
+def updated_text(link: Any, changed: Sequence[str], *, base_url: str,
+                 dry_run: bool = False) -> str:
     """Запись поправили после проведения — что робот подтянул в сделку."""
     lines = [
         "📅 Календарь · запись изменилась",
@@ -382,4 +384,4 @@ def updated_text(link: Any, changed: Sequence[str], *, base_url: str) -> str:
     url = deal_url(base_url, link.real_lead_id or link.primary_lead_id)
     if url:
         lines += ["", url]
-    return "\n".join(lines)
+    return mark_rehearsal("\n".join(lines), dry_run)

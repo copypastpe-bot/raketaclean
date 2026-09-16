@@ -76,11 +76,14 @@ class FakeStore:
         return self.links[partner_id]
 
     async def letter_state(self, uid):
+        # Порядок проверок — как в MemoryCarpetStore.letter_state (задача 4, 16.09):
+        # released → held → processed → None. Результат тот же в любом порядке,
+        # но разный порядок в двойнике и в бою путает при чтении теста.
+        if uid in self.released:
+            return "released"
         if uid in self.held:
             return "held"
-        if uid in [item[0] for item in self.remembered]:
-            return "processed"
-        return "released" if uid in self.released else None
+        return "processed" if uid in [item[0] for item in self.remembered] else None
 
     async def remember_letter(self, uid, subject, files, rows_total) -> None:
         self.held.pop(uid, None)
