@@ -19,6 +19,7 @@ import bot
 
 ORDERS_CHAT = -100111
 MONEY_CHAT = -100222
+LOGS_CHAT = -100333
 
 
 class FakeConn:
@@ -71,6 +72,7 @@ def _payload(**over):
     base = {
         "order_id": 637,
         "client_display_masked": "Иван …9510",
+        "client_phone": "79161234567",
         "birthday_display": "—",
         "payment_parts": [{"method": "Наличные", "amount": "1500"}],
         "payment_method": "Наличные",
@@ -125,6 +127,7 @@ class EnqueueOrderReportTests(unittest.IsolatedAsyncioTestCase):
             pool_,
             order_id=777,
             client_display_masked="Иван …9510",
+            client_phone="79161234567",
             birthday_display="—",
             payment_parts=[{"method": "Наличные", "amount": "1000"}],
             payment_method="Наличные",
@@ -147,6 +150,7 @@ class EnqueueOrderReportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["order_id"], 777)
         self.assertEqual(payload["master_names"], "Ольга")
         self.assertEqual(payload["has_non_wire_income"], True)
+        self.assertEqual(payload["client_phone"], "79161234567")
 
 
 class RunPendingOrderReportsTests(unittest.IsolatedAsyncioTestCase):
@@ -154,6 +158,7 @@ class RunPendingOrderReportsTests(unittest.IsolatedAsyncioTestCase):
         chat_patches = [
             mock.patch.object(bot, "ORDERS_CONFIRM_CHAT_ID", ORDERS_CHAT),
             mock.patch.object(bot, "MONEY_FLOW_CHAT_ID", MONEY_CHAT),
+            mock.patch.object(bot, "LOGS_CHAT_ID", LOGS_CHAT),
             mock.patch.object(bot, "DEAL_LINK_WAIT_TIMEOUT_SEC", 1800),
         ]
         for p in chat_patches:
@@ -250,6 +255,86 @@ class RunPendingOrderReportsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("Иван …9510 / Заказ №640", money_text)
         self.assertTrue(any("SET sent_at" in q for q, _ in conn.executed))
+        # сигнал 2: связка не появилась вовсе — авария, не обычное ожидание
+        self.assertEqual(self._chats_sent_to().count(LOGS_CHAT), 1)
+        alert_text = next(
+            call.args[1] for call in self.send_message.call_args_list if call.args[0] == LOGS_CHAT
+        )
+        self.assertIn("не ответил за 30 минут", alert_text)
+        self.assertIn("640", alert_text)
+
+    async def test_path_a_without_address_does_not_alert_logs_chat(self):
+        """Обычный путь (не create_new) без адреса — тишина в чате ошибок,
+        сигнал 1 не про эту ситуацию."""
+        now = datetime.now(timezone.utc)
+        conn = FakeConn(
+            pending_rows=[{"order_id": 642, "payload": _payload(order_id=642), "created_at": now}],
+            links={642: {"path": "A", "deal_address": None}},
+        )
+        self._install_pool(conn)
+
+        await bot.run_pending_order_reports()
+
+        self.assertEqual(self._chats_sent_to().count(LOGS_CHAT), 0)
+
+    async def test_path_c_without_address_alerts_deal_created_without_address(self):
+        """Сигнал 1: админ-бот завёл сделку с нуля (create_new, path='C'),
+        и адреса в ней как не было, так и нет — вероятно, мастер ошибся номером."""
+        now = datetime.now(timezone.utc)
+        conn = FakeConn(
+            pending_rows=[{"order_id": 643, "payload": _payload(order_id=643), "created_at": now}],
+            links={643: {"path": "C", "deal_address": None}},
+        )
+        self._install_pool(conn)
+
+        await bot.run_pending_order_reports()
+
+        self.assertEqual(self._chats_sent_to().count(LOGS_CHAT), 1)
+        alert_text = next(
+            call.args[1] for call in self.send_message.call_args_list if call.args[0] == LOGS_CHAT
+        )
+        self.assertIn("Сделка создана без адреса", alert_text)
+        self.assertIn("643", alert_text)
+        self.assertIn("79161234567", alert_text)  # телефон — чтобы было что проверить
+        # заказ всё равно уходит своим чередом, без адреса
+        self.assertEqual(self._chats_sent_to().count(ORDERS_CHAT), 1)
+
+    async def test_path_c_with_address_does_not_alert(self):
+        """Создали с нуля, но адрес всё же нашёлся — сигналу 1 тревожиться не о чем."""
+        now = datetime.now(timezone.utc)
+        conn = FakeConn(
+            pending_rows=[{"order_id": 644, "payload": _payload(order_id=644), "created_at": now}],
+            links={644: {"path": "C", "deal_address": "Садовая, 3"}},
+        )
+        self._install_pool(conn)
+
+        await bot.run_pending_order_reports()
+
+        self.assertEqual(self._chats_sent_to().count(LOGS_CHAT), 0)
+
+    async def test_two_signals_use_different_texts(self):
+        """Задача 6: сигналы нельзя смешивать в один текст — реагировать на
+        них нужно по-разному."""
+        now = datetime.now(timezone.utc)
+        old = now - timedelta(minutes=31)
+        conn = FakeConn(
+            pending_rows=[
+                {"order_id": 645, "payload": _payload(order_id=645), "created_at": now},
+                {"order_id": 646, "payload": _payload(order_id=646), "created_at": old},
+            ],
+            links={645: {"path": "C", "deal_address": None}},  # 646 остаётся без связки
+        )
+        self._install_pool(conn)
+
+        await bot.run_pending_order_reports()
+
+        alert_texts = [
+            call.args[1] for call in self.send_message.call_args_list if call.args[0] == LOGS_CHAT
+        ]
+        self.assertEqual(len(alert_texts), 2)
+        self.assertNotEqual(alert_texts[0], alert_texts[1])
+        self.assertTrue(any("без адреса" in t for t in alert_texts))
+        self.assertTrue(any("не ответил за 30 минут" in t for t in alert_texts))
 
     async def test_wire_only_order_has_no_money_message(self):
         now = datetime.now(timezone.utc)

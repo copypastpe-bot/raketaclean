@@ -7145,9 +7145,48 @@ async def _dispatch_order_report(
         await _notify_order_income(conn, total_non_wire_amount, order_id, notify_label)
 
 
+async def _alert_deal_created_without_address(order_id: int, phone: str | None) -> None:
+    """Сигнал 1 задачи 6 ТЗ «адреса до конца»: админ-бот отработал заказ, но
+    сделку клиента в CRM не нашёл и завёл новую (`path == "C"`, create_new) —
+    в ней ещё нет адреса. Частая причина — мастер ввёл не тот номер телефона."""
+    if not LOGS_CHAT_ID:
+        return
+    phone_text = _escape_html(phone) if phone else "не известен"
+    text = (
+        "⚠️ <b>Сделка создана без адреса</b>\n"
+        f"Заказ №{order_id}\n"
+        f"Телефон: <code>{phone_text}</code>\n"
+        "Админ-бот не нашёл сделку клиента в CRM и завёл новую — возможно, "
+        "мастер ввёл не тот номер телефона. Проверьте телефон и сделку в CRM."
+    )
+    try:
+        await bot.send_message(LOGS_CHAT_ID, text, parse_mode=ParseMode.HTML)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("deal-without-address alert failed for order_id=%s: %s", order_id, exc)
+
+
+async def _alert_admin_bot_silent(order_id: int) -> None:
+    """Сигнал 2 задачи 6: связка не появилась вовсе за DEAL_LINK_WAIT_TIMEOUT_SEC.
+    Это авария (служба встала или CRM недоступна), а не обычное ожидание —
+    поэтому текст и реакция на него другие, чем у сигнала 1."""
+    if not LOGS_CHAT_ID:
+        return
+    text = (
+        "🚨 <b>Админ-бот не ответил за 30 минут</b>\n"
+        f"Заказ №{order_id}\n"
+        "Связка с CRM не появилась. Похоже на аварию: служба встала или CRM недоступна."
+    )
+    try:
+        await bot.send_message(LOGS_CHAT_ID, text, parse_mode=ParseMode.HTML)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("admin-bot-silent alert failed for order_id=%s: %s", order_id, exc)
+
+
 async def run_pending_order_reports() -> None:
     """Досылает отчёт в чат и сообщение о деньгах, отложенные в `commit_order`
-    (задача 5 ТЗ «адреса до конца», 2026-09-16).
+    (задача 5 ТЗ «адреса до конца», 2026-09-16). Тем же проходом ловит два
+    сигнала в LOGS_CHAT_ID для владельца (задача 6): сделку без адреса и
+    молчание админ-бота дольше получаса.
 
     Условие отправки — не адрес, а появление связки заказа со сделкой CRM
     (`adminbot.amo_links`): появилась — уходит с адресом или без него (если
@@ -7179,6 +7218,12 @@ async def run_pending_order_reports() -> None:
             if link is None and not timed_out:
                 continue  # связки ещё нет, и 30 минут ещё не прошло — ждём дальше
             resolved_address = (link["deal_address"] or "").strip() or None if link is not None else None
+            # Сигнал 1: сделку завели с нуля, и адреса в ней как не было, так и нет.
+            if link is not None and link["path"] == "C" and not resolved_address:
+                await _alert_deal_created_without_address(order_id, payload.get("client_phone"))
+            # Сигнал 2: связка не появилась вовсе — это уже авария, а не ожидание.
+            if link is None and timed_out:
+                await _alert_admin_bot_silent(order_id)
             try:
                 await _dispatch_order_report(conn, order_id, payload, resolved_address)
             except Exception as exc:  # noqa: BLE001
@@ -7786,6 +7831,7 @@ async def _enqueue_order_report(
     *,
     order_id: int,
     client_display_masked: str | None,
+    client_phone: str | None,
     birthday_display: str | None,
     payment_parts: list[dict[str, str]],
     payment_method: str | None,
@@ -7801,10 +7847,13 @@ async def _enqueue_order_report(
 ) -> None:
     """Кладёт заказ в очередь `pending_order_reports`. Отчёт в чат и
     сообщение в «Ракета деньги» уйдут из `run_pending_order_reports`, когда
-    появится связка с CRM или сработает предохранитель (задача 5)."""
+    появится связка с CRM или сработает предохранитель (задача 5).
+    `client_phone` в отчёт не идёт — он нужен только сигналу задачи 6
+    («сделка создана без адреса»), чтобы было что проверить."""
     payload = {
         "order_id": order_id,
         "client_display_masked": client_display_masked,
+        "client_phone": client_phone,
         "birthday_display": birthday_display,
         "payment_parts": payment_parts,
         "payment_method": payment_method,
@@ -14628,6 +14677,7 @@ async def commit_order(msg: Message, state: FSMContext):
             pool,
             order_id=order_id,
             client_display_masked=client_display_masked,
+            client_phone=client_phone_val,
             birthday_display=birthday_display,
             payment_parts=payment_parts_data,
             payment_method=payment_method,
