@@ -1,19 +1,16 @@
-"""Адрес заказа: откуда он берётся при проведении.
+"""Поиск сделки клиента в amoCRM по телефону (`notifications/order_address.py`).
 
-Два правила здесь важнее остальных, потому что нарушение любого из них
-мастер заметит сразу, а владелец — поздно:
+С 16.09.2026 модуль сам за адресом в amoCRM не ходит (задача 3 ТЗ «адреса
+до конца») — тесты на `fetch_deal_address`/`resolve_order_address` отсюда
+убраны вместе с функциями. Осталось правило, которое мастер не увидит, а
+владелец заметит поздно, если оно нарушится:
 
-1. **Проведение заказа от amoCRM не зависит.** Недоступная CRM, медленный
-   ответ, ненайденный контакт — всё это «адреса нет», а не ошибка мастеру.
-   Заказ проводится по карточке клиента, как раньше.
-2. **Чужую сделку не берём.** amoCRM ищет контакт подстрокой по всем полям,
-   а у постоянного клиента открытых сделок бывает несколько (старая «ждёт
-   оплаты» и сегодняшняя). Контакт сверяем по окончанию номера, сделку
-   выбираем по близости даты работы к моменту проведения.
+**Чужую сделку не берём.** amoCRM ищет контакт подстрокой по всем полям,
+а у постоянного клиента открытых сделок бывает несколько (старая «ждёт
+оплаты» и сегодняшняя). Контакт сверяем по окончанию номера, сделку
+выбираем по близости даты работы к моменту проведения.
 """
 
-import asyncio
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -22,10 +19,8 @@ from notifications.order_address import (
     address_of_deal,
     contact_lead_ids,
     contact_matches_phone,
-    fetch_deal_address,
     phone_query,
     pick_open_deal,
-    resolve_order_address,
 )
 
 MSK = timezone(timedelta(hours=3))
@@ -230,120 +225,6 @@ class DealAddressTests(unittest.TestCase):
 
     def test_missing_deal_gives_none(self):
         self.assertIsNone(address_of_deal(None))
-
-
-class ResolveOrderAddressTests(unittest.TestCase):
-    """Сделка → карточка → адрес последнего заказа → ничего. Календарь —
-    источник правды, карточка — запасной вариант, когда CRM не ответила."""
-
-    def test_deal_address_comes_first(self):
-        self.assertEqual(
-            resolve_order_address(deal_address="Из календаря",
-                                  card_address="Из карточки",
-                                  last_order_addr="Прошлый заказ"),
-            "Из календаря")
-
-    def test_card_when_deal_is_missing(self):
-        self.assertEqual(
-            resolve_order_address(deal_address=None, card_address="Из карточки",
-                                  last_order_addr="Прошлый заказ"),
-            "Из карточки")
-
-    def test_last_order_address_when_card_is_empty(self):
-        self.assertEqual(
-            resolve_order_address(deal_address=None, card_address="",
-                                  last_order_addr="Прошлый заказ"),
-            "Прошлый заказ")
-
-    def test_nothing_gives_none(self):
-        self.assertIsNone(resolve_order_address(deal_address=None, card_address=None,
-                                                last_order_addr=None))
-
-    def test_blank_counts_as_empty(self):
-        self.assertEqual(
-            resolve_order_address(deal_address="   ", card_address=" Из карточки ",
-                                  last_order_addr=None),
-            "Из карточки")
-
-
-class FakeAmo:
-    """Клиент amoCRM с журналом вызовов: два запроса, которые делает поиск."""
-
-    def __init__(self, *, contacts=(), deals=(), error=None, delay=0.0):
-        self.contacts = list(contacts)
-        self.deals = list(deals)
-        self.error = error
-        self.delay = delay
-        self.calls = []
-
-    async def find_contacts_by_phone(self, phone10):
-        self.calls.append(("contacts", phone10))
-        if self.delay:
-            await asyncio.sleep(self.delay)
-        if self.error is not None:
-            raise self.error
-        return list(self.contacts)
-
-    async def fetch_leads_by_ids(self, lead_ids):
-        self.calls.append(("leads", list(lead_ids)))
-        return list(self.deals)
-
-
-class FetchDealAddressTests(unittest.IsolatedAsyncioTestCase):
-    """Поход в amoCRM при проведении заказа никогда не ломает проведение."""
-
-    async def test_returns_address_of_open_deal(self):
-        amo = FakeAmo(
-            contacts=[_contact(10, "+79001234567", leads=(1, 2))],
-            deals=[_deal(1, status=STAGE_WON, address="Старый адрес",
-                         order_at=NOW - timedelta(days=40)),
-                   _deal(2, address="Менделеева д 15а, кв 99", order_at=NOW)],
-        )
-        address = await fetch_deal_address(amo, "+79001234567", now=NOW)
-        self.assertEqual(address, "Менделеева д 15а, кв 99")
-        self.assertEqual(amo.calls, [("contacts", "9001234567"), ("leads", [1, 2])])
-
-    async def test_unparseable_phone_skips_crm(self):
-        amo = FakeAmo(contacts=[_contact(10, "+79001234567", leads=(1,))])
-        self.assertIsNone(await fetch_deal_address(amo, "нет телефона", now=NOW))
-        self.assertEqual(amo.calls, [])
-
-    async def test_foreign_contact_is_ignored(self):
-        """Подстрочный поиск нашёл кого-то другого — его сделки не читаем."""
-        amo = FakeAmo(contacts=[_contact(10, "+79007654321", leads=(1,))],
-                      deals=[_deal(1, address="Чужой адрес", order_at=NOW)])
-        self.assertIsNone(await fetch_deal_address(amo, "+79001234567", now=NOW))
-        self.assertEqual(amo.calls, [("contacts", "9001234567")])
-
-    async def test_contact_without_deals_stops_early(self):
-        amo = FakeAmo(contacts=[_contact(10, "+79001234567")])
-        self.assertIsNone(await fetch_deal_address(amo, "+79001234567", now=NOW))
-        self.assertEqual(amo.calls, [("contacts", "9001234567")])
-
-    async def test_crm_error_gives_none_and_does_not_raise(self):
-        amo = FakeAmo(error=RuntimeError("amoCRM API error 500"))
-        self.assertIsNone(await fetch_deal_address(amo, "+79001234567", now=NOW))
-
-    async def test_only_fifty_newest_deals_are_read(self):
-        """У постоянного клиента сделок десятки, а мастер ждёт: читаем только
-        полсотни самых новых (номера в amoCRM растут) и одним запросом."""
-        amo = FakeAmo(
-            contacts=[_contact(10, "+79001234567", leads=tuple(range(1, 61)))],
-            deals=[_deal(60, address="Менделеева д 15а", order_at=NOW)],
-        )
-        address = await fetch_deal_address(amo, "+79001234567", now=NOW)
-        self.assertEqual(address, "Менделеева д 15а")
-        self.assertEqual(len(amo.calls), 2)
-        self.assertEqual(sorted(amo.calls[1][1]), list(range(11, 61)))
-
-    async def test_slow_crm_is_cut_by_timeout(self):
-        """Мастер ждёт «Готово ✅» — зависшая CRM не должна держать его минуту."""
-        amo = FakeAmo(contacts=[_contact(10, "+79001234567", leads=(1,))],
-                      deals=[_deal(1, address="Адрес", order_at=NOW)], delay=5.0)
-        started = time.monotonic()
-        address = await fetch_deal_address(amo, "+79001234567", now=NOW, timeout=0.05)
-        self.assertIsNone(address)
-        self.assertLess(time.monotonic() - started, 1.0)
 
 
 if __name__ == "__main__":
