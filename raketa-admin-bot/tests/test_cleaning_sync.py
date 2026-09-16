@@ -96,6 +96,25 @@ async def test_cleaning_deal_address_is_saved_to_the_link():
     assert link.deal_address == "Менделеева 15, кв 3"
 
 
+async def test_cleaning_already_done_reads_address_without_writing():
+    """Задача 9 (ТЗ 2026-09-16): дыра из задачи 1 — путь done не заходил в
+    _fill_lead — воспроизводится и у уборки. Чинится тем же местом в движке,
+    отдельного кода для уборок нет.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(41463832_00, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS,
+                 created_at=int(CLEANING_MOMENT.timestamp()) - 3600,
+                 closed_at=int(CLEANING_MOMENT.timestamp()),
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "Менделеева 15, кв 3"}]}])
+
+    link = await make_engine(amo, store).process_order(make_cleaning())
+
+    assert link.status == "done" and link.path == "done" and link.real_lead_id == 41463832_00
+    assert link.deal_address == "Менделеева 15, кв 3"
+    assert not amo.calls_of("update_lead") and not amo.calls_of("move_lead")
+
+
 async def test_overrides_beat_the_lookup_by_master_name():
     """Бригадира зовут Дмитрий — но это всё равно уборка, а не чистка мебели.
 

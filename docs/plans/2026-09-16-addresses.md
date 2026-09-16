@@ -253,7 +253,7 @@ GRANT SELECT ON adminbot.amo_links, adminbot.cleaning_links TO bot;
 **Проверка:** тест на путь `already_done` — адрес из сделки попадает в связку,
 в amoCRM при этом не уходит ни одного запроса на запись.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 

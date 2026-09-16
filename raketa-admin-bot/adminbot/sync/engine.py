@@ -170,6 +170,13 @@ class Engine:
         elif decision.kind == "already_done":
             fields["real_lead_id"] = decision.lead_id
             fields["status"] = "done"
+            # Этот путь в чек-лист не заходит (process_order отдаёт результат сразу
+            # по status="done"), поэтому _fill_lead сюда не попадает и адрес
+            # сделки нужно прочитать здесь же. Берём его из уже полученных raw_leads —
+            # лишнего похода в амо не делаем, в сделку ничего не пишем (задача 9,
+            # ТЗ 2026-09-16).
+            matched = next((raw for raw in raw_leads if int(raw["id"]) == decision.lead_id), None)
+            fields["deal_address"] = field_value(matched, ids.FIELD_ADDRESS)
 
         link = await self.store.update(order.order_id, **fields)
         self._duplicates[order.order_id] = tuple(decision.duplicates)

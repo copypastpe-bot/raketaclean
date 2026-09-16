@@ -129,6 +129,34 @@ async def test_already_done_binds_without_touching():
     assert not amo.calls_of("update_lead") and not amo.calls_of("move_lead")
 
 
+async def test_already_done_reads_address_without_writing():
+    """Задача 9 (ТЗ 2026-09-16): дыра из задачи 1 — путь done не заходил в _fill_lead,
+    поэтому deal_address оставался пустым, даже когда в сделке адрес уже был.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(500, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600,
+                 closed_at=int(ORDER_MOMENT.timestamp()),
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "ул. Мира, 10"}]}])
+
+    link = await make_engine(amo, store).process_order(make_order())
+
+    assert link.deal_address == "ул. Мира, 10"
+    assert not amo.calls_of("update_lead") and not amo.calls_of("move_lead")
+
+
+async def test_already_done_leaves_address_empty_when_deal_has_none():
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(500, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600,
+                 closed_at=int(ORDER_MOMENT.timestamp()))
+
+    link = await make_engine(amo, store).process_order(make_order())
+
+    assert link.deal_address is None
+
+
 # --- путь Г: вопрос владельцу ---
 
 async def test_ambiguous_case_waits_for_owner():
