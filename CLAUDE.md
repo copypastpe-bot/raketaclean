@@ -86,7 +86,7 @@ Admin bot (`raketa-admin-bot/`):
 - `raketa-admin-bot/docs/plans/2026-08-24-amo-sync-design.md` — approved v1 design, owner decisions 1-10
 - `docs/recon/` — recon reports (amo structure, matching metrics, processes)
 - `notifications/amocrm_api.py` — reference amo API client to port
-- `bot.py:3251` — canonical phone normalization to port
+- `bot.py`, `normalize_phone_for_db()` — canonical phone normalization to port
 - `docs/analytics_deploy.md` — deploy pattern to follow
 
 ## Hard Rules (project-specific)
@@ -133,9 +133,7 @@ Common rules for python projects (Rules 4.1):
 
 This project (Rules 4.2):
 
-- The function map for `bot.py` is mandatory before any next task.
 - Splitting `bot.py` into modules is discussed separately as a project decision; do not start it on your own.
-- Deal with the 8 uncommitted files.
 
 Files longer than 500 lines and their function maps:
 
