@@ -23,6 +23,12 @@ def test_allow_list_is_read_from_a_comma_separated_string():
     assert parse_allow("") == set()
 
 
+def test_allow_list_rejects_a_non_numeric_token_with_a_clear_message():
+    """Опечатка в --allow — понятная ошибка, а не падение стеком (задача 4, 16.09)."""
+    with pytest.raises(ValueError, match="abc"):
+        parse_allow("31587353,abc")
+
+
 async def test_creating_anything_is_forbidden():
     guarded = client()
 

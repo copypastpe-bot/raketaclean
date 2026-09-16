@@ -265,6 +265,20 @@ def test_carpet_report_says_when_all_is_clean():
     assert "разбираться не с чем" in text.lower()
 
 
+def test_carpet_held_text_explains_why_and_what_to_do():
+    """Письмо отложено: владельцу нужны причина и обе команды (задача 4, 16.09)."""
+    from adminbot.tg.cards import carpet_held_text
+
+    text = carpet_held_text("отчёт за август", "строк 120, порог 100", 120, 5, "uid-42")
+
+    assert "отчёт за август" in text
+    assert "строк 120, порог 100" in text
+    assert "115 выполненных" in text                # 120 - 5 отказов
+    assert "5 отказ" in text
+    assert "--carpets-release=uid-42" in text
+    assert "robot_amo" in text
+
+
 def test_order_done_message_for_the_week_of_watching():
     """О каждом проведённом заказе — сообщение со ссылкой (решение 2026-08-27)."""
     from adminbot.tg.cards import order_done_text
