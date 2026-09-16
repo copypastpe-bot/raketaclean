@@ -181,7 +181,6 @@ from notifications.client_messaging import (
     should_notify_cancel,
     should_report_unasked,
 )
-from notifications.order_address import fetch_deal_address, resolve_order_address
 from notifications.amocrm_api import (
     AmoCRMAPIAuthError,
     AmoCRMAPIClient,
@@ -12856,14 +12855,6 @@ back_cancel_kb = ReplyKeyboardMarkup(
     one_time_keyboard=True,
 )
 
-address_input_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="Нет адреса")],
-        [KeyboardButton(text="Отмена")],
-    ],
-    resize_keyboard=True,
-)
-
 dividend_comment_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Без комментария")],
@@ -13026,7 +13017,6 @@ class OrderFSM(StatesGroup):
     pick_extra_master = State()
     maybe_bday = State()
     name_fix = State()
-    waiting_address = State()
     confirm = State()
 
 main_kb = ReplyKeyboardMarkup(
@@ -13956,18 +13946,8 @@ async def _apply_wire_link(
 
 
 async def _ensure_address_before_confirm(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    existing = (data.get("client_address") or "").strip()
-    manual = (data.get("manual_address") or "").strip()
-    if existing or manual:
-        await state.set_state(OrderFSM.confirm)
-        return await show_confirm(msg, state)
-    await state.set_state(OrderFSM.waiting_address)
-    return await msg.answer(
-        "Введите улицу клиента (например, \"ул. Ленина, 10\"). "
-        "Если адрес неизвестен, нажмите «Нет адреса».",
-        reply_markup=address_input_kb,
-    )
+    await state.set_state(OrderFSM.confirm)
+    return await show_confirm(msg, state)
 
 
 async def proceed_order_finalize(msg: Message, state: FSMContext):
@@ -13995,21 +13975,6 @@ async def got_bday(msg: Message, state: FSMContext):
         await state.update_data(new_birthday=date(2000, m, d))
     return await _ensure_address_before_confirm(msg, state)
 
-
-@dp.message(OrderFSM.waiting_address, F.text)
-async def capture_order_address(msg: Message, state: FSMContext):
-    text = (msg.text or "").strip()
-    if not text:
-        return await msg.answer(
-            "Введите улицу клиента или нажмите «Нет адреса».",
-            reply_markup=address_input_kb,
-        )
-    if text.lower() in {"нет адреса", "-"}:
-        await state.update_data(manual_address="")
-    else:
-        await state.update_data(manual_address=text)
-    await state.set_state(OrderFSM.confirm)
-    return await show_confirm(msg, state)
 
 async def show_confirm(msg: Message, state: FSMContext):
     data = await state.get_data()
@@ -14063,16 +14028,11 @@ async def show_confirm(msg: Message, state: FSMContext):
     payment_line = f"💳 Оплата деньгами: {format_money(cash_payment)}₽"
     if payment_breakdown:
         payment_line += f" ({payment_breakdown})"
-    address_preview = (data.get("manual_address") or "").strip()
-    if not address_preview:
-        address_preview = (data.get("client_address") or "").strip()
     text = (
         f"Проверьте:\n"
         f"👤 {name}\n"
         f"📞 {data['phone_in']}\n"
     )
-    if address_preview:
-        text += f"📍 Адрес: {address_preview}\n"
     text += (
         f"💈 Чек: {amount} (доп: {upsell})\n"
         f"{payment_line}\n"
@@ -14099,22 +14059,6 @@ async def show_confirm(msg: Message, state: FSMContext):
 async def cancel_order(msg: Message, state: FSMContext):
     await state.clear()
     await msg.answer("Отменено.", reply_markup=master_kb)
-
-async def _order_address_from_amo(phone: str | None) -> str | None:
-    """Адрес открытой сделки реализации по телефону клиента.
-
-    В CRM ходим до открытия транзакции: сетевой вызов внутри неё держал бы
-    соединение пула всё время, пока amoCRM думает, а думать она может долго.
-    Проведение заказа от CRM не зависит — любая осечка означает «адреса нет».
-    """
-    if not AMOCRM_API_BASE or not AMOCRM_API_TOKEN:
-        return None
-    try:
-        async with AmoCRMAPIClient(AMOCRM_API_BASE, AMOCRM_API_TOKEN) as client:
-            return await fetch_deal_address(client, phone, now=datetime.now(MOSCOW_TZ))
-    except Exception as e:  # noqa: BLE001
-        logging.warning("order address lookup failed for %s: %s", mask_phone_last4(phone), e)
-        return None
 
 
 @dp.message(OrderFSM.confirm, F.text.lower() == "подтвердить")
@@ -14144,7 +14088,6 @@ async def commit_order(msg: Message, state: FSMContext):
     client_birthday_val: date | None = data.get("birthday")
     if isinstance(client_birthday_val, str):
         client_birthday_val = parse_birthday_str(client_birthday_val)
-    manual_address = (data.get("manual_address") or "").strip()
     payment_parts_data = _payment_parts_from_state(data)
     if not payment_parts_data:
         payment_parts_data = [{"method": payment_method, "amount": str(cash_payment)}]
@@ -14159,38 +14102,23 @@ async def commit_order(msg: Message, state: FSMContext):
     notify_label: str | None = None
     street_label: str | None = None
 
-    # Первый ответ мастеру — до похода в CRM: он может занять до восьми секунд,
-    # а на «подтвердить» без ответа тапают второй раз, и второй тап приходит
-    # в этот же хендлер параллельно — вторым заказом, второй зарплатой
-    # и второй записью в кассе.
     await msg.answer("⏳ Провожу заказ…")
-    deal_address_val = await _order_address_from_amo(phone_in)
 
     async with pool.acquire() as conn:
         async with conn.transaction():
             client = await conn.fetchrow(
-                "INSERT INTO clients (full_name, phone, address, bonus_balance, birthday, status) "
-                "VALUES ($1, $2, $4, 0, $3, 'client') "
+                "INSERT INTO clients (full_name, phone, bonus_balance, birthday, status) "
+                "VALUES ($1, $2, 0, $3, 'client') "
                 "ON CONFLICT (phone) DO UPDATE SET "
                 "  full_name = COALESCE(EXCLUDED.full_name, clients.full_name), "
                 "  birthday  = COALESCE(EXCLUDED.birthday, clients.birthday), "
-                "  status='client', "
-                "  address = CASE "
-                "      WHEN (clients.address IS NULL OR clients.address = '') "
-                "           THEN COALESCE(EXCLUDED.address, clients.address) "
-                "      ELSE clients.address "
-                "  END "
-                "RETURNING id, bonus_balance, full_name, phone, address, birthday, last_order_addr",
-                name, phone_in, new_bday, (manual_address or None)
+                "  status='client' "
+                "RETURNING id, bonus_balance, full_name, phone, birthday",
+                name, phone_in, new_bday
             )
             client_id = client["id"]
             client_full_name_val = (client["full_name"] or name or "").strip() or None
             client_phone_val = client["phone"] or phone_in
-            order_address_val = resolve_order_address(
-                deal_address=deal_address_val,
-                card_address=client.get("address"),
-                last_order_addr=client.get("last_order_addr"),
-            )
             client_birthday_val = client.get("birthday") or client_birthday_val or new_bday
             current_bonus_balance = int(client.get("bonus_balance") or 0)
 
@@ -14206,13 +14134,6 @@ async def commit_order(msg: Message, state: FSMContext):
             )
             order_id = order["id"]
             master_db_id = order["master_id"]
-            if order_address_val:
-                await conn.execute(
-                    "UPDATE clients SET last_order_addr=$1, last_updated=NOW() "
-                    "WHERE id=$2 AND last_order_addr IS DISTINCT FROM $1",
-                    order_address_val,
-                    client_id,
-                )
             if is_wire_payment:
                 await conn.execute(
                     "UPDATE orders SET awaiting_wire_payment = TRUE WHERE id=$1",
