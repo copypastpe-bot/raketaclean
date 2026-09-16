@@ -317,6 +317,11 @@ CLIENT_BOT_HEALTHCHECK_INTERVAL_SEC = int(
 CLIENT_BOT_HEALTH_MAX_AGE_SEC = int(
     os.getenv("CLIENT_BOT_HEALTH_MAX_AGE_SEC", "300") or "300"
 )
+# Дозаполнение адреса заказа/клиента из связки админ-бота с CRM (ТЗ 2026-09-16
+# «адреса до конца», задача 4). Раз в минуту, глубина — неделя: заказы старше
+# решает владелец руками.
+ADDRESS_BACKFILL_INTERVAL_SEC = max(30, _env_int("ADDRESS_BACKFILL_INTERVAL_SEC", 60))
+ADDRESS_BACKFILL_LOOKBACK_DAYS = 7
 
 # env rules
 MIN_CASH = Decimal(os.getenv("MIN_CASH", "2500"))
@@ -515,6 +520,7 @@ unasked_watch_task: asyncio.Task | None = None       # сторож незада
 deferred_retry_task: asyncio.Task | None = None      # добор заказов без дочерней сделки
 client_bot_health_task: asyncio.Task | None = None
 amocrm_api_task: asyncio.Task | None = None
+address_backfill_task: asyncio.Task | None = None  # дозаполнение адреса из связки админ-бота
 BONUS_CHANGE_NOTIFICATIONS_ENABLED = False
 
 # === Ignore group/supergroup/channel updates; work only in private chats ===
@@ -7003,6 +7009,73 @@ async def check_rewash_master_counter() -> None:
                     await bot.send_message(admin_id, admin_msg, parse_mode=ParseMode.HTML)
                 except Exception as exc:
                     logging.warning("Failed to notify admin about master rewash counter: %s", exc)
+
+
+async def _backfill_address_for_table(
+    conn: asyncpg.Connection,
+    *,
+    orders_table: str,
+    links_table: str,
+    cutoff: datetime,
+) -> None:
+    """Один проход дозаполнения адреса для одной пары таблиц (заказы + связки)."""
+    rows = await conn.fetch(
+        f"""
+        SELECT o.id AS order_id, o.client_id, l.deal_address
+        FROM {orders_table} o
+        JOIN {links_table} l ON l.order_id = o.id
+        WHERE o.created_at >= $1
+          AND (o.address IS NULL OR o.address = '')
+          AND l.deal_address IS NOT NULL
+        """,
+        cutoff,
+    )
+    for row in rows:
+        addr = (row["deal_address"] or "").strip()
+        if not addr:
+            continue  # связка есть, адреса в ней пока нет — пропускаем молча
+        try:
+            async with conn.transaction():
+                await conn.execute(
+                    f"UPDATE {orders_table} SET address=$1 WHERE id=$2 AND (address IS NULL OR address='')",
+                    addr,
+                    row["order_id"],
+                )
+                await conn.execute(
+                    "UPDATE clients SET address=$1, last_order_addr=$1, last_updated=NOW() WHERE id=$2",
+                    addr,
+                    row["client_id"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(
+                "address backfill failed for %s order_id=%s: %s",
+                orders_table, row["order_id"], exc,
+            )
+
+
+async def run_address_backfill() -> None:
+    """Дозаполняет адрес заказа и карточки клиента адресом сделки CRM.
+
+    Мастера адрес больше не вводят и рабочий бот в amoCRM за ним не ходит
+    (задача 3 ТЗ «адреса до конца», 2026-09-16). Адрес приезжает из сделки
+    через связку, которую ведёт админ-бот (`adminbot.amo_links` для химчистки,
+    `adminbot.cleaning_links` для уборок, колонка `deal_address` — задача 1
+    того же ТЗ). Один проход обслуживает и обычный случай (связка появляется
+    через минуту-две после заказа), и поздний (адрес дописан на следующий
+    день после того, как владелец нажал «Я заполнил») — отдельного механизма
+    для второго случая нет: проход просто видит тот же заказ на следующем
+    круге, пока адрес заказа не заполнен.
+    """
+    if pool is None:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=ADDRESS_BACKFILL_LOOKBACK_DAYS)
+    async with pool.acquire() as conn:
+        await _backfill_address_for_table(
+            conn, orders_table="orders", links_table="adminbot.amo_links", cutoff=cutoff,
+        )
+        await _backfill_address_for_table(
+            conn, orders_table="cleaning_orders", links_table="adminbot.cleaning_links", cutoff=cutoff,
+        )
 
 
 async def schedule_daily_job(hour_msk: int, minute_msk: int, job_coro, job_name: str) -> None:
@@ -14749,7 +14822,7 @@ async def unknown(msg: Message, state: FSMContext):
     await msg.answer("Команда не распознана. Выберите действие на клавиатуре ниже.", reply_markup=kb)
 
 async def main():
-    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task
+    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task
     notification_rules = _load_notification_rules()
     pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=5)
     dp["pool"] = pool
@@ -14811,6 +14884,10 @@ async def main():
     if dead_channels_cleanup_task is None:
         dead_channels_cleanup_task = asyncio.create_task(
             schedule_periodic_job(7 * 24 * 3600, clear_dead_channels_weekly, "dead_channels_cleanup")
+        )
+    if address_backfill_task is None:
+        address_backfill_task = asyncio.create_task(
+            schedule_periodic_job(ADDRESS_BACKFILL_INTERVAL_SEC, run_address_backfill, "address_backfill")
         )
     if exchange_task is None and AMOCRM_EXCHANGE_ENABLED:
         exchange_task = asyncio.create_task(
