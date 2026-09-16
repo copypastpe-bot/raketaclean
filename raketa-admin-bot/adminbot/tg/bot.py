@@ -22,15 +22,17 @@ from aiogram import F, Router
 from aiogram.filters import BaseFilter, Command
 
 from adminbot.amo import ids
+from adminbot.amo.fields import field_value
 from adminbot.control import ControlPanel
 from adminbot.gcal.engine import OWNER_HANDLES_REASON, OWNER_KEEPS_REASON
 from adminbot.tg.calendar_cards import (
     CHOICE_PREFIX as GCAL_PREFIX, calendar_status_text, calendar_summary_text,
     parse_calendar_choice)
 from adminbot.tg.cards import (
-    CARPET_PREFIX, CLEANING_CHOICE_PREFIX, carpet_report_text, parse_carpet_choice,
+    ADDR_PREFIX, CARPET_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX,
+    carpet_report_text, parse_carpet_choice,
     BACKLOG_GO, BACKLOG_HOLD, CHOICE_PREFIX, PATH_BY_PIPELINE, live_report_text,
-    parse_choice, preview_card,
+    parse_address_choice, parse_choice, preview_card,
 )
 
 log = logging.getLogger(__name__)
@@ -452,10 +454,85 @@ class OwnerAnswers:
         return None
 
 
+class AddressAnswers:
+    """Нажатия на карточке «сделка без адреса» (ТЗ 2026-09-16, задача 7).
+
+    Единственный обработчик нажатий, которому для ответа нужна сама amoCRM:
+    «Я заполнил» не верит на слово — робот идёт и читает сделку заново, прежде
+    чем замолчать. Остальные карточки только откладывают решение в связку,
+    а работу доделывает обычный проход наблюдателя.
+    """
+
+    def __init__(self, *, owner_tg_id: int, store: Any, amo: Any,
+                 prefix: str = ADDR_PREFIX, label: str = "Заказ") -> None:
+        self.owner_tg_id = owner_tg_id
+        self.store = store
+        self.amo = amo
+        self.prefix = prefix
+        self.label = label
+
+    async def on_choice(self, callback: Any) -> None:
+        if not self._is_owner(callback):
+            return
+        choice = parse_address_choice(getattr(callback, "data", None), self.prefix)
+        if choice is None:
+            await callback.answer()
+            return
+
+        order_id, kind = choice
+        link = await self.store.get(order_id)
+        if link is None:
+            await callback.answer("Этой работы у меня уже нет.")
+            return
+
+        if kind == "mute":
+            await self.store.update(order_id, address_reminder_muted=True)
+            await self.store.log(order_id, "address_reminder_muted", dry_run=False)
+            log.info("%s №%s: владелец сказал не напоминать про адрес", self.label, order_id)
+            await callback.answer()
+            await callback.message.edit_text(
+                f"{self.label} №{order_id}: не буду напоминать про адрес.")
+            return
+
+        try:
+            address = await self._address_in_amo(link)
+        except Exception:                              # noqa: BLE001 — амо бывает недоступна
+            log.exception("%s №%s: проверка адреса в амо не удалась", self.label, order_id)
+            await callback.answer("Не получилось проверить — амо не ответила. "
+                                  "Попробуйте ещё раз.")
+            return
+
+        if address:
+            await self.store.update(order_id, deal_address=address)
+            log.info("%s №%s: адрес нашёлся в сделке по нажатию владельца",
+                     self.label, order_id)
+            reply = "адрес нашёлся, забрал его — дальше сам."
+        else:
+            reply = "в сделке по-прежнему пусто — буду напоминать дальше."
+
+        await callback.answer()
+        await callback.message.edit_text(f"{self.label} №{order_id}: {reply}")
+
+    # --- внутреннее ---
+
+    async def _address_in_amo(self, link: Any) -> Optional[str]:
+        """Прочитать сделку заново — «Я заполнил» не верит владельцу на слово."""
+        lead_id = link.real_lead_id or link.primary_lead_id
+        if lead_id is None:
+            return None
+        return field_value(await self.amo.get_lead(lead_id), ids.FIELD_ADDRESS)
+
+    def _is_owner(self, event: Any) -> bool:
+        user = getattr(event, "from_user", None)
+        return bool(user and user.id == self.owner_tg_id)
+
+
 def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None,
                  carpets: Optional[CarpetAnswers] = None,
                  calendar: Optional[CalendarAnswers] = None,
-                 cleaning: Optional[OwnerAnswers] = None) -> Router:
+                 cleaning: Optional[OwnerAnswers] = None,
+                 address: Optional[AddressAnswers] = None,
+                 cleaning_address: Optional[AddressAnswers] = None) -> Router:
     """Собрать роутер: сначала команды владельца, последним — отказ всем прочим."""
     router = Router(name="owner")
     owner = OwnerOnly(commands.owner_tg_id)
@@ -485,6 +562,12 @@ def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None
     if cleaning is not None:
         router.callback_query.register(cleaning.on_choice, owner,
                                        F.data.startswith(f"{CLEANING_CHOICE_PREFIX}:"))
+    if address is not None:
+        router.callback_query.register(address.on_choice, owner,
+                                       F.data.startswith(f"{ADDR_PREFIX}:"))
+    if cleaning_address is not None:
+        router.callback_query.register(cleaning_address.on_choice, owner,
+                                       F.data.startswith(f"{CLEANING_ADDR_PREFIX}:"))
     return router
 
 

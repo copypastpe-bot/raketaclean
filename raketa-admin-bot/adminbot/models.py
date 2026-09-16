@@ -169,5 +169,12 @@ class AmoLink:
     question: Optional[dict[str, Any]] = None
     question_msg_id: Optional[int] = None
     last_error: Optional[str] = None
+    # Напоминание «сделка без адреса» (ТЗ 2026-09-16, задача 7): сколько раз
+    # уже напомнили, когда ушло последнее (отсюда считаются сутки до следующего)
+    # и не пора ли молчать — по воле владельца («Не напоминать») или своей,
+    # дойдя до потолка в 7 штук.
+    address_reminder_count: int = 0
+    address_reminder_sent_at: Optional[datetime] = None
+    address_reminder_muted: bool = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

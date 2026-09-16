@@ -7,7 +7,8 @@
 
 from adminbot.amo import ids
 from adminbot.models import AmoLink
-from adminbot.tg.bot import BACKLOG_GO, BACKLOG_HOLD, OwnerAnswers
+from adminbot.tg.bot import AddressAnswers, BACKLOG_GO, BACKLOG_HOLD, OwnerAnswers
+from adminbot.tg.cards import ADDR_PREFIX
 from tests.test_tg_guard import OWNER_ID, STRANGER_ID, FakeUser
 
 QUESTION = {"reason": "ask_owner", "options": [
@@ -41,6 +42,7 @@ class FakeStore:
     def __init__(self, link):
         self.links = {link.order_id: link} if link else {}
         self.updates = []
+        self.actions = []
 
     async def get(self, order_id):
         return self.links.get(order_id)
@@ -52,6 +54,10 @@ class FakeStore:
             return None
         self.links[order_id] = AmoLink(**{**link.__dict__, **fields})
         return self.links[order_id]
+
+    async def log(self, order_id, action, *, dry_run, entity=None, amo_id=None, payload=None):
+        self.actions.append({"order_id": order_id, "action": action, "dry_run": dry_run,
+                             "entity": entity, "amo_id": amo_id, "payload": payload})
 
 
 def waiting_link(order_id=596, question=QUESTION, path=None):
@@ -189,3 +195,99 @@ async def test_stranger_cannot_start_the_backlog():
     await answers.on_backlog(FakeCallback(BACKLOG_GO, user_id=STRANGER_ID))
 
     assert backlog.live_runs == 0
+
+
+# --- карточка «сделка без адреса» (ТЗ 2026-09-16, задача 7) ---
+
+def address_link(order_id=596, real_lead_id=41400001, primary_lead_id=None):
+    return AmoLink(order_id=order_id, phone10="9601861067", status="done", path="C",
+                   real_lead_id=real_lead_id, primary_lead_id=primary_lead_id)
+
+
+class FakeAddressAmo:
+    """amoCRM-двойник: помнит, что у неё просили, и умеет «упасть»."""
+
+    def __init__(self, address=None, fail=False):
+        self.address = address
+        self.fail = fail
+        self.calls = []
+
+    async def get_lead(self, lead_id):
+        self.calls.append(lead_id)
+        if self.fail:
+            raise RuntimeError("амо недоступна")
+        if self.address is None:
+            return {"id": lead_id}
+        return {"id": lead_id, "custom_fields_values": [
+            {"field_id": ids.FIELD_ADDRESS, "values": [{"value": self.address}]}]}
+
+
+def make_address_answers(link=None, amo=None):
+    store = FakeStore(link or address_link())
+    return AddressAnswers(owner_tg_id=OWNER_ID, store=store, amo=amo or FakeAddressAmo()), store
+
+
+async def test_filled_button_does_not_take_the_owner_at_their_word():
+    """«Я заполнил» не верит на слово: робот идёт и читает сделку заново."""
+    amo = FakeAddressAmo(address="ул. Мира, 10")
+    answers, store = make_address_answers(amo=amo)
+
+    await answers.on_choice(FakeCallback(f"{ADDR_PREFIX}:596:filled"))
+
+    assert amo.calls == [41400001]
+    link = store.links[596]
+    assert link.deal_address == "ул. Мира, 10"
+
+
+async def test_filled_button_keeps_reminding_when_amo_is_still_empty():
+    answers, store = make_address_answers(amo=FakeAddressAmo(address=None))
+    callback = FakeCallback(f"{ADDR_PREFIX}:596:filled")
+
+    await answers.on_choice(callback)
+
+    link = store.links[596]
+    assert link.deal_address is None
+    assert link.address_reminder_muted is False         # напоминания не остановлены
+    assert callback.message.edits == [
+        "Заказ №596: в сделке по-прежнему пусто — буду напоминать дальше."]
+
+
+async def test_mute_button_stops_reminders_without_asking_amo():
+    amo = FakeAddressAmo()
+    answers, store = make_address_answers(amo=amo)
+
+    await answers.on_choice(FakeCallback(f"{ADDR_PREFIX}:596:mute"))
+
+    assert store.links[596].address_reminder_muted is True
+    assert amo.calls == []                               # «не напоминать» в амо не ходит
+
+
+async def test_filled_button_survives_amo_failure():
+    """Амо недоступна — карточка остаётся с кнопками, можно нажать ещё раз."""
+    answers, store = make_address_answers(amo=FakeAddressAmo(fail=True))
+    callback = FakeCallback(f"{ADDR_PREFIX}:596:filled")
+
+    await answers.on_choice(callback)
+
+    assert store.links[596].deal_address is None
+    assert callback.message.edits == []
+    assert callback.answers and "не ответила" in callback.answers[-1]
+
+
+async def test_unknown_order_replies_politely():
+    answers = AddressAnswers(owner_tg_id=OWNER_ID, store=FakeStore(None), amo=FakeAddressAmo())
+
+    callback = FakeCallback(f"{ADDR_PREFIX}:999:filled")
+    await answers.on_choice(callback)
+
+    assert callback.answers == ["Этой работы у меня уже нет."]
+
+
+async def test_stranger_cannot_mute_reminders():
+    amo = FakeAddressAmo()
+    answers, store = make_address_answers(amo=amo)
+
+    await answers.on_choice(FakeCallback(f"{ADDR_PREFIX}:596:mute", user_id=STRANGER_ID))
+
+    assert store.links[596].address_reminder_muted is False
+    assert amo.calls == []

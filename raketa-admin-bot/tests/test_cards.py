@@ -11,11 +11,12 @@ from decimal import Decimal
 
 from adminbot.amo import ids
 from adminbot.amo.fields import MOSCOW_TZ
-from adminbot.models import Order
+from adminbot.models import AmoLink, Order
 from adminbot.sync.backlog import PlannedOrder
 from adminbot.sync.reconcile import DailySummary, SummaryRow
 from adminbot.tg.cards import (
-    BACKLOG_GO, BACKLOG_HOLD, parse_choice, preview_card, question_card, summary_text,
+    ADDR_PREFIX, BACKLOG_GO, BACKLOG_HOLD, CLEANING_ADDR_PREFIX, address_missing_card,
+    parse_address_choice, parse_choice, preview_card, question_card, summary_text,
 )
 
 ORDER_MOMENT = datetime(2026, 8, 24, 17, 53, tzinfo=MOSCOW_TZ)
@@ -107,6 +108,60 @@ def test_parse_choice_understands_every_button():
 def test_parse_choice_rejects_junk():
     for data in ("", "amosync", "amosync:596", "другое:596:new", "amosync:абв:new", None):
         assert parse_choice(data) is None
+
+
+# --- карточка «сделка без адреса» (ТЗ 2026-09-16, задача 7) ---
+
+def make_link(order_id=596, phone10="9601861067", real_lead_id=41400001, primary_lead_id=None):
+    return AmoLink(order_id=order_id, phone10=phone10, status="done", path="C",
+                   real_lead_id=real_lead_id, primary_lead_id=primary_lead_id)
+
+
+def test_address_missing_card_shows_order_phone_and_deal_link():
+    text, keyboard = address_missing_card(make_link(), base_url="https://x.amocrm.ru",
+                                          reminder_no=1)
+
+    assert "Заказ №596" in text
+    assert "+79601861067" in text
+    assert "https://x.amocrm.ru/leads/detail/41400001" in text
+    assert "Напоминание 1 из 7." in text
+
+    labels = [button.text for button in buttons(keyboard)]
+    assert labels == ["✅ Я заполнил", "🔕 Не напоминать"]
+    data = [button.callback_data for button in buttons(keyboard)]
+    assert data == [f"{ADDR_PREFIX}:596:filled", f"{ADDR_PREFIX}:596:mute"]
+
+
+def test_address_missing_card_uses_the_primary_lead_when_no_realization_yet():
+    link = make_link(real_lead_id=None, primary_lead_id=700)
+
+    text, _ = address_missing_card(link, base_url="https://x.amocrm.ru", reminder_no=3, cap=7)
+
+    assert "leads/detail/700" in text
+    assert "Напоминание 3 из 7." in text
+
+
+def test_address_missing_card_for_cleaning_uses_its_own_prefix_and_label():
+    """Своя приставка кнопок — иначе ответ по уборке ушёл бы в заказ с тем же номером."""
+    text, keyboard = address_missing_card(make_link(order_id=5), label="Уборка",
+                                          prefix=CLEANING_ADDR_PREFIX,
+                                          base_url="https://x.amocrm.ru", reminder_no=1)
+
+    assert "Уборка №5" in text
+    data = [button.callback_data for button in buttons(keyboard)]
+    assert data == [f"{CLEANING_ADDR_PREFIX}:5:filled", f"{CLEANING_ADDR_PREFIX}:5:mute"]
+
+
+def test_parse_address_choice_understands_both_buttons():
+    assert parse_address_choice(f"{ADDR_PREFIX}:596:filled") == (596, "filled")
+    assert parse_address_choice(f"{ADDR_PREFIX}:596:mute") == (596, "mute")
+    assert parse_address_choice(f"{CLEANING_ADDR_PREFIX}:5:filled", CLEANING_ADDR_PREFIX) == (5, "filled")
+
+
+def test_parse_address_choice_rejects_junk():
+    for data in ("", "addr", "addr:596", "addr:596:lead_1", "другое:596:filled",
+                 "addr:абв:filled", None):
+        assert parse_address_choice(data) is None
 
 
 # --- вечерняя сводка ---

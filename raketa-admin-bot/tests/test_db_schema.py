@@ -167,6 +167,45 @@ async def test_deal_address_is_stored_on_the_link(pool):
     assert cleaning_link.deal_address == "Менделеева, 15"
 
 
+async def test_address_reminder_candidates(pool):
+    """Задача 7 (ТЗ 2026-09-16): кто именно созрел для напоминания и почему."""
+    real_now = datetime.now(timezone.utc)
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link(pool, 596, status="done", path="C", real_lead_id=41400001)
+
+    due = await db.fetch_links_needing_address_reminder(pool)
+    assert [link.order_id for link in due] == [596]        # ещё не напоминали
+    assert due[0].address_reminder_count == 0
+
+    # напомнили только что — до завтра больше не тревожим
+    await db.update_link(pool, 596, address_reminder_count=1, address_reminder_sent_at=real_now)
+    assert await db.fetch_links_needing_address_reminder(pool) == []
+
+    # прошли сутки — снова созрел
+    await db.update_link(pool, 596, address_reminder_sent_at=real_now - timedelta(days=2))
+    due = await db.fetch_links_needing_address_reminder(pool)
+    assert [link.order_id for link in due] == [596]
+
+    # владелец сказал «не напоминать» — молчим, несмотря на срок
+    await db.update_link(pool, 596, address_reminder_muted=True)
+    assert await db.fetch_links_needing_address_reminder(pool) == []
+
+    # адрес нашёлся (например, по кнопке «Я заполнил») — тоже причина молчать
+    await db.update_link(pool, 596, address_reminder_muted=False, deal_address="ул. Ленина, 5")
+    assert await db.fetch_links_needing_address_reminder(pool) == []
+
+    # потолок: даже не muted, но счётчик уже на месте — не предлагаем снова
+    await db.update_link(pool, 596, deal_address=None, address_reminder_count=7)
+    assert await db.fetch_links_needing_address_reminder(pool, cap=7) == []
+
+    # то же самое — для уборок, своя таблица связок
+    await db.create_link(pool, order_id=5, phone10="9601861067", table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 5, table=db.CLEANING_LINKS_TABLE,
+                         status="done", path="C", real_lead_id=41400002)
+    cleaning_due = await db.fetch_links_needing_address_reminder(pool, table=db.CLEANING_LINKS_TABLE)
+    assert [link.order_id for link in cleaning_due] == [5]
+
+
 async def test_actions_journal(pool):
     await db.create_link(pool, order_id=596, phone10="9601861067")
     await db.log_action(

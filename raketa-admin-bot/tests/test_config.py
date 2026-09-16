@@ -196,3 +196,28 @@ def test_telegram_proxy_is_read_from_env(monkeypatch):
     _minimal_env(monkeypatch)
     monkeypatch.setenv("TELEGRAM_PROXY_URL", "  http://user:pass@75.119.153.118:39443  ")
     assert Settings.from_env().telegram_proxy_url == "http://user:pass@75.119.153.118:39443"
+
+
+# --- напоминание про сделку без адреса (задача 7) ---
+
+def test_address_reminder_is_off_by_default(monkeypatch):
+    """Свой выключатель: выкатывается последним, владелец включает сам."""
+    _minimal_env(monkeypatch)
+    monkeypatch.delenv("ADDRESS_REMINDER_ENABLED", raising=False)
+    monkeypatch.delenv("ADDRESS_REMINDER_POLL_INTERVAL_SEC", raising=False)
+
+    s = Settings.from_env()
+
+    assert s.address_reminder_enabled is False
+    assert s.address_reminder_poll_interval_sec == 3600
+
+
+def test_address_reminder_env_overrides(monkeypatch):
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("ADDRESS_REMINDER_ENABLED", "1")
+    monkeypatch.setenv("ADDRESS_REMINDER_POLL_INTERVAL_SEC", "120")
+
+    s = Settings.from_env()
+
+    assert s.address_reminder_enabled is True
+    assert s.address_reminder_poll_interval_sec == 120

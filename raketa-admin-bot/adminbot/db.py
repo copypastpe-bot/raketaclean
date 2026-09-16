@@ -20,7 +20,8 @@ from adminbot.phone import last10
 # Колонки adminbot.amo_links, которые разрешено менять через update_link.
 _UPDATABLE_LINK_FIELDS = frozenset(
     {"phone10", "status", "path", "primary_lead_id", "real_lead_id", "deal_address",
-     "question", "question_msg_id", "last_error"}
+     "question", "question_msg_id", "last_error",
+     "address_reminder_count", "address_reminder_sent_at", "address_reminder_muted"}
 )
 
 # Два потока работы — две таблицы связок. Номера `orders.id` и `cleaning_orders.id`
@@ -269,6 +270,9 @@ def _link_from_row(row: Optional[asyncpg.Record]) -> Optional[AmoLink]:
         question=question,
         question_msg_id=row["question_msg_id"],
         last_error=row["last_error"],
+        address_reminder_count=row["address_reminder_count"],
+        address_reminder_sent_at=row["address_reminder_sent_at"],
+        address_reminder_muted=row["address_reminder_muted"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -434,6 +438,33 @@ async def count_links_by_status(own_pool: asyncpg.Pool,
             f"SELECT status, count(*) AS n FROM {table} GROUP BY status"
         )
     return {row["status"]: row["n"] for row in rows}
+
+
+async def fetch_links_needing_address_reminder(
+    own_pool: asyncpg.Pool, *, cap: int = 7, table: str = LINKS_TABLE, limit: int = 50,
+) -> list[AmoLink]:
+    """Сделки, заведённые с нуля без адреса, которым пора напомнить владельцу.
+
+    Раз в сутки: `address_reminder_sent_at` либо пусто (ещё не напоминали),
+    либо старше суток. `address_reminder_muted` отсекает и решение владельца
+    «Не напоминать», и собственное молчание робота после седьмого напоминания —
+    оба случая выставляют один и тот же флаг (ТЗ 2026-09-16, задача 7).
+    """
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT * FROM {table}
+            WHERE status = 'done' AND path = 'C' AND deal_address IS NULL
+              AND address_reminder_muted = false
+              AND address_reminder_count < $1
+              AND (address_reminder_sent_at IS NULL
+                   OR address_reminder_sent_at <= now() - interval '1 day')
+            ORDER BY updated_at
+            LIMIT $2
+            """,
+            cap, limit,
+        )
+    return [_link_from_row(row) for row in rows]
 
 
 # --- ковры от партнёра ---

@@ -47,6 +47,7 @@ from adminbot.carpets.store import MemoryCarpetStore, PgCarpetStore
 from adminbot.carpets.watcher import CarpetWatcher
 from adminbot.control import PgControlPanel, sync_allowed
 from adminbot.mail import MailBox, mail_settings_from_env
+from adminbot.sync.address_reminder import DEFAULT_CAP, AddressReminder, PgReminderSource
 from adminbot.sync.backlog import BacklogRunner
 from adminbot.sync.engine import Engine, service_enums
 from adminbot.sync.reconcile import PgCleaningSummarySource, PgSummarySource, Reconciler
@@ -55,12 +56,14 @@ from adminbot.sync.store import MemoryLinkStore, PgCleaningLinkStore, PgLinkStor
 from adminbot.sync.watcher import PgCleaningSource, PgOrderSource, Watcher
 from adminbot.tg.autocall_cards import (
     connected_text, manager_text, no_phone_text, rehearsal_text as autocall_rehearsal_text)
-from adminbot.tg.bot import CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router
+from adminbot.tg.bot import (
+    AddressAnswers, CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router)
 from adminbot.tg.calendar_cards import (
     boat_card, calendar_question_card, calendar_summary_text, cancellation_card,
     done_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
-    CLEANING_CHOICE_PREFIX, carpet_held_text, carpet_question_card, carpet_report_text,
+    ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
+    carpet_held_text, carpet_question_card, carpet_report_text,
     order_done_text, question_card, summary_text)
 from adminbot.tg.outbox import (
     SUMMARY_TTL_SEC, MemoryMailStore, OwnerMail, PgMailStore, Purpose)
@@ -85,6 +88,8 @@ MAIL_GCAL_REHEARSAL = "gcal_rehearsal"
 MAIL_CARPET_QUESTION = "carpet_question"
 MAIL_CARPET_REPORT = "carpet_report"
 MAIL_CARPET_HELD = "carpet_held"
+MAIL_ADDRESS_REMINDER = "address_reminder"
+MAIL_CLEANING_ADDRESS_REMINDER = "cleaning_address_reminder"
 MAIL_AUTOCALL_REHEARSAL = "autocall_rehearsal"
 MAIL_AUTOCALL_CONNECTED = "autocall_connected"
 MAIL_AUTOCALL_NO_PHONE = "autocall_no_phone"
@@ -113,6 +118,10 @@ class App:
     calendar_token: Optional[Any] = None
     autocall_watcher: Optional[Any] = None
     cleaning_watcher: Optional[Any] = None
+    # Напоминание про сделку без адреса (задача 7): свой выключатель, поэтому
+    # оба поля обычно пусты, даже когда amo_sync и уборки уже в бою.
+    address_reminder: Optional[Any] = None
+    cleaning_address_reminder: Optional[Any] = None
     # Отдельный send-only бот для сообщений менеджеру (WORKER_TG_TOKEN) — не участвует
     # в опросе, но его aiohttp-сессия открывается лениво при первой отправке и должна
     # закрыться вместе с сервисом, как и сессия self.bot.
@@ -143,6 +152,13 @@ class App:
         if self.cleaning_watcher is not None:
             background.append(asyncio.create_task(
                 self.cleaning_watcher.run_forever(self.stop), name="cleaning"))
+        if self.address_reminder is not None:
+            background.append(asyncio.create_task(
+                self.address_reminder.run_forever(self.stop), name="address_reminder"))
+        if self.cleaning_address_reminder is not None:
+            background.append(asyncio.create_task(
+                self.cleaning_address_reminder.run_forever(self.stop),
+                name="cleaning_address_reminder"))
         if self.mail is not None:
             background.append(asyncio.create_task(
                 self.mail.run_forever(self.stop), name="mail"))
@@ -252,14 +268,37 @@ async def build_app(settings: Settings) -> App:
     )
     mail.register(MAIL_ORDER_QUESTION, _question_purpose(store))
 
+    # Напоминание про сделку без адреса (задача 7): своё хранилище, всегда
+    # боевое (Postgres) — даже если amo_sync сейчас в репетиции и watcher выше
+    # пишет отметки шагов в память. Иначе счётчик напоминаний рос бы только
+    # в пределах одного запуска и никогда не долетал бы до потолка.
+    address_store = PgLinkStore(own_pool)
+    address_reminder, address_answers = _build_address_reminder(
+        settings, own_pool, mail, live_amo, store=address_store, table=db.LINKS_TABLE,
+        kind=MAIL_ADDRESS_REMINDER, prefix=ADDR_PREFIX, label="Заказ")
+    if address_reminder is not None:
+        mail.register(MAIL_ADDRESS_REMINDER, _address_reminder_purpose(address_store))
+
     # Уборки клининг-контура: тот же движок и тот же справочник специалистов,
     # но своя таблица связок, свои выключатели и своя очередь. Пауза — общая:
     # владелец останавливает робота одной кнопкой.
     cleaning_watcher, cleaning_store, cleaning_backlog_from = _build_cleaning(
         settings, bot_pool, own_pool, mail, control, specialists, services,
         live_amo, rehearsal_amo)
+    cleaning_address_reminder = cleaning_address_answers = None
     if cleaning_store is not None:
         mail.register(MAIL_CLEANING_QUESTION, _question_purpose(cleaning_store))
+
+        # То же напоминание, но для уборок: своя таблица связок, тот же движок
+        # (ТЗ 2026-09-16, задача 7 работает одинаково для обеих таблиц).
+        cleaning_address_store = PgCleaningLinkStore(own_pool)
+        cleaning_address_reminder, cleaning_address_answers = _build_address_reminder(
+            settings, own_pool, mail, live_amo, store=cleaning_address_store,
+            table=db.CLEANING_LINKS_TABLE, kind=MAIL_CLEANING_ADDRESS_REMINDER,
+            prefix=CLEANING_ADDR_PREFIX, label="Уборка")
+        if cleaning_address_reminder is not None:
+            mail.register(MAIL_CLEANING_ADDRESS_REMINDER,
+                          _address_reminder_purpose(cleaning_address_store))
 
     reconciler = Reconciler(
         watcher=watcher,
@@ -339,6 +378,8 @@ async def build_app(settings: Settings) -> App:
         OwnerAnswers(owner_tg_id=settings.owner_tg_id, store=cleaning_store,
                      prefix=CLEANING_CHOICE_PREFIX, label="Уборка")
         if cleaning_store else None,
+        address=address_answers,
+        cleaning_address=cleaning_address_answers,
     ))
 
     return App(settings=settings, bot_pool=bot_pool, own_pool=own_pool,
@@ -350,6 +391,8 @@ async def build_app(settings: Settings) -> App:
                autocall_watcher=autocall_watcher,
                autocall_manager_bot=autocall_manager_bot,
                cleaning_watcher=cleaning_watcher,
+               address_reminder=address_reminder,
+               cleaning_address_reminder=cleaning_address_reminder,
                mail=mail,
                stop=asyncio.Event())
 
@@ -397,6 +440,34 @@ def _build_cleaning(settings: Settings, bot_pool: Any, own_pool: Any, mail: Owne
     log.info("Уборки: включены, режим %s, хвост с %s",
              "репетиция" if settings.cleaning_sync_dry_run else "БОЕВОЙ", backlog_from)
     return watcher, store, backlog_from
+
+
+def _build_address_reminder(settings: Settings, own_pool: Any, mail: OwnerMail,
+                            live_amo: AmoClient, *, store: Any, table: str, kind: str,
+                            prefix: str, label: str):
+    """Собрать напоминание про сделку без адреса. Возвращает (цикл, обработчик кнопок).
+
+    Свой выключатель (задача 7, ТЗ 2026-09-16), по умолчанию выключен —
+    выкатывается последним, когда задачи 3-6 уже подтверждены рабочими
+    (порядок выката из того же ТЗ). Проверка по кнопке «Я заполнил» всегда
+    идёт боевым клиентом: это чтение, dry_run на него не влияет, а связки,
+    которые видит цикл, — всегда настоящие (см. вызов в build_app).
+    """
+    if not settings.address_reminder_enabled:
+        return None, None
+
+    reminder = AddressReminder(
+        source=PgReminderSource(own_pool, table=table),
+        store=store,
+        on_reminder=_make_address_reminder_sender(mail, kind=kind, prefix=prefix, label=label,
+                                                   amo_base_url=settings.amo_base_url),
+        poll_interval_sec=settings.address_reminder_poll_interval_sec,
+    )
+    answers = AddressAnswers(owner_tg_id=settings.owner_tg_id, store=store, amo=live_amo,
+                             prefix=prefix, label=label)
+    log.info("Напоминание про адрес (%s): включено, опрос раз в %s сек",
+             label.lower(), settings.address_reminder_poll_interval_sec)
+    return reminder, answers
 
 
 def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
@@ -606,6 +677,22 @@ def _ref_key(ref: str) -> Any:
     return int(text) if text.lstrip("-").isdigit() else text
 
 
+def _address_reminder_purpose(store: Any) -> Purpose:
+    """Напоминание, доставленное с опозданием: не слать, если нужда уже отпала.
+
+    Отпасть она могла, пока долг ждал своей очереди в почте: владелец успел
+    вписать адрес и нажать «Я заполнил» на предыдущей карточке, либо сказать
+    «Не напоминать». В любом из этих случаев повторное письмо — уже лишнее.
+    """
+
+    async def still_needed(ref: str) -> bool:
+        link = await store.get(_ref_key(ref))
+        return (link is not None and not link.address_reminder_muted
+                and not link.deal_address)
+
+    return Purpose(still_needed=still_needed)
+
+
 def _make_calendar_summary_sender(mail: OwnerMail):
     """Вечерняя строка про календарь — вслед за сводкой по заказам."""
 
@@ -621,6 +708,19 @@ def _make_order_done_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = 
     async def send(order, link) -> None:
         await mail.send(order_done_text(order, link, base_url=amo_base_url, dry_run=dry_run),
                         kind=MAIL_ORDER_DONE, ref=order.order_id)
+
+    return send
+
+
+def _make_address_reminder_sender(mail: OwnerMail, *, kind: str, prefix: str, label: str,
+                                  amo_base_url: str):
+    """Карточка «сделка без адреса» — та же на каждое напоминание, счётчик растёт."""
+
+    async def send(link, count: int) -> None:
+        text, keyboard = address_missing_card(link, label=label, prefix=prefix,
+                                              base_url=amo_base_url, reminder_no=count,
+                                              cap=DEFAULT_CAP)
+        await mail.send(text, kind=kind, ref=link.order_id, reply_markup=keyboard)
 
     return send
 

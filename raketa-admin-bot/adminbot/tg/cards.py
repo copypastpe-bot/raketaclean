@@ -145,6 +145,54 @@ def _order_line(order: Any) -> str:
     return " · ".join(parts)
 
 
+# --- карточка «сделка без адреса» (ТЗ 2026-09-16, задача 7) ---
+
+# Приставки своих кнопок — отдельные от карточки-вопроса (CHOICE_PREFIX и
+# CLEANING_CHOICE_PREFIX): номера работ пересекаются, а к моменту этой карточки
+# заказ уже «done», так что путать с ask_owner нечего, но приставка должна
+# оставаться однозначной сама по себе.
+ADDR_PREFIX = "addr"
+CLEANING_ADDR_PREFIX = "addrclean"
+
+
+def address_missing_card(link: Any, *, label: str = "Заказ", prefix: str = ADDR_PREFIX,
+                         base_url: str, reminder_no: int, cap: int = 7,
+                         ) -> tuple[str, InlineKeyboardMarkup]:
+    """Сделка заведена с нуля, а адреса в ней нет — просим владельца вписать его в CRM."""
+    lead_id = link.real_lead_id or link.primary_lead_id
+    lines = [f"📍 {label} №{link.order_id} · сделку завёл с нуля, адреса в ней нет"]
+    if link.phone10:
+        lines.append(for_owner(link.phone10))
+    lines += ["", "Впишите адрес прямо в сделку в amoCRM — дальше подхвачу сам."]
+    if lead_id:
+        lines += ["", f"{base_url.rstrip('/')}/leads/detail/{lead_id}"]
+    lines += ["", f"Напоминание {reminder_no} из {cap}."]
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Я заполнил",
+                             callback_data=_choice(link.order_id, "filled", prefix)),
+        InlineKeyboardButton(text="🔕 Не напоминать",
+                             callback_data=_choice(link.order_id, "mute", prefix)),
+    ]])
+    return "\n".join(lines), keyboard
+
+
+def parse_address_choice(data: Optional[str],
+                         prefix: str = ADDR_PREFIX) -> Optional[tuple[int, str]]:
+    """Разобрать нажатие на карточке «адреса нет»: (номер работы, что выбрали).
+
+    Свой парсер, а не `parse_choice`: там выбор — из фиксированного списка сделок
+    и служебных слов («new», «manual», «retry»), «filled»/«mute» в нём чужие.
+    """
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != prefix or not parts[1].isdigit():
+        return None
+    choice = parts[2]
+    if choice not in ("filled", "mute"):
+        return None
+    return int(parts[1]), choice
+
+
 # --- вечерняя сводка ---
 
 def summary_text(summary: Any) -> str:

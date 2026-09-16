@@ -188,6 +188,14 @@ class Settings:
     salesbot_wait_sec: int = 2400
     poll_interval_sec: int = 60
 
+    # Напоминание владельцу про сделку без адреса (задача 7): свой выключатель,
+    # по умолчанию выключен — выкатывается последним, когда задачи 3-6 уже
+    # подтверждены рабочими (порядок выката из ТЗ 2026-09-16). Своего режима
+    # репетиции нет: фича не пишет в amoCRM, только читает при проверке
+    # и пишет в собственные колонки связки.
+    address_reminder_enabled: bool = False
+    address_reminder_poll_interval_sec: int = 3600
+
     # Мастер заказа → вид работ для поля «Услуга»
     service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
@@ -285,6 +293,8 @@ class Settings:
             reconcile_hour_msk=_int("AMO_SYNC_RECONCILE_HOUR_MSK", 21),
             salesbot_wait_sec=_int("AMO_SYNC_SALESBOT_WAIT_SEC", 600),
             poll_interval_sec=_int("AMO_SYNC_POLL_INTERVAL_SEC", 60),
+            address_reminder_enabled=_flag("ADDRESS_REMINDER_ENABLED", False),
+            address_reminder_poll_interval_sec=_int("ADDRESS_REMINDER_POLL_INTERVAL_SEC", 3600),
             service_by_master=_service_by_master("SERVICE_BY_MASTER",
                                                  DEFAULT_SERVICE_BY_MASTER),
             telegram_api_ips=tuple(parse_ip_pool(os.environ.get("TELEGRAM_API_IPS"))),
