@@ -5569,20 +5569,6 @@ def _ensure_dt_aware(dt: datetime | None) -> datetime | None:
     return dt
 
 
-def _format_amocrm_counters(counters: dict[str, int]) -> list[str]:
-    return [
-        f"Всего строк в файле: {counters['rows']}",
-        f"Уникальных телефонов: {counters['phones']}",
-        f"Клиентов добавлено: {counters['clients_inserted']}",
-        f"Клиентов обновлено: {counters['clients_updated']}",
-        f"Клиентов переведено из leads: {counters['clients_promoted']}",
-        f"Лидов добавлено: {counters['leads_inserted']}",
-        f"Лидов обновлено: {counters['leads_updated']}",
-        f"Лидов удалено: {counters['leads_deleted']}",
-        f"Пропущено без телефонов: {counters['skipped_no_phone']}",
-    ]
-
-
 def _last_birthday_date(birthday: date, today: date) -> date:
     year = today.year
     while True:
@@ -5593,20 +5579,6 @@ def _last_birthday_date(birthday: date, today: date) -> date:
         if candidate <= today:
             return candidate
         year -= 1
-
-
-def _format_amocrm_counters(counters: dict[str, int]) -> list[str]:
-    return [
-        f"Всего строк в файле: {counters['rows']}",
-        f"Уникальных телефонов: {counters['phones']}",
-        f"Клиентов добавлено: {counters['clients_inserted']}",
-        f"Клиентов обновлено: {counters['clients_updated']}",
-        f"Клиентов переведено из leads: {counters['clients_promoted']}",
-        f"Лидов добавлено: {counters['leads_inserted']}",
-        f"Лидов обновлено: {counters['leads_updated']}",
-        f"Лидов удалено: {counters['leads_deleted']}",
-        f"Пропущено без телефонов: {counters['skipped_no_phone']}",
-    ]
 
 
 def _amo_split_services(value: str) -> set[str]:
