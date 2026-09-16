@@ -171,7 +171,7 @@ GRANT SELECT ON adminbot.amo_links, adminbot.cleaning_links TO bot;
 **Проверка:** тест, где связка появляется после заказа, и адрес доезжает до всех
 трёх мест.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 
