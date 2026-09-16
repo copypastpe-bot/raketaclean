@@ -213,7 +213,7 @@ GRANT SELECT ON adminbot.amo_links, adminbot.cleaning_links TO bot;
 
 Смешивать их в один текст нельзя: реагировать на них надо по-разному.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 
