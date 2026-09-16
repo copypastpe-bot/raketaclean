@@ -46,6 +46,20 @@ def field_value(entity: Optional[Mapping[str, Any]], field_id: int) -> Any:
     return None
 
 
+async def fetch_lead_address(amo: Any, link: Any) -> Optional[str]:
+    """Перечитать сделку в amoCRM и достать «Адрес» из неё заново.
+
+    Общий код для кнопки «Я заполнил» (`tg/bot.py`, задача 7 ТЗ 2026-09-16) и
+    суточной перепроверки перед напоминанием (`sync/address_reminder.py`,
+    задача 10 того же ТЗ) — оба не верят тому, что лежит в связке, и идут
+    в CRM заново: сделка могла измениться с прошлого раза.
+    """
+    lead_id = link.real_lead_id or link.primary_lead_id
+    if lead_id is None:
+        return None
+    return field_value(await amo.get_lead(lead_id), ids.FIELD_ADDRESS)
+
+
 def order_date_msk(lead: Optional[Mapping[str, Any]]) -> Optional[date]:
     """Дата из поля «Дата и время заказа» по московскому времени.
 

@@ -449,9 +449,10 @@ def _build_address_reminder(settings: Settings, own_pool: Any, mail: OwnerMail,
 
     Свой выключатель (задача 7, ТЗ 2026-09-16), по умолчанию выключен —
     выкатывается последним, когда задачи 3-6 уже подтверждены рабочими
-    (порядок выката из того же ТЗ). Проверка по кнопке «Я заполнил» всегда
-    идёт боевым клиентом: это чтение, dry_run на него не влияет, а связки,
-    которые видит цикл, — всегда настоящие (см. вызов в build_app).
+    (порядок выката из того же ТЗ). Обе проверки сделки в CRM — по кнопке
+    «Я заполнил» и перед каждым напоминанием (задача 10) — всегда идут боевым
+    клиентом: это чтение, dry_run на него не влияет, а связки, которые видит
+    цикл, — всегда настоящие (см. вызов в build_app).
     """
     if not settings.address_reminder_enabled:
         return None, None
@@ -459,6 +460,7 @@ def _build_address_reminder(settings: Settings, own_pool: Any, mail: OwnerMail,
     reminder = AddressReminder(
         source=PgReminderSource(own_pool, table=table),
         store=store,
+        amo=live_amo,
         on_reminder=_make_address_reminder_sender(mail, kind=kind, prefix=prefix, label=label,
                                                    amo_base_url=settings.amo_base_url),
         poll_interval_sec=settings.address_reminder_poll_interval_sec,

@@ -279,7 +279,7 @@ GRANT SELECT ON adminbot.amo_links, adminbot.cleaning_links TO bot;
 
 **Проверка:** тесты на три случая — адрес появился, в сделке пусто, CRM не ответила.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 

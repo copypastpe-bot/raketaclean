@@ -22,7 +22,7 @@ from aiogram import F, Router
 from aiogram.filters import BaseFilter, Command
 
 from adminbot.amo import ids
-from adminbot.amo.fields import field_value
+from adminbot.amo.fields import fetch_lead_address
 from adminbot.control import ControlPanel
 from adminbot.gcal.engine import OWNER_HANDLES_REASON, OWNER_KEEPS_REASON
 from adminbot.tg.calendar_cards import (
@@ -517,10 +517,7 @@ class AddressAnswers:
 
     async def _address_in_amo(self, link: Any) -> Optional[str]:
         """Прочитать сделку заново — «Я заполнил» не верит владельцу на слово."""
-        lead_id = link.real_lead_id or link.primary_lead_id
-        if lead_id is None:
-            return None
-        return field_value(await self.amo.get_lead(lead_id), ids.FIELD_ADDRESS)
+        return await fetch_lead_address(self.amo, link)
 
     def _is_owner(self, event: Any) -> bool:
         user = getattr(event, "from_user", None)

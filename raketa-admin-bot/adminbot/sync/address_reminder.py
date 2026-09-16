@@ -12,6 +12,13 @@
 должна быть реже. Кнопки и текст карточки — дело `tg/cards.py`, доставка —
 дело `OwnerMail`; этот модуль только решает, кому пора напомнить и сколько
 раз уже напомнили.
+
+Перед каждым напоминанием (задача 10 того же ТЗ) цикл сам перечитывает сделку
+в amoCRM — владелец мог вписать адрес прямо в неё, минуя кнопку «Я заполнил»,
+и тогда семь напоминаний про уже заполненный адрес были бы лишними. Проверка
+та же, что у кнопки (`adminbot.amo.fields.fetch_lead_address`): адрес нашёлся —
+забираем его в `deal_address` и молчим; амо не ответила — не шлём и не считаем
+попытку, пробуем на следующем проходе.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
 from adminbot import db
-from adminbot.amo.fields import MOSCOW_TZ
+from adminbot.amo.fields import MOSCOW_TZ, fetch_lead_address
 from adminbot.models import AmoLink
 
 log = logging.getLogger(__name__)
@@ -47,6 +54,7 @@ class AddressReminder:
         *,
         source: ReminderSource,
         store: Any,
+        amo: Any,
         on_reminder: Callable[[AmoLink, int], Awaitable[Any]],
         cap: int = DEFAULT_CAP,
         poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC,
@@ -55,6 +63,7 @@ class AddressReminder:
     ) -> None:
         self.source = source
         self.store = store
+        self.amo = amo
         self.on_reminder = on_reminder
         self.cap = cap
         self.poll_interval_sec = poll_interval_sec
@@ -67,8 +76,8 @@ class AddressReminder:
         sent = 0
         for link in due:
             try:
-                await self._remind(link)
-                sent += 1
+                if await self._remind(link):
+                    sent += 1
             except Exception:                          # noqa: BLE001 — один сбой не должен стопорить остальных
                 log.exception("Заказ №%s: напоминание про адрес не отправлено", link.order_id)
         return sent
@@ -83,7 +92,22 @@ class AddressReminder:
 
     # --- внутреннее ---
 
-    async def _remind(self, link: AmoLink) -> None:
+    async def _remind(self, link: AmoLink) -> bool:
+        """Одна связка. Возвращает True, если напоминание отправлено.
+
+        Перед отправкой перечитываем сделку в CRM (задача 10, ТЗ 2026-09-16):
+        владелец мог вписать адрес прямо в сделку, минуя кнопку «Я заполнил» —
+        семь напоминаний про уже заполненный адрес никому не нужны. Амо не
+        ответила — пусть исключение долетит до `tick()` как есть: счётчик
+        трогать нельзя, чужой сбой не должен списывать попытку.
+        """
+        address = await fetch_lead_address(self.amo, link)
+        if address:
+            await self.store.update(link.order_id, deal_address=address)
+            log.info("Заказ №%s: адрес нашёлся в сделке при перепроверке — "
+                     "напоминание не шлю, замолкаю", link.order_id)
+            return False
+
         count = (link.address_reminder_count or 0) + 1
         await self.on_reminder(link, count)
         now = self.now()
@@ -100,6 +124,7 @@ class AddressReminder:
         else:
             await self.store.update(link.order_id, address_reminder_count=count,
                                     address_reminder_sent_at=now)
+        return True
 
 
 class PgReminderSource:
