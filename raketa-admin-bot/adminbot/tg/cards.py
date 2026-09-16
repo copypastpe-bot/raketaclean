@@ -31,6 +31,15 @@ PREFIX_BY_KIND = {"order": CHOICE_PREFIX, "cleaning": CLEANING_CHOICE_PREFIX}
 BACKLOG_GO = "backlog:go"
 BACKLOG_HOLD = "backlog:hold"
 
+# Пометка репетиции (задача 3, 16.09): в CRM ничего не изменилось, а карточка
+# без неё неотличима от боевой. Общая для заказов, уборок, ковров и календаря.
+REHEARSAL_PREFIX = "🎭 РЕПЕТИЦИЯ · "
+
+
+def mark_rehearsal(text: str, dry_run: bool) -> str:
+    """Добавить пометку репетиции в первую строку, если это репетиция."""
+    return f"{REHEARSAL_PREFIX}{text}" if dry_run else text
+
 # Почему робот спрашивает — словами владельца.
 REASON_TEXTS = {
     "ask_owner": "Нашёл несколько подходящих сделок — какая из них про этот заказ?",
@@ -60,17 +69,18 @@ ACTION_WORDS = {
 
 # --- карточка-вопрос ---
 
-def question_card(order: Any, question: Optional[dict]) -> tuple[str, InlineKeyboardMarkup]:
+def question_card(order: Any, question: Optional[dict],
+                  *, dry_run: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     """Вопрос по одной работе: что за работа и между чем выбирать."""
     reason = (question or {}).get("reason", "")
     options = (question or {}).get("options") or []
     prefix = PREFIX_BY_KIND.get(getattr(order, "kind", "order"), CHOICE_PREFIX)
 
-    text = "\n".join([
+    text = mark_rehearsal("\n".join([
         _order_line(order),
         "",
         REASON_TEXTS.get(reason, DEFAULT_REASON),
-    ])
+    ]), dry_run)
 
     rows = [[_option_button(order.order_id, option, prefix)] for option in options]
     if reason == "сейлзбот не создал автосделку":
@@ -300,7 +310,7 @@ CARPET_REASONS = {
 CARPET_DEFAULT_REASON = "Не смог решить сам, что делать с этим заказом партнёра."
 
 
-def carpet_question_card(row: Any, question: Optional[dict]):
+def carpet_question_card(row: Any, question: Optional[dict], *, dry_run: bool = False):
     """Вопрос по строке отчёта партнёра."""
     reason = (question or {}).get("reason", "")
     options = (question or {}).get("options") or []
@@ -336,7 +346,7 @@ def carpet_question_card(row: Any, question: Optional[dict]):
         InlineKeyboardButton(text="✋ Сам разберусь",
                              callback_data=_carpet_choice(row.partner_id, "manual")),
     ])
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+    return mark_rehearsal("\n".join(lines), dry_run), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def parse_carpet_choice(data: Optional[str]) -> Optional[tuple[int, str, Optional[int]]]:
@@ -353,7 +363,7 @@ def parse_carpet_choice(data: Optional[str]) -> Optional[tuple[int, str, Optiona
     return None
 
 
-def carpet_report_text(subject: Optional[str], report: Any) -> str:
+def carpet_report_text(subject: Optional[str], report: Any, *, dry_run: bool = False) -> str:
     """Итог разбора одного письма партнёра."""
     counts = dict(getattr(report, "by_status", {}) or {})
     lines = [f"🧶 Разобрал отчёт партнёра: {subject or 'без темы'}", ""]
@@ -372,25 +382,25 @@ def carpet_report_text(subject: Optional[str], report: Any) -> str:
 
     if not (waiting or in_flight or counts.get("error") or getattr(report, "failures", ())):
         lines += ["", "Всё разобрано — разбираться не с чем."]
-    return "\n".join(lines)
+    return mark_rehearsal("\n".join(lines), dry_run)
 
 
 def carpet_held_text(subject: Optional[str], reason: str, rows_total: int,
-                     refused_total: int, uid: str) -> str:
+                     refused_total: int, uid: str, *, dry_run: bool = False) -> str:
     """Письмо партнёра отложено: робот его не проводил и ждёт решения владельца.
 
     Сообщение уходит один раз на письмо. Владельцу нужны две вещи: почему робот
     остановился и что с этим делать — поэтому обе команды прямо в тексте.
     """
     completed = max(rows_total - refused_total, 0)
-    return "\n".join([
+    return mark_rehearsal("\n".join([
         f"🧶 Ковры: письмо «{subject or 'без темы'}» отложено, не проведено.",
         f"Причина: {reason}.",
         f"В файле: {completed} выполненных, {refused_total} отказ(ов).",
         "",
         f"Если это нормальный отчёт: sudo raketa-admin-bot-update --carpets-release={uid}",
         "Если архив или чужой файл: удалите письмо из папки robot_amo.",
-    ])
+    ]), dry_run)
 
 
 def _carpet_choice(partner_id: int, value: str) -> str:
@@ -408,7 +418,7 @@ PATH_WORDS = {
 }
 
 
-def order_done_text(order: Any, link: Any, *, base_url: str) -> str:
+def order_done_text(order: Any, link: Any, *, base_url: str, dry_run: bool = False) -> str:
     """Сообщение о проведённой работе — чтобы проверить по горячим следам."""
     label = getattr(order, "label", "Заказ")
     lines = [
@@ -418,4 +428,4 @@ def order_done_text(order: Any, link: Any, *, base_url: str) -> str:
     lead_id = link.real_lead_id or link.primary_lead_id
     if lead_id:
         lines += ["", f"{base_url.rstrip('/')}/leads/detail/{lead_id}"]
-    return "\n".join(lines)
+    return mark_rehearsal("\n".join(lines), dry_run)

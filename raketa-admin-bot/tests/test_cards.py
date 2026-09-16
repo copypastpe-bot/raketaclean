@@ -308,3 +308,48 @@ def test_order_line_prints_moscow_time_not_utc():
 
     assert "16.09.2026 13:30" in text
     assert "10:30" not in text
+
+
+# --- пометка репетиции (задача 3, 16.09) ---
+
+def test_question_card_marks_rehearsal():
+    """В репетиции CRM не тронута — карточка должна отличаться от боевой."""
+    live_text, _ = question_card(make_order(), None)
+    rehearsal, _ = question_card(make_order(), None, dry_run=True)
+
+    assert not live_text.startswith("🎭")
+    assert rehearsal.startswith("🎭 РЕПЕТИЦИЯ")
+    assert rehearsal != live_text
+
+
+def test_order_done_message_marks_rehearsal():
+    from adminbot.models import AmoLink
+    from adminbot.tg.cards import order_done_text
+
+    link = AmoLink(order_id=596, phone10="9601861067", status="done", path="A",
+                   real_lead_id=31570695)
+
+    live_text = order_done_text(make_order(), link, base_url="https://x")
+    rehearsal = order_done_text(make_order(), link, base_url="https://x", dry_run=True)
+
+    assert not live_text.startswith("🎭")
+    assert rehearsal.startswith("🎭 РЕПЕТИЦИЯ")
+
+
+def test_carpet_cards_mark_rehearsal():
+    from adminbot.carpets.watcher import CarpetTickReport
+    from adminbot.tg.cards import carpet_held_text, carpet_question_card, carpet_report_text
+
+    question_text, _ = carpet_question_card(carpet_row(), None, dry_run=True)
+    assert question_text.startswith("🎭 РЕПЕТИЦИЯ")
+
+    report = carpet_report_text("тема", CarpetTickReport(letters=1, processed=1),
+                                dry_run=True)
+    assert report.startswith("🎭 РЕПЕТИЦИЯ")
+
+    held = carpet_held_text("тема", "порог превышен", 5, 1, "uid-1", dry_run=True)
+    assert held.startswith("🎭 РЕПЕТИЦИЯ")
+
+    # По умолчанию (боевой режим) пометки нет ни у одной карточки.
+    live_question, _ = carpet_question_card(carpet_row(), None)
+    assert not live_question.startswith("🎭")

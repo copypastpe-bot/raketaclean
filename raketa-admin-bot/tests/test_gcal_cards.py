@@ -434,3 +434,37 @@ async def test_owner_confirms_the_closed_deal(answered):
     assert link.status == "done"
     assert link.real_lead_id == 31570357
     assert link.path == "done"                   # работать по ней робот не будет
+
+
+# --- пометка репетиции (задача 3, 16.09) ---
+
+def test_calendar_question_cards_mark_rehearsal():
+    """В репетиции CRM не тронута — карточки-вопросы должны отличаться от боевых."""
+    link = a_link()
+
+    live_text, _ = cancellation_card(link)
+    rehearsal, _ = cancellation_card(link, dry_run=True)
+    assert not live_text.startswith("🎭")
+    assert rehearsal.startswith("🎭 РЕПЕТИЦИЯ")
+
+    boat_link = a_link(kind="boat", client_name="Толстой", phone10=None, real_lead_id=None,
+                       question={"reason": "теплоход — завести сделку?",
+                                 "boat": "Толстой", "when": "12.09 09:00"})
+    rehearsal_boat, _ = boat_card(boat_link, dry_run=True)
+    assert rehearsal_boat.startswith("🎭 РЕПЕТИЦИЯ")
+
+    question_link = a_link(question={"reason": "ask_owner", "options": []})
+    rehearsal_question, _ = calendar_question_card(question_link, dry_run=True)
+    assert rehearsal_question.startswith("🎭 РЕПЕТИЦИЯ")
+
+
+def test_updated_record_message_marks_rehearsal():
+    from adminbot.tg.calendar_cards import updated_text
+
+    link = a_link(status="done", question=None, real_lead_id=31570695, client_name="Милена")
+
+    live_text = updated_text(link, ("адрес",), base_url="https://x")
+    rehearsal = updated_text(link, ("адрес",), base_url="https://x", dry_run=True)
+
+    assert not live_text.startswith("🎭")
+    assert rehearsal.startswith("🎭 РЕПЕТИЦИЯ")
