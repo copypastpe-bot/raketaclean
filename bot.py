@@ -208,6 +208,7 @@ from cleaning.handlers import (
     foreman_expense_start,
     router as cleaning_router,
     start_cleaning_order,
+    start_cleaning_payout_button,
 )
 from crm import (
     ChannelKind,
@@ -14808,7 +14809,7 @@ async def master_rewash_order(msg: Message, state: FSMContext):
 
 # fallback
 
-@dp.message(F.text.in_({"🧹 Провести уборку", "💰 Баланс", "➖ Добавить расход"}), StateFilter(None))
+@dp.message(F.text.in_({"🧹 Провести уборку", "💰 Баланс", "➖ Добавить расход", "🔍 Клиент", "💸 Выплата"}), StateFilter(None))
 async def cleaner_button_bridge(msg: Message, state: FSMContext):
     async with pool.acquire() as conn:
         role = await get_user_role(conn, msg.from_user.id)
@@ -14823,6 +14824,10 @@ async def cleaner_button_bridge(msg: Message, state: FSMContext):
         return await cleaning_balance_cmd(msg, pool=pool)
     if msg.text == "➖ Добавить расход":
         return await foreman_expense_start(msg, state, pool=pool)
+    if msg.text == "🔍 Клиент":
+        return await cleaning_client_lookup_start(msg, state, pool=pool)
+    if msg.text == "💸 Выплата":
+        return await start_cleaning_payout_button(msg, state, pool=pool)
 
 
 @dp.message(F.text, ~F.text.startswith("/"), StateFilter(None))
