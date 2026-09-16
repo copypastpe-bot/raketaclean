@@ -5,11 +5,12 @@
 Плюс появилось правило про неоплаченный счёт.
 """
 
-from datetime import timedelta
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from adminbot.amo import ids
-from adminbot.models import Order
+from adminbot.models import AmoLink, Order
 from tests.fakes import FakeAmo, FakeStore
 from tests.test_engine import ORDER_MOMENT, make_engine, make_order, open_realization_lead
 
@@ -268,6 +269,22 @@ async def test_robot_leaves_a_note_in_the_deal():
     assert lead == lead_id
     assert "роботом amo_sync" in text
     assert "№596" in text and "5950" in text and "Дмитрий Козлов" in text
+
+
+async def test_note_shows_moscow_time_not_utc():
+    """В базе бота время лежит в UTC; владельцу нужно московское (задача 2, 16.09)."""
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = open_realization_lead(amo)
+    utc_order = replace(make_order(),
+                        created_at=datetime(2026, 9, 16, 10, 30, tzinfo=timezone.utc))
+    link = AmoLink(order_id=utc_order.order_id, phone10=utc_order.phone10,
+                   status="in_progress", real_lead_id=lead_id)
+
+    await make_engine(amo, store)._step_note_robot_done(utc_order, link)
+
+    text = amo.calls_of("add_note")[0][1]
+    assert "16.09.2026 13:30" in text
+    assert "10:30" not in text
 
 
 async def test_tasks_are_closed_before_the_stage_changes():

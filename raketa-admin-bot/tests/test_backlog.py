@@ -5,12 +5,13 @@
 «Поехали» теряет смысл — работа окажется уже сделанной.
 """
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.models import Order
-from adminbot.sync.backlog import BacklogRunner
+from adminbot.sync.backlog import BacklogRunner, order_title
 from adminbot.sync.engine import Engine
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import MemoryLinkStore
@@ -98,6 +99,17 @@ async def test_empty_backlog_gives_an_empty_plan():
 
     assert await runner.preview() == []
     assert await runner.run_live() == []
+
+
+def test_order_title_prints_moscow_time_not_utc():
+    """В базе бота время лежит в UTC; владельцу нужно московское (задача 2, 16.09)."""
+    utc_order = replace(make_order(582),
+                         created_at=datetime(2026, 9, 16, 10, 30, tzinfo=timezone.utc))
+
+    title = order_title(utc_order)
+
+    assert "16.09.2026 13:30" in title
+    assert "10:30" not in title
 
 
 async def test_memory_store_is_used_for_the_rehearsal():

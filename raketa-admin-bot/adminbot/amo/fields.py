@@ -16,6 +16,17 @@ from adminbot.phone import last10
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
+def as_msk(moment: datetime) -> datetime:
+    """Время для печати человеку — по Москве, а не как оно лежит в базе.
+
+    В базе рабочего бота время приходит в UTC (aware) — переводим в MSK.
+    Наивное время (без часового пояса) считаем уже московским, менять нечего.
+    """
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=MOSCOW_TZ)
+    return moment.astimezone(MOSCOW_TZ)
+
+
 def field_value(entity: Optional[Mapping[str, Any]], field_id: int) -> Any:
     """Значение кастомного поля сущности или None, если поле не заполнено."""
     if not entity:

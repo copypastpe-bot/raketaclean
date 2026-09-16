@@ -238,7 +238,7 @@ class Engine:
         masters = ", ".join(order.master_names) or "не указан"
         lines = [
             f"🤖 Проведено роботом amo_sync: {order.label} №{order.order_id} из бота.",
-            f"Дата работы: {order.created_at:%d.%m.%Y %H:%M}. Чек: {order.amount_total} ₽.",
+            f"Дата работы: {_as_msk(order.created_at):%d.%m.%Y %H:%M}. Чек: {order.amount_total} ₽.",
             f"Мастер: {masters}. Оплата: {order.payment_method or 'не указана'}.",
         ]
         if self._payment_pending(order):

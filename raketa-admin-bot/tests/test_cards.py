@@ -5,7 +5,8 @@
 по нажатию которых робот поймёт, что именно выбрали.
 """
 
-from datetime import date, datetime
+from dataclasses import replace
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from adminbot.amo import ids
@@ -296,3 +297,14 @@ def test_order_done_message_tells_a_new_deal_from_an_old_one():
                                        base_url="https://x").lower()
     assert "вы" in order_done_text(make_order(593), by_owner,
                                    base_url="https://x").lower()
+
+
+def test_order_line_prints_moscow_time_not_utc():
+    """В базе бота время лежит в UTC; владельцу нужно московское (задача 2, 16.09)."""
+    utc_order = replace(make_order(),
+                         created_at=datetime(2026, 9, 16, 10, 30, tzinfo=timezone.utc))
+
+    text, _ = question_card(utc_order, None)
+
+    assert "16.09.2026 13:30" in text
+    assert "10:30" not in text

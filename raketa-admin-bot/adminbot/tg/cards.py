@@ -18,6 +18,7 @@ from typing import Any, Optional, Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from adminbot.amo import ids
+from adminbot.amo.fields import as_msk
 from adminbot.phone import for_owner, mask
 from adminbot.sync.backlog import PlannedOrder, money
 
@@ -130,7 +131,7 @@ def _order_line(order: Any) -> str:
         parts.append(order.client_name)
     parts.append(for_owner(order.phone10))
     parts.append(f"чек {money(order.amount_total)} ₽")
-    parts.append(f"заказ {order.created_at:%d.%m.%Y %H:%M}")
+    parts.append(f"заказ {as_msk(order.created_at):%d.%m.%Y %H:%M}")
     return " · ".join(parts)
 
 
