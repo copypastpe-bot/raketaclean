@@ -7768,6 +7768,11 @@ async def set_commands():
         BotCommand(command="cleaning_balance", description="Клининг: баланс"),
         BotCommand(command="cleaning_cash", description="Клининг: касса"),
         BotCommand(command="cleaning_orders", description="Клининг: заказы"),
+        # Решение владельца 16.09: эти три были доступны только тому, кто помнит
+        # их наизусть. Кнопок в админском меню не добавляем, только синее меню.
+        BotCommand(command="cleaning_cancel_order", description="Клининг: отменить заказ"),
+        BotCommand(command="cleaning_dividend", description="Клининг: выплата прибыли"),
+        BotCommand(command="cleaning_dividend_cancel", description="Клининг: отменить выплату"),
     ]
     master_cmds = [
         *default_cmds,
