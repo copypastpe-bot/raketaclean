@@ -147,6 +147,8 @@ bot.py:14524-14528). Тест `tests/test_deleted_orders.py` на живом Pos
 уборок пересекаются — тот же урок, что в `pending_order_reports`
 (миграция `0011` рабочего бота, дефект найден ревью 17.09).
 
+**Выполнено.** Миграция `raketa-admin-bot/migrations/014_order_deletions_seen.sql`, таблица `adminbot.order_deletions_seen` с ключом (`kind`, `order_id`).
+
 ### Задача 4. Админ-бот: источник записей об удалении
 
 Новый модуль (например `adminbot/sync/deletions.py`). Два запроса, оба
@@ -159,6 +161,8 @@ bot.py:14524-14528). Тест `tests/test_deleted_orders.py` на живом Pos
 
 Оба пула смотрят в одну базу (факт 3) — проверь это фактически в своей среде
 до того, как напишешь JOIN между схемами.
+
+**Выполнено.** `fetch_pending_order_deletions` и `fetch_pending_cleaning_deletions` (`adminbot/db.py:1335, 1361`) плюс `adminbot/sync/deletions.py` — оба следа сводятся к одному списку `DeletionRecord`, старые первыми. Факт про одну базу проверен по `docs/deploy.md`: DSN рабочего бота и админ-бота совпадают.
 
 ### Задача 5. Админ-бот: обработчик удаления
 
