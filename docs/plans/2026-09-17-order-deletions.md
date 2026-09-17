@@ -211,6 +211,24 @@ bot.py:14524-14528). Тест `tests/test_deleted_orders.py` на живом Pos
 Для уборок «мёртвая» означает непустой `deleted_at`, для химчистки —
 отсутствие строки заказа.
 
+**Выполнено.** Добавлен `_order_alive_clause` (`adminbot/db.py:388`) — EXISTS
+против `public.orders` для химчистки, против `public.cleaning_orders WHERE
+deleted_at IS NULL` для уборки. Применён в `fetch_taken_lead_ids` (обе ветки
+UNION) и в `fetch_links_needing_address_reminder`. Остальные места, где
+связка читается как «действующая», найдены и разобраны явно, с решением в
+докстринге каждой функции: `fetch_link_ids_by_status`, `fetch_links_for_orders`,
+`count_links_by_status`, `fetch_linked_order_ids` — фильтр не добавлен,
+потому что либо единственные вызовы уже получают список без мёртвых заказов
+выше по цепочке (проверено по коду, не по памяти), либо (у `count_links_by_status`)
+это голая цифра для владельца, а не действие над сделкой. Прочие подсистемы
+(ковры, календарь, автозвонок) работают со своими сделками, а не с
+`public.orders`/`public.cleaning_orders`, поэтому задачи не касаются.
+Тесты на живом Postgres: `test_dead_order_link_does_not_hold_the_lead_taken`
+и `test_dead_order_link_is_not_offered_for_address_reminder`
+(`raketa-admin-bot/tests/test_db_schema.py`) — оба сценария, физически
+удалённый заказ химчистки и уборка с `deleted_at`. Полный прогон
+`raketa-admin-bot`: 879 passed, 9 skipped.
+
 ### Задача 7. Выключатель и runbook
 
 Своя настройка, по умолчанию **выключено** (правило проекта: у каждой функции
