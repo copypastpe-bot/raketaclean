@@ -12,6 +12,7 @@ amoCRM и Telegram — двойники: `FakeAmo` из tests/fakes.py и соб
 список уведомлений вместо `OwnerMail`.
 """
 
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -338,3 +339,56 @@ async def test_one_broken_record_does_not_stop_the_rest(pool):
     amo.fail_on = None
     await handler.run()
     assert await _seen_outcome(pool, "order", 104) == "lead_gone"  # лид 5004 роботу не знаком
+
+
+async def test_concurrent_runs_do_not_double_process_the_same_record(pool):
+    """Ревью 17.09, замечание 1: разбор подключён к ОБОИМ наблюдателям (заказы
+    и уборки), и при рестарте службы оба тика зовут `handler.run()` первым
+    шагом почти одновременно. Без взаимного исключения внутри самого
+    обработчика оба видят одну и ту же неразобранную запись раньше, чем
+    первый успевает поставить отметку, — и примечание с письмом владельцу
+    уходят дважды на одно удаление."""
+    await _seed_link(pool, 106, real_lead_id=5006)
+    amo = FakeAmo()
+    amo.add_lead(5006, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)
+    notify = NotifyLog()
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=False)
+
+    await asyncio.gather(handler.run(), handler.run())
+
+    # фикстура сама по себе несёт ещё восемь неразобранных записей без связок
+    # (ветка 1 — молчим), поэтому сравниваем не общий счётчик, а действия
+    # именно по записи №106.
+    assert amo.calls_of("move_lead") == [(5006, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CONFIRMED)]
+    assert len(amo.calls_of("add_note")) == 1
+    assert len([o for o in notify.outcomes if o.record.order_id == 106]) == 1
+    assert await _seen_outcome(pool, "order", 106) == "reopened"
+
+
+async def test_orphan_holder_without_registry_entry_is_not_treated_as_live(pool):
+    """Ревью 17.09, замечание 2: `_OTHER_LIVE_HOLDER_SQL` считал заказ химчистки
+    живым, если его НЕТ в регистре `public.deleted_orders` — а не если ЕСТЬ
+    строка в `public.orders`. Заказ №108 — сирота: удалён без следа (до выката
+    этой ветки, или мимо обработчика), ни в `orders`, ни в `deleted_orders` его
+    нет. По старому определению он «жив» и держит сделку №5007 — она навсегда
+    осталась бы закрытой. По верному определению (есть строка в `orders`) он
+    мёртв, и сделку по удалённому заказу №107 нужно вернуть на этап."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO public.deleted_orders (order_id, phone_digits, deleted_at) "
+            "VALUES (107, '79601861067', $1)",
+            NOW,
+        )
+    await _seed_link(pool, 107, real_lead_id=5007)
+    await _seed_link(pool, 108, real_lead_id=5007)      # сирота: нет ни в orders, ни в deleted_orders
+    amo = FakeAmo()
+    amo.add_lead(5007, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)
+    notify = NotifyLog()
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=False)
+
+    await handler.run()
+
+    assert await _seen_outcome(pool, "order", 107) == "reopened"
+    assert amo.calls_of("move_lead") == [(5007, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CONFIRMED)]
+    outcome = next(o for o in notify.outcomes if o.record.order_id == 107)
+    assert outcome.outcome == "reopened"
