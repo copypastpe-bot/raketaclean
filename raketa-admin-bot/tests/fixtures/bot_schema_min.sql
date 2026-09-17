@@ -5,6 +5,7 @@
 DROP TABLE IF EXISTS public.cleaning_order_payments;
 DROP TABLE IF EXISTS public.cleaning_orders;
 DROP TABLE IF EXISTS public.cleaning_foremen;
+DROP TABLE IF EXISTS public.deleted_orders;
 DROP TABLE IF EXISTS public.order_masters;
 DROP TABLE IF EXISTS public.orders;
 DROP TABLE IF EXISTS public.clients;
@@ -50,6 +51,19 @@ CREATE TABLE public.order_masters (
     master_id       bigint NOT NULL,
     share_fraction  numeric(10,4) NOT NULL DEFAULT 1.0,
     created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+-- Регистр удалённых заказов химчистки (ТЗ 2026-09-17 «удаление заказа
+-- освобождает сделку», задача 1 рабочего бота — миграция app/migrations/0012).
+-- Копия схемы для тестов админ-бота: своей миграции этой таблицы у него нет,
+-- он её только читает (задача 4 того же ТЗ).
+CREATE TABLE public.deleted_orders (
+    order_id      bigint PRIMARY KEY,
+    phone_digits  text,
+    client_id     bigint,
+    amount_total  numeric(12,2),
+    deleted_at    timestamptz NOT NULL DEFAULT now(),
+    deleted_by    bigint
 );
 
 -- Клининг-контур рабочего бота (с 2026-05-21): уборки живут в СВОИХ таблицах,
