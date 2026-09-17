@@ -15,10 +15,19 @@
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Optional
+
 import asyncpg
 
 from adminbot import db
-from adminbot.models import DeletionRecord
+from adminbot.amo import ids
+from adminbot.amo.fields import as_msk
+from adminbot.models import AmoLink, DeletionRecord
+from adminbot.sync.store import PgCleaningLinkStore, PgLinkStore
+
+log = logging.getLogger(__name__)
 
 
 async def fetch_pending_deletions(own_pool: asyncpg.Pool) -> list[DeletionRecord]:
@@ -31,3 +40,245 @@ async def fetch_pending_deletions(own_pool: asyncpg.Pool) -> list[DeletionRecord
     orders = await db.fetch_pending_order_deletions(own_pool)
     cleanings = await db.fetch_pending_cleaning_deletions(own_pool)
     return sorted(orders + cleanings, key=lambda r: (r.deleted_at, r.kind, r.order_id))
+
+
+# --- обработчик (задача 5): что делать с каждой неразобранной записью ---
+#
+# Пять веток разбора (решения владельца 1, 3, 5-7 из ТЗ 2026-09-17), строго
+# в этом порядке:
+#   1. связки нет                                  → отметить, молчим (решение 7)
+#   2. сделка занята связкой ДРУГОГО живого заказа  → статус не трогать, примечание,
+#      сообщить (решение 5) — это и делает разбор безопасным при любом порядке
+#      событий: гонку «удаление разобрали позже, чем новый заказ уже перехватил
+#      сделку» закрывает именно эта ветка, а не порядок вызова.
+#   3. сделки в CRM больше нет (ответ без id)       → пометить связку, сообщить
+#      (решение 3)
+#   4. сделка открыта (статус не финальный)         → статус не трогать, примечание,
+#      сообщить (решение 6)
+#   5. сделка закрыта                               → вернуть на «Заказ подтвержден,
+#      Мастер назначен», примечание, сообщить
+#
+# Отдельный, прямо в ТЗ не описанный случай: связка есть, но ни одной сделки ей
+# ещё не назначено (`real_lead_id` и `primary_lead_id` оба пусты — робот успел
+# завести строку связки, но до похода в CRM не дошёл: статус `new`, либо застрял
+# на `waiting_owner`/`error` до выбора сделки). Трогать в CRM нечего, поэтому по
+# духу решения 7 робот молчит; связку, в отличие от ветки 1, всё же помечаем
+# отменённой — она принадлежит удалённому заказу и не должна вечно считаться
+# «активной» (см. `fetch_taken_lead_ids`, задача 6).
+
+# Пометка связки после разбора (кроме ветки 1, где связки нет вовсе): статус
+# `cancelled`, а не удаление строки (решение 1 — «через год опять упрёмся в то,
+# что сейчас обходим»), и заглушить напоминание про адрес — иначе оно всплывёт
+# по мёртвой связке.
+_CANCEL_FIELDS = {"status": "cancelled", "address_reminder_muted": True}
+
+
+@dataclass(frozen=True)
+class DeletionOutcome:
+    """Что стало со сделкой после разбора одной записи — сырьё для письма
+    владельцу. Само письмо собирает `main.py` (текст — дело представления;
+    этот модуль — про решения и запись, как `sync/address_reminder.py`, который
+    тоже не строит карточку сам, а зовёт `on_reminder`)."""
+
+    record: DeletionRecord
+    link: AmoLink
+    outcome: str                              # held_by_other | lead_gone | left_open | reopened
+    lead_id: Optional[int] = None
+    other_kind: Optional[str] = None
+    other_order_id: Optional[int] = None
+
+
+# Кто ищет сделку, занятую другой, живой связкой (ветка 2). Один запрос сразу
+# по обеим таблицам связок — «живой» заказ проверяется тут же, JOIN'ом в
+# `public` (факт 3 ТЗ: обе схемы в одной базе, роль `adminbot` читает `public`).
+_OTHER_LIVE_HOLDER_SQL = """
+    SELECT 'order' AS kind, o.order_id
+    FROM adminbot.amo_links o
+    WHERE (o.real_lead_id = $1 OR o.primary_lead_id = $1)
+      AND NOT ($3 = 'order' AND o.order_id = $2)
+      AND NOT EXISTS (SELECT 1 FROM public.deleted_orders d WHERE d.order_id = o.order_id)
+    UNION ALL
+    SELECT 'cleaning' AS kind, c.order_id
+    FROM adminbot.cleaning_links c
+    WHERE (c.real_lead_id = $1 OR c.primary_lead_id = $1)
+      AND NOT ($3 = 'cleaning' AND c.order_id = $2)
+      AND EXISTS (
+          SELECT 1 FROM public.cleaning_orders co
+          WHERE co.id = c.order_id AND co.deleted_at IS NULL
+      )
+    LIMIT 1
+"""
+
+
+def _label(kind: str) -> str:
+    return "Уборка" if kind == "cleaning" else "Заказ"
+
+
+def _note_text(record: DeletionRecord, outcome: str, *,
+               other_kind: Optional[str] = None, other_order_id: Optional[int] = None) -> str:
+    """Примечание в сделку амо (решение 2: бюджет и поля не трогаем — они
+    перезапишутся при повторном проведении)."""
+    when = as_msk(record.deleted_at).strftime("%d.%m.%Y %H:%M")
+    head = f"🤖 {_label(record.kind)} №{record.order_id} удалён из бота {when} по Москве."
+    if outcome == "held_by_other":
+        other_label = "уборкой" if other_kind == "cleaning" else "заказом"
+        return f"{head} Сделка осталась закреплена за {other_label} №{other_order_id} — этап не меняю."
+    if outcome == "left_open":
+        return f"{head} Сделка сейчас открыта — этап не меняю, разберитесь сами."
+    if outcome == "reopened":
+        return (f"{head} Сделка возвращена на этап «Заказ подтвержден, мастер назначен». "
+                f"Бюджет и поля оставлены как есть — перезапишутся, если заказ проведут заново.")
+    return head
+
+
+class DeletionHandler:
+    """Разбор пачки неразобранных удалений (задача 5).
+
+    Не отдельный цикл: у него нет ни `run_forever`, ни своего `sleep` — только
+    один проход `run()`, который наблюдатель (`sync/watcher.py`) вызывает первым
+    шагом своего тика (решение владельца 4). Собственная бухгалтерия (пометка
+    связки, `adminbot.order_deletions_seen`) всегда идёт в настоящий Postgres,
+    независимо от режима репетиции — как у `AddressReminder` (см. его модуль):
+    иначе отметки жили бы только в пределах одного запуска и разбор шёл бы по
+    кругу. Разницу между репетицией и боем приносит сам `amo` — репетиционный
+    клиент (`rehearsal_amo`) не пишет, боевой (`live_amo`) пишет — какой из них
+    передать сюда, решает `main.py`; обработчику про это знать не нужно.
+    """
+
+    def __init__(
+        self,
+        *,
+        own_pool: asyncpg.Pool,
+        amo: Any,
+        on_notify: Optional[Callable[[DeletionOutcome], Awaitable[Any]]] = None,
+    ) -> None:
+        self.own_pool = own_pool
+        self.amo = amo
+        self.on_notify = on_notify
+
+    async def run(self) -> int:
+        """Разобрать всё неразобранное. Возвращает, сколько записей разобрано.
+
+        Сбой на одной записи (например, амо не ответила) не должен останавливать
+        разбор остальных — запись просто не отмечается и вернётся в список на
+        следующем проходе.
+        """
+        records = await fetch_pending_deletions(self.own_pool)
+        handled = 0
+        for record in records:
+            try:
+                await self._handle(record)
+            except Exception:                          # noqa: BLE001
+                log.exception("%s №%s: разбор удаления не удался",
+                              _label(record.kind), record.order_id)
+                continue
+            handled += 1
+        return handled
+
+    # --- одна запись ---
+
+    async def _handle(self, record: DeletionRecord) -> None:
+        store = self._store(record.kind)
+        link = await store.get(record.order_id)
+
+        if link is None:                                            # ветка 1
+            await self._mark_seen(record, "no_link")
+            return
+
+        lead_id = link.real_lead_id or link.primary_lead_id
+        if lead_id is None:                                          # см. докстринг модуля
+            await store.update(record.order_id, **_CANCEL_FIELDS)
+            await self._mark_seen(record, "no_lead")
+            return
+
+        other = await self._find_other_live_holder(lead_id, record.kind, record.order_id)
+        if other is not None:                                         # ветка 2
+            other_kind, other_order_id = other
+            await self._note(store, record, lead_id,
+                              _note_text(record, "held_by_other",
+                                         other_kind=other_kind, other_order_id=other_order_id))
+            await store.update(record.order_id, **_CANCEL_FIELDS)
+            await self._mark_seen(record, "held_by_other")
+            await self._notify(record, link, "held_by_other", lead_id=lead_id,
+                                other_kind=other_kind, other_order_id=other_order_id)
+            return
+
+        lead = await self.amo.get_lead(lead_id)
+        if lead is None or lead.get("id") is None:                    # ветка 3 (факт 11)
+            await store.update(record.order_id, **_CANCEL_FIELDS)
+            await self._mark_seen(record, "lead_gone")
+            await self._notify(record, link, "lead_gone", lead_id=lead_id)
+            return
+
+        if int(lead.get("status_id") or 0) not in ids.STATUSES_FINAL:  # ветка 4
+            await self._note(store, record, lead_id, _note_text(record, "left_open"))
+            await store.update(record.order_id, **_CANCEL_FIELDS)
+            await self._mark_seen(record, "left_open")
+            await self._notify(record, link, "left_open", lead_id=lead_id)
+            return
+
+        # ветка 5 — сделка закрыта, возвращаем на этап, снова делая её кандидатом
+        await self._write(store, record.order_id, "move_lead", lead_id,
+                           self.amo.move_lead(lead_id, ids.PIPELINE_REALIZATION,
+                                              ids.REAL_STAGE_CONFIRMED))
+        await self._note(store, record, lead_id, _note_text(record, "reopened"))
+        await store.update(record.order_id, **_CANCEL_FIELDS)
+        await self._mark_seen(record, "reopened")
+        await self._notify(record, link, "reopened", lead_id=lead_id)
+
+    # --- внутреннее ---
+
+    def _store(self, kind: str):
+        return PgCleaningLinkStore(self.own_pool) if kind == "cleaning" else PgLinkStore(self.own_pool)
+
+    async def _write(self, store: Any, order_id: int, action: str,
+                      amo_id: Optional[int], coro: Awaitable[Any]) -> Any:
+        """Выполнить действие в амо и записать его в журнал — как это делает
+        движок (`sync/engine.py`, метод `_write`): в репетиции `intent.performed`
+        будет False, а журнал (`amo_actions`/`cleaning_actions`) пишется всё равно."""
+        intent = await coro
+        if intent is not None:
+            await store.log(order_id, action, dry_run=not intent.performed,
+                             entity=intent.entity, amo_id=intent.entity_id or amo_id,
+                             payload=intent.payload)
+        return intent
+
+    async def _note(self, store: Any, record: DeletionRecord, lead_id: int, text: str) -> None:
+        await self._write(store, record.order_id, "add_note", lead_id,
+                           self.amo.add_note(lead_id, text))
+
+    async def _find_other_live_holder(self, lead_id: int, exclude_kind: str,
+                                       exclude_order_id: int) -> Optional[tuple[str, int]]:
+        async with self.own_pool.acquire() as conn:
+            row = await conn.fetchrow(_OTHER_LIVE_HOLDER_SQL, lead_id, exclude_order_id,
+                                       exclude_kind)
+        return None if row is None else (row["kind"], row["order_id"])
+
+    async def _mark_seen(self, record: DeletionRecord, outcome: str) -> None:
+        """Отметка о разборе — своя таблица (`adminbot.order_deletions_seen`,
+        миграция 014): админ-бот не пишет в `public`, поэтому регистр удалений
+        рабочего бота (`public.deleted_orders`) остаётся нетронутым."""
+        async with self.own_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO adminbot.order_deletions_seen (kind, order_id, outcome)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (kind, order_id) DO NOTHING
+                """,
+                record.kind, record.order_id, outcome,
+            )
+
+    async def _notify(self, record: DeletionRecord, link: AmoLink, outcome: str, *,
+                       lead_id: Optional[int] = None, other_kind: Optional[str] = None,
+                       other_order_id: Optional[int] = None) -> None:
+        """Сообщение владельцу не должно ронять разбор — Telegram бывает недоступен,
+        и `OwnerMail` сама превращает неудачу в долг (см. `tg/outbox.py`)."""
+        if self.on_notify is None:
+            return
+        try:
+            await self.on_notify(DeletionOutcome(
+                record=record, link=link, outcome=outcome, lead_id=lead_id,
+                other_kind=other_kind, other_order_id=other_order_id))
+        except Exception:                                  # noqa: BLE001
+            log.exception("%s №%s: сообщение о разборе удаления не ушло",
+                          _label(record.kind), record.order_id)

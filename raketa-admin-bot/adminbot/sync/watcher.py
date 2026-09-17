@@ -5,10 +5,13 @@
 
 Устройство цикла:
 1) выключатель — если функция на паузе, тик не трогает ни базу, ни амо;
-2) источник работы — заказы, до которых робот ещё не добрался или не довёл;
-3) движок — по одному заказу за раз, каждый в своей «песочнице»: сбой одного
+2) разбор удалений (необязательный шаг, ТЗ 2026-09-17, задача 5) — если задан,
+   выполняется ДО выборки заказов: удалённый заказ должен освободить свою
+   сделку раньше, чем робот увидит переоформленный заказ на том же месте;
+3) источник работы — заказы, до которых робот ещё не добрался или не довёл;
+4) движок — по одному заказу за раз, каждый в своей «песочнице»: сбой одного
    не отменяет остальные;
-4) вопрос владельцу — если движок упёрся в неоднозначность, карточка уходит
+5) вопрос владельцу — если движок упёрся в неоднозначность, карточка уходит
    в Telegram РОВНО один раз (признак — записанный id сообщения).
 """
 
@@ -64,6 +67,7 @@ class Watcher:
         poll_interval_sec: int = 60,
         on_question: Optional[Callable[[Order, AmoLink], Awaitable[Optional[int]]]] = None,
         on_done: Optional[Callable[[Order, AmoLink], Awaitable[None]]] = None,
+        handle_deletions: Optional[Callable[[], Awaitable[Any]]] = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
@@ -78,6 +82,13 @@ class Watcher:
         # заказе робот пишет владельцу сразу, со ссылкой на сделку. Отключается
         # снятием обработчика.
         self.on_done = on_done
+        # Разбор удалённых заказов (ТЗ 2026-09-17 «удаление заказа освобождает
+        # сделку», задача 5): необязательный шаг ПЕРЕД выборкой заказов, а не
+        # свой цикл со своим таймером (решение владельца 4). Только так закрывается
+        # гонка «удаление раньше нового заказа»: разбор обязан снять связку до
+        # того, как `source.pending()` увидит переоформленный заказ. Не задан —
+        # `tick()` ведёт себя ровно как раньше (существующие вызовы не меняются).
+        self.handle_deletions = handle_deletions
         self.sleep = sleep
         self.now = now
         # Последний проход — чтобы владелец мог спросить /status и увидеть,
@@ -89,6 +100,9 @@ class Watcher:
         """Один проход: взять заказы и продвинуть каждый настолько, насколько можно."""
         if not await self._enabled():
             return self._remember(TickReport(paused=True))
+
+        if self.handle_deletions is not None:
+            await self._run_deletions()
 
         orders = await self.source.pending()
         statuses: Counter[str] = Counter()
@@ -139,6 +153,13 @@ class Watcher:
         if asyncio.iscoroutine(result):
             result = await result
         return bool(result)
+
+    async def _run_deletions(self) -> None:
+        """Сбой разбора удалений не должен останавливать доводку заказов."""
+        try:
+            await self.handle_deletions()
+        except Exception:                                  # noqa: BLE001
+            log.exception("Разбор удалённых заказов не удался")
 
     async def _report_done(self, order: Order, link: AmoLink) -> None:
         """Сообщение владельцу не должно ронять проход: Telegram бывает недоступен."""
