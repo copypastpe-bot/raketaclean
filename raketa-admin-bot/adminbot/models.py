@@ -178,3 +178,26 @@ class AmoLink:
     address_reminder_muted: bool = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class DeletionRecord:
+    """Удаление, ещё не разобранное: владелец снял заказ в рабочем боте.
+
+    Два разных следа одного события (факт 1, ТЗ 2026-09-17 «удаление заказа
+    освобождает сделку»): заказ химчистки пропадает физически и остаётся только
+    строкой регистра `public.deleted_orders`, уборка остаётся строкой
+    `public.cleaning_orders` с заполненным `deleted_at`. Разбор (задача 5, идёт
+    отдельным этапом) у обоих один и тот же, поэтому источник приводит их
+    к общему виду.
+
+    Ключ разбора — `(kind, order_id)`, тот же, что в
+    `adminbot.order_deletions_seen`: номера заказов и уборок пересекаются.
+    """
+
+    kind: str                              # 'order' | 'cleaning'
+    order_id: int
+    deleted_at: datetime
+    client_id: Optional[int] = None
+    phone_digits: Optional[str] = None     # для уборок в источнике нет — только у заказов химчистки
+    amount_total: Optional[Decimal] = None

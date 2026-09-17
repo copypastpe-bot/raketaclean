@@ -14,7 +14,7 @@ from typing import Any, Optional, Sequence
 import asyncpg
 
 from adminbot.amo import ids
-from adminbot.models import AmoLink, AutocallLead, CalendarLink, CarpetLink, Order
+from adminbot.models import AmoLink, AutocallLead, CalendarLink, CarpetLink, DeletionRecord, Order
 from adminbot.phone import last10
 
 # Колонки adminbot.amo_links, которые разрешено менять через update_link.
@@ -1319,3 +1319,65 @@ async def save_autocall_cursor(own_pool: asyncpg.Pool, created_from: datetime) -
             """,
             created_from,
         )
+
+
+# --- удаления заказов и уборок (ТЗ 2026-09-17 «удаление заказа освобождает
+# сделку», задача 4: источник неразобранных удалений) ---
+#
+# `public.deleted_orders` (регистр рабочего бота) и `adminbot.order_deletions_seen`
+# (свои отметки) живут в ОДНОЙ базе Postgres под одной ролью `adminbot`:
+# `BOT_DB_DSN` и `ADMINBOT_DB_DSN` по умолчанию совпадают (config.py, факт 3
+# того же ТЗ), и в тестовой базе оба запроса ниже проходят под одной ролью
+# (tests/test_deletions_source.py). Поэтому разница считается одним запросом
+# на стороне Postgres (LEFT JOIN ... WHERE seen.order_id IS NULL), а не
+# выгрузкой обеих таблиц в Python, как для fetch_unprocessed_orders выше.
+
+async def fetch_pending_order_deletions(own_pool: asyncpg.Pool) -> list[DeletionRecord]:
+    """Удалённые заказы химчистки (`public.deleted_orders`), ещё не разобранные."""
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT d.order_id, d.phone_digits, d.client_id, d.amount_total, d.deleted_at
+            FROM public.deleted_orders d
+            LEFT JOIN adminbot.order_deletions_seen s
+                ON s.kind = 'order' AND s.order_id = d.order_id
+            WHERE s.order_id IS NULL
+            ORDER BY d.order_id
+            """
+        )
+    return [
+        DeletionRecord(
+            kind="order",
+            order_id=row["order_id"],
+            deleted_at=row["deleted_at"],
+            client_id=row["client_id"],
+            phone_digits=row["phone_digits"],
+            amount_total=Decimal(row["amount_total"]) if row["amount_total"] is not None else None,
+        )
+        for row in rows
+    ]
+
+
+async def fetch_pending_cleaning_deletions(own_pool: asyncpg.Pool) -> list[DeletionRecord]:
+    """Удалённые (мягко, `deleted_at`) уборки, ещё не разобранные."""
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.id AS order_id, c.client_id, c.total_amount AS amount_total, c.deleted_at
+            FROM public.cleaning_orders c
+            LEFT JOIN adminbot.order_deletions_seen s
+                ON s.kind = 'cleaning' AND s.order_id = c.id
+            WHERE c.deleted_at IS NOT NULL AND s.order_id IS NULL
+            ORDER BY c.id
+            """
+        )
+    return [
+        DeletionRecord(
+            kind="cleaning",
+            order_id=row["order_id"],
+            deleted_at=row["deleted_at"],
+            client_id=row["client_id"],
+            amount_total=Decimal(row["amount_total"]) if row["amount_total"] is not None else None,
+        )
+        for row in rows
+    ]
