@@ -7935,9 +7935,9 @@ async def _enqueue_order_report(
     async with pool_.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO pending_order_reports (order_id, payload)
-            VALUES ($1, $2::jsonb)
-            ON CONFLICT (order_id) DO NOTHING
+            INSERT INTO pending_order_reports (kind, order_id, payload)
+            VALUES ('order', $1, $2::jsonb)
+            ON CONFLICT (kind, order_id) DO NOTHING
             """,
             order_id,
             json.dumps(payload, ensure_ascii=False),
