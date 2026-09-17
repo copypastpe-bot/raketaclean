@@ -41,7 +41,7 @@ changed only the local source path; the server paths are the same as before.
 
 Files longer than 500 lines and their function maps:
 
-- `adminbot/db.py` (1383 lines) -> `adminbot/db.py.map.md`
+- `adminbot/db.py` (1438 lines) -> `adminbot/db.py.map.md`
 
 ## Current Focus
 
