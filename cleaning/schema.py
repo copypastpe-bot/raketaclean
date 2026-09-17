@@ -1,4 +1,4 @@
-"""Idempotent bootstrap of cleaning tables (mirrors 0006_cleaning.sql)."""
+"""Idempotent bootstrap of cleaning tables (mirrors 0006_cleaning.sql, 0010_cleaning_orders_comment.sql)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ async def ensure_cleaning_schema(conn: asyncpg.Connection) -> None:
             id             serial PRIMARY KEY,
             client_id      integer NOT NULL REFERENCES clients(id),
             foreman_id     integer NOT NULL REFERENCES cleaning_foremen(id),
-            address        text NOT NULL,
+            address        text,
+            comment        text,
             total_amount   numeric(12,2) NOT NULL,
             bonuses_used   numeric(12,2) NOT NULL DEFAULT 0,
             bonuses_earned numeric(12,2) NOT NULL DEFAULT 0,
