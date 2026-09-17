@@ -11,11 +11,17 @@
 """
 
 import json
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest import mock
 
+import asyncpg
+
 import bot
+
+TEST_DB_DSN = os.environ.get("TEST_DB_DSN")
 
 ORDERS_CHAT = -100111
 MONEY_CHAT = -100222
@@ -352,6 +358,75 @@ class RunPendingOrderReportsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self._chats_sent_to().count(ORDERS_CHAT), 1)
         self.assertEqual(self._chats_sent_to().count(MONEY_CHAT), 0)
+
+
+@unittest.skipUnless(TEST_DB_DSN, "TEST_DB_DSN не задан — нужен настоящий Postgres")
+class EnqueueOrderReportRealSchemaTests(unittest.IsolatedAsyncioTestCase):
+    """Ревью 2026-09-17, замечание 2: `FakeConn.execute()` выше отвечает "готово"
+    на любой SQL и не могла бы поймать замечание 1 — INSERT с `ON CONFLICT
+    (order_id)`, тогда как после миграции 0011 первичный ключ таблицы составной,
+    `(kind, order_id)` (см. `bot.ensure_pending_order_reports_schema`, которую
+    бот реально выполняет при старте, bot.py:15156). Здесь — настоящий Postgres,
+    как в raketa-admin-bot/tests/test_db_schema.py: DSN в TEST_DB_DSN, без него
+    тесты пропускаются. Пример временной базы (тот же сервер, что для
+    adminbot_test):
+        createdb -h 127.0.0.1 -p 5432 -U postgres raketaclean_test
+        export TEST_DB_DSN=postgresql://postgres@127.0.0.1:5432/raketaclean_test
+    """
+
+    async def asyncSetUp(self):
+        self.pool = await asyncpg.create_pool(dsn=TEST_DB_DSN, min_size=1, max_size=2)
+        async with self.pool.acquire() as conn:
+            await conn.execute("DROP TABLE IF EXISTS pending_order_reports")
+            await bot.ensure_pending_order_reports_schema(conn)
+
+    async def asyncTearDown(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DROP TABLE IF EXISTS pending_order_reports")
+        await self.pool.close()
+
+    async def _enqueue(self, order_id: int) -> None:
+        await bot._enqueue_order_report(
+            self.pool,
+            order_id=order_id,
+            client_display_masked="Иван …0001",
+            client_phone="79161234567",
+            birthday_display="—",
+            payment_parts=[{"method": "Наличные", "amount": "1000"}],
+            payment_method="Наличные",
+            cash_payment=Decimal("1000"),
+            amount_total=Decimal("1000"),
+            bonus_spent=0,
+            bonus_earned=50,
+            upsell=Decimal("0"),
+            master_names="Ольга",
+            is_wire_payment=False,
+            has_non_wire_income=True,
+            total_non_wire_amount=Decimal("1000"),
+        )
+
+    async def test_insert_matches_real_composite_primary_key(self):
+        # На сломанном запросе (`ON CONFLICT (order_id)`) Postgres валит этот
+        # вызов исключением ещё до всякого конфликта: такого ограничения у
+        # таблицы больше нет с миграции 0011 — именно это и есть замечание 1.
+        await self._enqueue(90001)
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT kind, order_id, sent_at FROM pending_order_reports")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["kind"], "order")
+        self.assertEqual(rows[0]["order_id"], 90001)
+        self.assertIsNone(rows[0]["sent_at"])
+
+    async def test_insert_is_idempotent_by_kind_and_order_id(self):
+        await self._enqueue(90002)
+        await self._enqueue(90002)  # повторная постановка того же заказа
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT kind, order_id FROM pending_order_reports WHERE order_id=$1", 90002
+            )
+        self.assertEqual(len(rows), 1)  # ON CONFLICT (kind, order_id) DO NOTHING — без дубля
 
 
 if __name__ == "__main__":
