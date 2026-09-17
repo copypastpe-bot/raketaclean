@@ -385,7 +385,17 @@ async def fetch_actions(own_pool: asyncpg.Pool, order_id: int,
 # «Жив» — по-разному для двух видов работы (факт 1 ТЗ 17.09): химчистка удаляется
 # физически (строки в `public.orders` не остаётся), уборка помечается
 # `deleted_at`. Обе схемы — одна база (факт 3), кросс-схемный EXISTS допустим.
-def _order_alive_clause(table: str) -> str:
+#
+# Единственное определение на весь проект (ревью 17.09, замечание 2): раньше
+# `sync/deletions.py` отвечал на тот же вопрос иначе — «заказа нет в регистре
+# `public.deleted_orders`» вместо «нет строки в `public.orders`». Расходятся
+# они на сироте без записи в регистре (удаление до этой ветки, мимо
+# обработчика, правка базы руками) — тогда старое определение считало
+# призрачный заказ живым. Регистр удалений отвечает на другой вопрос («о чём
+# нам сообщили»), а не «жив ли заказ», поэтому обе проверки идут через эту
+# функцию — `fetch_taken_lead_ids`/`fetch_links_needing_address_reminder` здесь
+# и `sync/deletions.py:_OTHER_LIVE_HOLDER_SQL` там.
+def order_alive_clause(table: str) -> str:
     if table == CLEANING_LINKS_TABLE:
         return ("EXISTS (SELECT 1 FROM public.cleaning_orders co "
                 "WHERE co.id = order_id AND co.deleted_at IS NULL)")
@@ -405,7 +415,7 @@ async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
     уборка брать не должна, и наоборот. Номер работы исключается только в своей
     таблице: в чужой такой же номер — совсем другая работа.
 
-    Связка удалённого заказа сделку не держит (задача 6, `_order_alive_clause`):
+    Связка удалённого заказа сделку не держит (задача 6, `order_alive_clause`):
     иначе повторное проведение того же клиента находило бы сделку «занятой»
     призраком и заводило бы в CRM дубль вместо того, чтобы подхватить старую.
     """
@@ -415,11 +425,11 @@ async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
             f"""
             SELECT primary_lead_id, real_lead_id
             FROM {table}
-            WHERE phone10 = $1 AND order_id <> $2 AND {_order_alive_clause(table)}
+            WHERE phone10 = $1 AND order_id <> $2 AND {order_alive_clause(table)}
             UNION
             SELECT primary_lead_id, real_lead_id
             FROM {other}
-            WHERE phone10 = $1 AND {_order_alive_clause(other)}
+            WHERE phone10 = $1 AND {order_alive_clause(other)}
             """,
             phone10, exclude_order_id,
         )
@@ -500,7 +510,7 @@ async def fetch_links_needing_address_reminder(
     «Не напоминать», и собственное молчание робота после седьмого напоминания —
     оба случая выставляют один и тот же флаг (ТЗ 2026-09-16, задача 7).
 
-    Мёртвая связка не напоминает (задача 6, `_order_alive_clause`): удалённый
+    Мёртвая связка не напоминает (задача 6, `order_alive_clause`): удалённый
     заказ адреса уже не получит никогда, и карточка владельцу была бы про
     работу, которой нет.
     """
@@ -513,7 +523,7 @@ async def fetch_links_needing_address_reminder(
               AND address_reminder_count < $1
               AND (address_reminder_sent_at IS NULL
                    OR address_reminder_sent_at <= now() - interval '1 day')
-              AND {_order_alive_clause(table)}
+              AND {order_alive_clause(table)}
             ORDER BY updated_at
             LIMIT $2
             """,

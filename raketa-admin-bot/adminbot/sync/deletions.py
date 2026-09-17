@@ -92,21 +92,25 @@ class DeletionOutcome:
 # Кто ищет сделку, занятую другой, живой связкой (ветка 2). Один запрос сразу
 # по обеим таблицам связок — «живой» заказ проверяется тут же, JOIN'ом в
 # `public` (факт 3 ТЗ: обе схемы в одной базе, роль `adminbot` читает `public`).
-_OTHER_LIVE_HOLDER_SQL = """
+#
+# «Жив» — через `db.order_alive_clause`, ОДНО определение на весь проект
+# (ревью 17.09, замечание 2). Раньше здесь для химчистки стояла отдельная
+# проверка «нет строки в `public.deleted_orders`» — расходилась с той, что
+# использует страховка от сирот (задача 6, `db.py`), и на сироте без записи в
+# регистре (заказ удалён до этой ветки или мимо обработчика, регистр молчит)
+# считала призрачный заказ живым: сделка навсегда осталась бы закрытой.
+_OTHER_LIVE_HOLDER_SQL = f"""
     SELECT 'order' AS kind, o.order_id
     FROM adminbot.amo_links o
     WHERE (o.real_lead_id = $1 OR o.primary_lead_id = $1)
       AND NOT ($3 = 'order' AND o.order_id = $2)
-      AND NOT EXISTS (SELECT 1 FROM public.deleted_orders d WHERE d.order_id = o.order_id)
+      AND {db.order_alive_clause(db.LINKS_TABLE)}
     UNION ALL
     SELECT 'cleaning' AS kind, c.order_id
     FROM adminbot.cleaning_links c
     WHERE (c.real_lead_id = $1 OR c.primary_lead_id = $1)
       AND NOT ($3 = 'cleaning' AND c.order_id = $2)
-      AND EXISTS (
-          SELECT 1 FROM public.cleaning_orders co
-          WHERE co.id = c.order_id AND co.deleted_at IS NULL
-      )
+      AND {db.order_alive_clause(db.CLEANING_LINKS_TABLE)}
     LIMIT 1
 """
 
