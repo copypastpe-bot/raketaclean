@@ -66,7 +66,7 @@ ALTER TABLE cleaning_orders ADD COLUMN IF NOT EXISTS comment text;
 **Проверка:** уборка проводится без единого вопроса про адрес; в базе `address` пуст,
 `comment` содержит введённое или NULL.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 
@@ -77,7 +77,7 @@ ALTER TABLE cleaning_orders ADD COLUMN IF NOT EXISTS comment text;
 
 Пустой комментарий строку не добавляет: лишних пустых строк в сообщении быть не должно.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 
