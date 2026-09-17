@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -50,7 +51,6 @@ from .format import (
     format_dividend_cancel_alert,
     format_dividend_payout_alert,
     format_dividend_payout_confirm,
-    format_order_provided_alert,
     format_orders_list,
 )
 
@@ -554,10 +554,57 @@ async def _show_confirm(msg: Message, state: FSMContext) -> None:
     await msg.answer("\n".join(lines), reply_markup=_confirm_kb())
 
 
+async def _enqueue_cleaning_order_report(
+    conn: asyncpg.Connection,
+    *,
+    order_id: int,
+    foreman_name: str,
+    client_phone: str,
+    client_name: str,
+    comment: str | None,
+    total_amount: Decimal,
+    payments: list[dict],
+    expenses: list[dict],
+    bonuses_used: Decimal,
+    bonuses_earned: Decimal,
+    profit: Decimal,
+    balance_after: Decimal,
+) -> None:
+    """Кладёт проведённую уборку в очередь `pending_order_reports`
+    (`kind='cleaning'`). Сообщение в кассу клининга уйдёт из
+    `run_pending_order_reports` (bot.py), когда у уборки появится связка в
+    `adminbot.cleaning_links` — с адресом или без него, — либо по
+    предохранителю в 30 минут. Номера уборок и заказов пересекаются, поэтому
+    контур в очереди различает явный признак `kind`, а не догадка по
+    `order_id` (задача 3 ТЗ «адреса в клининге», 2026-09-17)."""
+    payload = {
+        "order_id": order_id,
+        "foreman_name": foreman_name,
+        "client_phone": client_phone,
+        "client_name": client_name,
+        "comment": comment,
+        "total_amount": str(total_amount),
+        "payments": payments,
+        "expenses": expenses,
+        "bonuses_used": str(bonuses_used),
+        "bonuses_earned": str(bonuses_earned),
+        "profit": str(profit),
+        "balance_after": str(balance_after),
+    }
+    await conn.execute(
+        """
+        INSERT INTO pending_order_reports (kind, order_id, payload)
+        VALUES ('cleaning', $1, $2::jsonb)
+        ON CONFLICT (kind, order_id) DO NOTHING
+        """,
+        order_id,
+        json.dumps(payload, ensure_ascii=False),
+    )
+
+
 @router.message(CleaningOrderFSM.confirm, F.text == "Провести")
 async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
     pool: asyncpg.Pool = kw["pool"]
-    bot = kw["bot"]
     notification_rules: NotificationRules | None = kw.get("notification_rules")
     data = await state.get_data()
     foreman_tg = msg.from_user.id
@@ -719,24 +766,32 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
             )
             profit = income_sum - expense_sum
 
-    # после COMMIT — оповещение в чат
-    foreman_name = (foreman["fn"] or "") + (" " + foreman["ln"] if foreman["ln"] else "")
-    text = format_order_provided_alert(
-        order_id=order_id,
-        foreman_name=foreman_name.strip() or "Бригадир",
-        client_phone=data["phone_norm"],
-        client_name=client_row["full_name"] or data.get("client_name") or "Клиент",
-        address=data.get("address"),
-        comment=comment,
-        total_amount=total,
-        payments=[(p["method"], Decimal(p["amount"])) for p in payments],
-        expenses=[(e["category"], Decimal(e["amount"])) for e in expenses],
-        bonuses_used=Decimal(bonus_spend),
-        bonuses_earned=Decimal(bonus_earned),
-        profit=profit,
-        balance_after=balance_after,
-    )
-    await send_cleaning_money_flow(bot, text)
+        # Сообщение в кассу клининга не уходит отсюда напрямую: оно ставится
+        # в очередь и уходит из run_pending_order_reports (bot.py), когда у
+        # уборки появится связка в adminbot.cleaning_links — с адресом или
+        # без него, — либо по предохранителю в 30 минут (задача 3 ТЗ «адреса
+        # в клининге», 2026-09-17). Деньги в кассу клининга уже записаны выше
+        # и ничего не ждут.
+        foreman_name = (foreman["fn"] or "") + (" " + foreman["ln"] if foreman["ln"] else "")
+        try:
+            await _enqueue_cleaning_order_report(
+                conn,
+                order_id=order_id,
+                foreman_name=foreman_name.strip() or "Бригадир",
+                client_phone=data["phone_norm"],
+                client_name=client_row["full_name"] or data.get("client_name") or "Клиент",
+                comment=comment,
+                total_amount=total,
+                payments=payments,
+                expenses=expenses,
+                bonuses_used=Decimal(bonus_spend),
+                bonuses_earned=Decimal(bonus_earned),
+                profit=profit,
+                balance_after=balance_after,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("cleaning order report enqueue failed for order_id=%s: %s", order_id, e)
+
     await msg.answer(
         f"Заказ #{order_id} проведён. Касса клининга: {_money_str(balance_after)}₽.",
         reply_markup=cleaning_main_kb(),
