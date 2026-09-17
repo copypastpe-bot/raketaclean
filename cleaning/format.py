@@ -19,7 +19,7 @@ def format_order_provided_alert(
     foreman_name: str,
     client_phone: str,
     client_name: str,
-    address: str,
+    address: str | None,
     total_amount: Decimal,
     payments: list[tuple[str, Decimal]],
     expenses: list[tuple[str, Decimal]],
@@ -35,8 +35,9 @@ def format_order_provided_alert(
         f"✅ Уборка проведена #{order_id}",
         f"Бригадир: {foreman_name}",
         f"Клиент: {client_phone} ({client_name})",
-        f"Адрес: {address}",
     ]
+    if address:
+        lines.append(f"Адрес: {address}")
     if comment:
         lines.append(f"Комментарий: {comment}")
     lines += [
@@ -133,8 +134,9 @@ def format_orders_list(*, label: str, orders: list[dict]) -> str:
         time_str = o["happened_at"].strftime("%d.%m %H:%M")
         client = o["client_name"] or "Клиент"
         pay = o["pay_summary"] or "—"
+        address_part = f" — {o['address']}" if o.get("address") else ""
         lines.append(
-            f"#{o['id']} {time_str} {client} — {o['address']} — "
+            f"#{o['id']} {time_str} {client}{address_part} — "
             f"{_money(o['total_amount'])}₽ ({pay})"
         )
         total += o["total_amount"]
@@ -145,21 +147,21 @@ def format_orders_list(*, label: str, orders: list[dict]) -> str:
 def format_cancel_order_alert(
     *,
     order_id: int,
-    address: str,
+    address: str | None,
     total_amount: Decimal,
     bonuses_used: int,
     bonuses_earned: int,
     cashbook_rows_deleted: int,
     balance_after: Decimal,
 ) -> str:
-    return "\n".join(
-        [
-            f"↩️ Отменён заказ уборки #{order_id}",
-            f"Адрес: {address}",
-            f"Сумма чека была: {_money(total_amount)}₽",
-            f"Откатано строк кассы: {cashbook_rows_deleted}",
-            f"Возвращено бонусов клиенту: {bonuses_used}",
-            f"Снято начисленных бонусов: {bonuses_earned}",
-            f"Касса клининга: {_money(balance_after)}₽",
-        ]
-    )
+    lines = [f"↩️ Отменён заказ уборки #{order_id}"]
+    if address:
+        lines.append(f"Адрес: {address}")
+    lines += [
+        f"Сумма чека была: {_money(total_amount)}₽",
+        f"Откатано строк кассы: {cashbook_rows_deleted}",
+        f"Возвращено бонусов клиенту: {bonuses_used}",
+        f"Снято начисленных бонусов: {bonuses_earned}",
+        f"Касса клининга: {_money(balance_after)}₽",
+    ]
+    return "\n".join(lines)
