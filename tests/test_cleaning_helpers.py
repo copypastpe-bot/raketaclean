@@ -19,7 +19,9 @@ from cleaning.orders import (
     validate_payment_parts,
 )
 from cleaning.format import (
+    format_cancel_order_alert,
     format_order_provided_alert,
+    format_orders_list,
 )
 
 
@@ -144,6 +146,78 @@ class AlertFormatterTests(unittest.TestCase):
         # Пустой комментарий (None) — лишней строки в сообщении быть не должно.
         text = format_order_provided_alert(**self._base_alert_kwargs(comment=None))
         self.assertNotIn("Комментарий", text)
+
+    def test_order_alert_without_address_adds_no_line(self):
+        # Задача 5 ТЗ «адреса в клининге» (2026-09-17): адрес больше не
+        # собирают у бригадира — на проведении он пуст, и строка «Адрес»
+        # не должна появляться (и тем более «None»).
+        text = format_order_provided_alert(**self._base_alert_kwargs(address=None))
+        self.assertNotIn("Адрес", text)
+        self.assertNotIn("None", text)
+
+    def test_cancel_order_alert_without_address_adds_no_line(self):
+        text = format_cancel_order_alert(
+            order_id=42,
+            address=None,
+            total_amount=D("12000"),
+            bonuses_used=0,
+            bonuses_earned=600,
+            cashbook_rows_deleted=2,
+            balance_after=D("87540"),
+        )
+        self.assertNotIn("Адрес", text)
+        self.assertNotIn("None", text)
+        self.assertIn("Отменён заказ уборки #42", text)
+
+    def test_cancel_order_alert_with_address_keeps_line(self):
+        text = format_cancel_order_alert(
+            order_id=42,
+            address="ул. Ленина 10",
+            total_amount=D("12000"),
+            bonuses_used=0,
+            bonuses_earned=600,
+            cashbook_rows_deleted=2,
+            balance_after=D("87540"),
+        )
+        self.assertIn("Адрес: ул. Ленина 10", text)
+
+    def test_orders_list_without_address_has_no_none(self):
+        import datetime as _dt
+
+        text = format_orders_list(
+            label="день",
+            orders=[
+                {
+                    "id": 5,
+                    "happened_at": _dt.datetime(2026, 9, 17, 10, 0),
+                    "client_name": "Иван",
+                    "address": None,
+                    "total_amount": D("3500"),
+                    "pay_summary": "Наличные 3500",
+                }
+            ],
+        )
+        self.assertNotIn("None", text)
+        self.assertIn("#5", text)
+        self.assertIn("Иван", text)
+
+    def test_orders_list_with_address_keeps_it(self):
+        import datetime as _dt
+
+        text = format_orders_list(
+            label="день",
+            orders=[
+                {
+                    "id": 5,
+                    "happened_at": _dt.datetime(2026, 9, 17, 10, 0),
+                    "client_name": "Иван",
+                    "address": "Мира, 10",
+                    "total_amount": D("3500"),
+                    "pay_summary": "Наличные 3500",
+                }
+            ],
+        )
+        self.assertIn("Мира, 10", text)
 
 
 class ConstantsContractTests(unittest.TestCase):
