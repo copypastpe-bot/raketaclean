@@ -139,6 +139,7 @@ Files longer than 500 lines and their function maps:
 
 - `bot.py` (15004 lines) -> `bot.py.map.md`
 - `raketa-admin-bot/adminbot/db.py` (1200 lines) -> `raketa-admin-bot/adminbot/db.py.map.md`
+- `cleaning/handlers.py` (1487 lines) -> `cleaning/handlers.py.map.md`
 
 ## Deploy Rules
 
