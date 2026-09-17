@@ -7,6 +7,8 @@
 #   sudo raketa-admin-bot-update --rehearsal   репетиция: решать, но не писать
 #   sudo raketa-admin-bot-update --backlog-from=2026-08-14   с какой даты разбирать заказы
 #   sudo raketa-admin-bot-update --report      что робот записал (ничего не меняет)
+#   sudo raketa-admin-bot-update --address-reminder-on|--address-reminder-off
+#                                             напоминания «сделка без адреса»
 #   sudo raketa-admin-bot-update --carpets-on --carpets-rehearsal   ковры: репетиция
 #   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
 #   sudo raketa-admin-bot-update --carpets-held                     ковры: какие письма отложены и почему
@@ -51,6 +53,7 @@ CARPETS_REMEMBER=""
 CARPETS_REMEMBER_SET=""
 CARPETS_REMEMBER_LIVE=""
 CLEANING=""
+ADDRESS_REMINDER=""
 CLEANING_DRY=""
 CLEANING_FROM=""
 GCAL=""
@@ -93,6 +96,8 @@ for arg in "$@"; do
         --carpets-remember=*) CARPETS_REMEMBER="${arg#*=}"; CARPETS_REMEMBER_SET=1 ;;
         --carpets-remember-live) CARPETS_REMEMBER_LIVE=1 ;;
         --cleaning-on)        CLEANING=1 ;;
+        --address-reminder-on)  ADDRESS_REMINDER=1 ;;
+        --address-reminder-off) ADDRESS_REMINDER=0 ;;
         --cleaning-off)       CLEANING=0 ;;
         --cleaning-live)      CLEANING_DRY=0 ;;
         --cleaning-rehearsal) CLEANING_DRY=1 ;;
@@ -271,6 +276,7 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$CARPETS" ] && set_flag CARPETS_ENABLED "$CARPETS"
 [ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
 [ -n "$CLEANING" ] && set_flag CLEANING_SYNC_ENABLED "$CLEANING"
+[ -n "$ADDRESS_REMINDER" ] && set_flag ADDRESS_REMINDER_ENABLED "$ADDRESS_REMINDER"
 [ -n "$CLEANING_DRY" ] && set_flag CLEANING_SYNC_DRY_RUN "$CLEANING_DRY"
 [ -n "$CLEANING_FROM" ] && set_flag CLEANING_BACKLOG_FROM "$CLEANING_FROM"
 [ -n "$TELEGRAM_PROXY_SET" ] && set_flag TELEGRAM_PROXY_URL "$TELEGRAM_PROXY"
