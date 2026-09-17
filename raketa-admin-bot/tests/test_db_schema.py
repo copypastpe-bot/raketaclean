@@ -206,6 +206,21 @@ async def test_address_reminder_candidates(pool):
     assert [link.order_id for link in cleaning_due] == [5]
 
 
+async def test_dead_order_link_is_not_offered_for_address_reminder(pool):
+    """Задача 6 (ТЗ 2026-09-17): сироте адрес напоминать некому и незачем."""
+    await db.create_link(pool, order_id=9999, phone10="9601861067")
+    await db.update_link(pool, 9999, status="done", path="C", real_lead_id=41500001)
+    assert await db.fetch_links_needing_address_reminder(pool) == []
+
+    # уборка №7 в фикстуре уже удалена (deleted_at)
+    await db.create_link(pool, order_id=7, phone10="9159496642",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 7, table=db.CLEANING_LINKS_TABLE,
+                         status="done", path="C", real_lead_id=41500002)
+    assert await db.fetch_links_needing_address_reminder(
+        pool, table=db.CLEANING_LINKS_TABLE) == []
+
+
 async def test_actions_journal(pool):
     await db.create_link(pool, order_id=596, phone10="9601861067")
     await db.log_action(
@@ -771,6 +786,28 @@ async def test_a_lead_taken_by_one_stream_is_not_reused_by_the_other(pool):
                                          table=db.CLEANING_LINKS_TABLE) == {31500001}
     # ...и наоборот
     assert await db.fetch_taken_lead_ids(pool, "9601861067", 597) == {31500002}
+
+
+async def test_dead_order_link_does_not_hold_the_lead_taken(pool):
+    """Задача 6 (ТЗ 2026-09-17): у сироты заказ пропал — сделка свободна.
+
+    Химчистка удаляется физически: заказа №9999 в `public.orders` не было и
+    не будет. Уборка №7 в фикстуре уже помечена `deleted_at`. Ни та, ни
+    другая связка не должна держать свою сделку занятой.
+    """
+    await db.create_link(pool, order_id=9999, phone10="9601861067")
+    await db.update_link(pool, 9999, real_lead_id=41500001)
+    await db.create_link(pool, order_id=7, phone10="9159496642",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.update_link(pool, 7, table=db.CLEANING_LINKS_TABLE, real_lead_id=41500002)
+
+    # заказ 9999 мёртв в своей же таблице связок...
+    assert await db.fetch_taken_lead_ids(pool, "9601861067", 1) == set()
+    # ...и он же мёртв, когда его смотрят из «чужой» таблицы (проверка обеих веток UNION)
+    assert await db.fetch_taken_lead_ids(pool, "9601861067", 1,
+                                         table=db.CLEANING_LINKS_TABLE) == set()
+    # уборка №7 удалена — её лид тоже свободен
+    assert await db.fetch_taken_lead_ids(pool, "9159496642", 1) == set()
 
 
 async def test_cleaning_journal_is_its_own(pool):

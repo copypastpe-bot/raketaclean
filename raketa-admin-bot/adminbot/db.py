@@ -220,7 +220,14 @@ async def fetch_cleaning_orders_by_ids(
 
 async def fetch_linked_order_ids(own_pool: asyncpg.Pool, order_ids: list[int],
                                  *, table: str = LINKS_TABLE) -> set[int]:
-    """Какие из заказов уже взяты в работу (есть строка в таблице связок)."""
+    """Какие из заказов уже взяты в работу (есть строка в таблице связок).
+
+    Решение задачи 6: живость заказа здесь проверять незачем. Единственные
+    вызовы — `fetch_unprocessed_orders` / `fetch_unprocessed_cleaning_orders`,
+    и `order_ids` туда приходит уже из `fetch_orders_since` /
+    `fetch_cleaning_orders_since` — мёртвый заказ в этом списке не появится,
+    поэтому вопрос «числится ли он в связках» для него никогда не встанет.
+    """
     if not order_ids:
         return set()
     async with own_pool.acquire() as conn:
@@ -369,6 +376,22 @@ async def fetch_actions(own_pool: asyncpg.Pool, order_id: int,
     return [dict(row) for row in rows]
 
 
+# Страховка от сирот (ТЗ 2026-09-17, задача 6): связка, у которой заказа больше
+# нет, не должна считаться действующей нигде, где её читают как «работа идёт».
+# Событие об удалении может не дойти (служба стояла, запись потерялась) — эта
+# проверка не дублирует обработчик удаления, а работает вместо него, когда
+# события не было вовсе.
+#
+# «Жив» — по-разному для двух видов работы (факт 1 ТЗ 17.09): химчистка удаляется
+# физически (строки в `public.orders` не остаётся), уборка помечается
+# `deleted_at`. Обе схемы — одна база (факт 3), кросс-схемный EXISTS допустим.
+def _order_alive_clause(table: str) -> str:
+    if table == CLEANING_LINKS_TABLE:
+        return ("EXISTS (SELECT 1 FROM public.cleaning_orders co "
+                "WHERE co.id = order_id AND co.deleted_at IS NULL)")
+    return "EXISTS (SELECT 1 FROM public.orders po WHERE po.id = order_id)"
+
+
 async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
                                exclude_order_id: int,
                                *, table: str = LINKS_TABLE) -> set[int]:
@@ -381,6 +404,10 @@ async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
     это две сделки (памятка владельца 2026-09-02), и сделку, занятую химчисткой,
     уборка брать не должна, и наоборот. Номер работы исключается только в своей
     таблице: в чужой такой же номер — совсем другая работа.
+
+    Связка удалённого заказа сделку не держит (задача 6, `_order_alive_clause`):
+    иначе повторное проведение того же клиента находило бы сделку «занятой»
+    призраком и заводило бы в CRM дубль вместо того, чтобы подхватить старую.
     """
     other = CLEANING_LINKS_TABLE if table == LINKS_TABLE else LINKS_TABLE
     async with own_pool.acquire() as conn:
@@ -388,11 +415,11 @@ async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
             f"""
             SELECT primary_lead_id, real_lead_id
             FROM {table}
-            WHERE phone10 = $1 AND order_id <> $2
+            WHERE phone10 = $1 AND order_id <> $2 AND {_order_alive_clause(table)}
             UNION
             SELECT primary_lead_id, real_lead_id
             FROM {other}
-            WHERE phone10 = $1
+            WHERE phone10 = $1 AND {_order_alive_clause(other)}
             """,
             phone10, exclude_order_id,
         )
@@ -405,7 +432,16 @@ async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
 async def fetch_link_ids_by_status(
     own_pool: asyncpg.Pool, statuses: Sequence[str], *, table: str = LINKS_TABLE
 ) -> list[int]:
-    """Номера заказов, работа по которым ещё не закончена."""
+    """Номера заказов, работа по которым ещё не закончена.
+
+    Решение задачи 6 (страховка от сирот): здесь фильтр по живому заказу
+    сознательно не добавлен. Единственные вызовы — `watcher.py` (не мой файл в
+    этом ТЗ), и оба сразу передают результат в `fetch_orders_by_ids` /
+    `fetch_cleaning_orders_by_ids` — а те уже читают `public.orders` и
+    `public.cleaning_orders WHERE deleted_at IS NULL` напрямую, поэтому мёртвый
+    номер заказа молча выпадает из списка «незакончено» до того, как движок
+    вообще увидит эту работу. Добавлять фильтр здесь было бы дублем без эффекта.
+    """
     if not statuses:
         return []
     async with own_pool.acquire() as conn:
@@ -419,7 +455,13 @@ async def fetch_link_ids_by_status(
 async def fetch_links_for_orders(
     own_pool: asyncpg.Pool, order_ids: Sequence[int], *, table: str = LINKS_TABLE
 ) -> list[AmoLink]:
-    """Всё, что робот записал по этим заказам, — сырьё для вечерней сводки."""
+    """Всё, что робот записал по этим заказам, — сырьё для вечерней сводки.
+
+    Решение задачи 6: фильтр по живому заказу здесь не нужен. Единственный
+    источник `order_ids` (`reconcile.py`) — `fetch_orders_since` /
+    `fetch_cleaning_orders_since`, которые уже не отдают удалённые и
+    физически стёртые заказы; мёртвый номер сюда просто не попадёт.
+    """
     if not order_ids:
         return []
     async with own_pool.acquire() as conn:
@@ -432,7 +474,15 @@ async def fetch_links_for_orders(
 
 async def count_links_by_status(own_pool: asyncpg.Pool,
                                 *, table: str = LINKS_TABLE) -> dict[str, int]:
-    """Сводка очереди для команды /status и вечерней сверки."""
+    """Сводка очереди для команды /status и вечерней сверки.
+
+    Решение задачи 6: живость заказа здесь сознательно не проверяется. Это
+    голая цифра для владельца, а не действие над сделкой или клиентом — она
+    не держит сделку занятой, не шлёт напоминаний и не возвращает робота к
+    работе. Пока обработчик удаления (задача 5) не разобрал сироту, счётчик
+    статуса может на время выглядеть завышенным — это её обязанность, не этой
+    функции.
+    """
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
             f"SELECT status, count(*) AS n FROM {table} GROUP BY status"
@@ -449,6 +499,10 @@ async def fetch_links_needing_address_reminder(
     либо старше суток. `address_reminder_muted` отсекает и решение владельца
     «Не напоминать», и собственное молчание робота после седьмого напоминания —
     оба случая выставляют один и тот же флаг (ТЗ 2026-09-16, задача 7).
+
+    Мёртвая связка не напоминает (задача 6, `_order_alive_clause`): удалённый
+    заказ адреса уже не получит никогда, и карточка владельцу была бы про
+    работу, которой нет.
     """
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -459,6 +513,7 @@ async def fetch_links_needing_address_reminder(
               AND address_reminder_count < $1
               AND (address_reminder_sent_at IS NULL
                    OR address_reminder_sent_at <= now() - interval '1 day')
+              AND {_order_alive_clause(table)}
             ORDER BY updated_at
             LIMIT $2
             """,
