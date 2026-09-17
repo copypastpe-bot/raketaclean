@@ -9,6 +9,9 @@
 #   sudo raketa-admin-bot-update --report      что робот записал (ничего не меняет)
 #   sudo raketa-admin-bot-update --address-reminder-on|--address-reminder-off
 #                                             напоминания «сделка без адреса»
+#   sudo raketa-admin-bot-update --deletions-on --deletions-rehearsal   удаления заказов: репетиция
+#   sudo raketa-admin-bot-update --deletions-live                      удаления заказов: боевой режим
+#   sudo raketa-admin-bot-update --deletions-off                       удаления заказов: выключить
 #   sudo raketa-admin-bot-update --carpets-on --carpets-rehearsal   ковры: репетиция
 #   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
 #   sudo raketa-admin-bot-update --carpets-held                     ковры: какие письма отложены и почему
@@ -54,6 +57,8 @@ CARPETS_REMEMBER_SET=""
 CARPETS_REMEMBER_LIVE=""
 CLEANING=""
 ADDRESS_REMINDER=""
+DELETIONS=""
+DELETIONS_DRY=""
 CLEANING_DRY=""
 CLEANING_FROM=""
 GCAL=""
@@ -98,6 +103,10 @@ for arg in "$@"; do
         --cleaning-on)        CLEANING=1 ;;
         --address-reminder-on)  ADDRESS_REMINDER=1 ;;
         --address-reminder-off) ADDRESS_REMINDER=0 ;;
+        --deletions-on)        DELETIONS=1 ;;
+        --deletions-off)       DELETIONS=0 ;;
+        --deletions-live)      DELETIONS_DRY=0 ;;
+        --deletions-rehearsal) DELETIONS_DRY=1 ;;
         --cleaning-off)       CLEANING=0 ;;
         --cleaning-live)      CLEANING_DRY=0 ;;
         --cleaning-rehearsal) CLEANING_DRY=1 ;;
@@ -277,6 +286,8 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
 [ -n "$CLEANING" ] && set_flag CLEANING_SYNC_ENABLED "$CLEANING"
 [ -n "$ADDRESS_REMINDER" ] && set_flag ADDRESS_REMINDER_ENABLED "$ADDRESS_REMINDER"
+[ -n "$DELETIONS" ] && set_flag ORDER_DELETIONS_ENABLED "$DELETIONS"
+[ -n "$DELETIONS_DRY" ] && set_flag ORDER_DELETIONS_DRY_RUN "$DELETIONS_DRY"
 [ -n "$CLEANING_DRY" ] && set_flag CLEANING_SYNC_DRY_RUN "$CLEANING_DRY"
 [ -n "$CLEANING_FROM" ] && set_flag CLEANING_BACKLOG_FROM "$CLEANING_FROM"
 [ -n "$TELEGRAM_PROXY_SET" ] && set_flag TELEGRAM_PROXY_URL "$TELEGRAM_PROXY"
@@ -323,6 +334,9 @@ now_cleaning=$(flag_of CLEANING_SYNC_ENABLED)
 now_cleaning_dry=$(flag_of CLEANING_SYNC_DRY_RUN)
 echo "уборки:  $([ "$now_cleaning" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_cleaning_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
 echo "уборки с: $(flag_of CLEANING_BACKLOG_FROM)"
+now_deletions=$(flag_of ORDER_DELETIONS_ENABLED)
+now_deletions_dry=$(flag_of ORDER_DELETIONS_DRY_RUN)
+echo "удаления: $([ "$now_deletions" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_deletions_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
 now_gcal=$(flag_of GCAL_ENABLED)
 now_gcal_dry=$(flag_of GCAL_DRY_RUN)
 echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
