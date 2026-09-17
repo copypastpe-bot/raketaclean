@@ -104,7 +104,7 @@ ALTER TABLE cleaning_orders ADD COLUMN IF NOT EXISTS comment text;
 **Проверка:** тесты на три случая — связка с адресом, связка без адреса, связки нет
 вовсе (уход по предохранителю).
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 
@@ -120,7 +120,7 @@ ALTER TABLE cleaning_orders ADD COLUMN IF NOT EXISTS comment text;
 Адресат — `LOGS_CHAT_ID`, как у химчистки (до ревизии чатов, которую владелец сделает
 отдельно).
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 
@@ -143,7 +143,7 @@ ALTER TABLE cleaning_orders ADD COLUMN IF NOT EXISTS comment text;
 **Проверка:** тесты на сообщения с пустым адресом — строки «Адрес» в них нет,
 «None» не появляется нигде.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 
@@ -158,7 +158,7 @@ ALTER TABLE cleaning_orders ADD COLUMN IF NOT EXISTS comment text;
 4. сообщение в чат кассы клининга ушло после появления связки и содержит адрес
    и комментарий.
 
-Выполнено: ☐
+Выполнено: ✔
 
 ---
 
