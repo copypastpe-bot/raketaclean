@@ -141,11 +141,10 @@ def _pay_method_kb(*, allow_wire: bool = True) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def _address_choice_kb() -> ReplyKeyboardMarkup:
+def _comment_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Использовать этот адрес")],
-            [KeyboardButton(text="Другой адрес")],
+            [KeyboardButton(text="Без комментария")],
             [KeyboardButton(text="Отмена")],
         ],
         resize_keyboard=True,
@@ -319,29 +318,18 @@ async def got_phone(msg: Message, state: FSMContext, **data) -> None:
         payload["client_id"] = client["id"]
         payload["client_name"] = client["full_name"] or ""
         payload["client_phone"] = client["phone"] or phone_norm
-        payload["client_address"] = client["address"] or ""
         payload["bonus_balance"] = int(client["bonus_balance"] or 0)
         await state.update_data(**payload)
-        if payload["client_address"]:
-            await state.set_state(CleaningOrderFSM.address_choice)
-            await msg.answer(
-                f"Клиент: {client['full_name'] or 'Без имени'}\n"
-                f"Бонусов: {payload['bonus_balance']}\n"
-                f"Адрес из базы: {payload['client_address']}",
-                reply_markup=_address_choice_kb(),
-            )
-            return
-        await state.set_state(CleaningOrderFSM.address)
+        await state.set_state(CleaningOrderFSM.comment)
         await msg.answer(
             f"Клиент: {client['full_name'] or 'Без имени'}\n"
             f"Бонусов: {payload['bonus_balance']}\n"
-            "Введите адрес уборки:",
-            reply_markup=cancel_kb,
+            "Введите комментарий, например адрес",
+            reply_markup=_comment_kb(),
         )
     else:
         payload["client_id"] = None
         payload["client_phone"] = phone_norm
-        payload["client_address"] = ""
         payload["bonus_balance"] = 0
         await state.update_data(**payload)
         await state.set_state(CleaningOrderFSM.name)
@@ -355,38 +343,16 @@ async def got_name(msg: Message, state: FSMContext) -> None:
         await msg.answer("Имя не может быть пустым.", reply_markup=cancel_kb)
         return
     await state.update_data(client_name=name)
-    await state.set_state(CleaningOrderFSM.address)
-    await msg.answer("Введите адрес уборки:", reply_markup=cancel_kb)
+    await state.set_state(CleaningOrderFSM.comment)
+    await msg.answer("Введите комментарий, например адрес", reply_markup=_comment_kb())
 
 
-@router.message(CleaningOrderFSM.address_choice, F.text)
-async def got_address_choice(msg: Message, state: FSMContext) -> None:
-    choice = msg.text.strip()
-    data = await state.get_data()
-    if choice == "Использовать этот адрес":
-        address = (data.get("client_address") or "").strip()
-        if not address:
-            await state.set_state(CleaningOrderFSM.address)
-            await msg.answer("Введите адрес уборки:", reply_markup=cancel_kb)
-            return
-        await state.update_data(address=address, address_from_client=True)
-        await state.set_state(CleaningOrderFSM.amount)
-        await msg.answer("Введите сумму чека (руб):", reply_markup=cancel_kb)
-        return
-    if choice == "Другой адрес":
-        await state.set_state(CleaningOrderFSM.address)
-        await msg.answer("Введите адрес уборки:", reply_markup=cancel_kb)
-        return
-    await msg.answer("Выберите вариант кнопкой.", reply_markup=_address_choice_kb())
-
-
-@router.message(CleaningOrderFSM.address, F.text)
-async def got_address(msg: Message, state: FSMContext) -> None:
-    address = msg.text.strip()
-    if not address:
-        await msg.answer("Адрес не может быть пустым.", reply_markup=cancel_kb)
-        return
-    await state.update_data(address=address, address_from_client=False)
+@router.message(CleaningOrderFSM.comment, F.text)
+async def got_comment(msg: Message, state: FSMContext) -> None:
+    comment = msg.text.strip()
+    if comment.casefold() == "без комментария" or not comment:
+        comment = None
+    await state.update_data(comment=comment)
     await state.set_state(CleaningOrderFSM.amount)
     await msg.answer("Введите сумму чека (руб):", reply_markup=cancel_kb)
 
@@ -571,7 +537,7 @@ async def _show_confirm(msg: Message, state: FSMContext) -> None:
     lines = [
         "Подтвердите проведение уборки:",
         f"Клиент: {data.get('client_name') or '—'} ({data.get('phone_norm')})",
-        f"Адрес: {data.get('address')}",
+        f"Комментарий: {data.get('comment') or '—'}",
         f"Сумма чека: {_money_str(total)}₽",
         f"Бонусы: списано {int(used)}, начислено {earned}",
         "Оплата:",
@@ -624,12 +590,8 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
                 )
 
             client_id = client_row["id"]
-            if not (client_row["address"] or "").strip() and data.get("address"):
-                await conn.execute(
-                    "UPDATE clients SET address=$1 WHERE id=$2 AND (address IS NULL OR address = '')",
-                    data["address"],
-                    client_id,
-                )
+            # Адрес при проведении не заполняется — его позже допишет фоновый
+            # проход `_backfill_address_for_table` из связки amoCRM (bot.py).
             total = Decimal(data["total_amount"])
             bonus_spend = int(data.get("bonus_spend") or 0)
             payments = data.get("payments") or []
@@ -640,18 +602,20 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
             )
 
             client_op_id = data.get("client_op_id")
+            comment = data.get("comment")
             order_row = await conn.fetchrow(
                 """
                 INSERT INTO cleaning_orders
-                    (client_id, foreman_id, address, total_amount,
+                    (client_id, foreman_id, address, comment, total_amount,
                      bonuses_used, bonuses_earned, client_op_id)
-                VALUES ($1,$2,$3,$4,$5,$6,$7)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                 ON CONFLICT (client_op_id) DO NOTHING
                 RETURNING id
                 """,
                 client_id,
                 foreman["id"],
-                data["address"],
+                data.get("address"),
+                comment,
                 total,
                 bonus_spend,
                 bonus_earned,
@@ -762,7 +726,8 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
         foreman_name=foreman_name.strip() or "Бригадир",
         client_phone=data["phone_norm"],
         client_name=client_row["full_name"] or data.get("client_name") or "Клиент",
-        address=data["address"],
+        address=data.get("address"),
+        comment=comment,
         total_amount=total,
         payments=[(p["method"], Decimal(p["amount"])) for p in payments],
         expenses=[(e["category"], Decimal(e["amount"])) for e in expenses],

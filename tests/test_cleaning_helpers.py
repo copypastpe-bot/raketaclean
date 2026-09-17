@@ -116,7 +116,34 @@ class AlertFormatterTests(unittest.TestCase):
         self.assertIn("600", text)         # начислено бонусов
         self.assertIn("5 800", text)       # прибыль
         self.assertIn("87 540", text)      # баланс
+        self.assertNotIn("Комментарий", text)  # не передан — строки нет
 
+    def _base_alert_kwargs(self, **overrides):
+        kwargs = dict(
+            order_id=42,
+            foreman_name="Петров",
+            client_phone="+7 904 000 00 00",
+            client_name="Иванов",
+            address="ул. Ленина 10",
+            total_amount=D("12000"),
+            payments=[("Наличные", D("10000"))],
+            expenses=[],
+            bonuses_used=D("0"),
+            bonuses_earned=D("0"),
+            profit=D("10000"),
+            balance_after=D("87540"),
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_order_alert_with_comment_adds_line(self):
+        text = format_order_provided_alert(**self._base_alert_kwargs(comment="ул. Ленина 10, кв. 5"))
+        self.assertIn("Комментарий: ул. Ленина 10, кв. 5", text)
+
+    def test_order_alert_without_comment_adds_no_line(self):
+        # Пустой комментарий (None) — лишней строки в сообщении быть не должно.
+        text = format_order_provided_alert(**self._base_alert_kwargs(comment=None))
+        self.assertNotIn("Комментарий", text)
 
 
 class ConstantsContractTests(unittest.TestCase):

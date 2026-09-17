@@ -27,6 +27,7 @@ def format_order_provided_alert(
     bonuses_earned: Decimal,
     profit: Decimal,
     balance_after: Decimal,
+    comment: str | None = None,
 ) -> str:
     pay_line = ", ".join(f"{_money(a)}₽ {m}" for m, a in payments) or "—"
     exp_line = ", ".join(f"{m} {_money(a)}₽" for m, a in expenses) or "—"
@@ -35,6 +36,10 @@ def format_order_provided_alert(
         f"Бригадир: {foreman_name}",
         f"Клиент: {client_phone} ({client_name})",
         f"Адрес: {address}",
+    ]
+    if comment:
+        lines.append(f"Комментарий: {comment}")
+    lines += [
         f"Сумма: {_money(total_amount)}₽",
         f"Оплата: {pay_line}",
         f"Расходы: {exp_line}",

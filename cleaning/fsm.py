@@ -8,8 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 class CleaningOrderFSM(StatesGroup):
     phone = State()
     name = State()
-    address_choice = State()
-    address = State()
+    comment = State()
     amount = State()
     bonus_spend = State()
     pay_method = State()
