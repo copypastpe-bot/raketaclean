@@ -196,6 +196,15 @@ class Settings:
     address_reminder_enabled: bool = False
     address_reminder_poll_interval_sec: int = 3600
 
+    # Удаление заказа освобождает сделку (ТЗ 2026-09-17, задача 5): свой
+    # выключатель, по умолчанию выключен — заводится отдельно и позже, когда
+    # amo_sync/cleaning уже проверены в бою. Своя репетиция нужна, в отличие
+    # от напоминания про адрес: эта фича пишет в amoCRM (move_lead, add_note).
+    # Своего периода опроса нет: разбор идёт первым шагом того же тика
+    # наблюдателя (решение владельца 4), а не отдельным циклом.
+    order_deletions_enabled: bool = False
+    order_deletions_dry_run: bool = True
+
     # Мастер заказа → вид работ для поля «Услуга»
     service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
@@ -295,6 +304,8 @@ class Settings:
             poll_interval_sec=_int("AMO_SYNC_POLL_INTERVAL_SEC", 60),
             address_reminder_enabled=_flag("ADDRESS_REMINDER_ENABLED", False),
             address_reminder_poll_interval_sec=_int("ADDRESS_REMINDER_POLL_INTERVAL_SEC", 3600),
+            order_deletions_enabled=_flag("ORDER_DELETIONS_ENABLED", False),
+            order_deletions_dry_run=_flag("ORDER_DELETIONS_DRY_RUN", True),
             service_by_master=_service_by_master("SERVICE_BY_MASTER",
                                                  DEFAULT_SERVICE_BY_MASTER),
             telegram_api_ips=tuple(parse_ip_pool(os.environ.get("TELEGRAM_API_IPS"))),

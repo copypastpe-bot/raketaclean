@@ -221,3 +221,28 @@ def test_address_reminder_env_overrides(monkeypatch):
 
     assert s.address_reminder_enabled is True
     assert s.address_reminder_poll_interval_sec == 120
+
+
+# --- удаление заказа освобождает сделку (задача 7, ТЗ 2026-09-17) ---
+
+def test_order_deletions_are_off_by_default(monkeypatch):
+    """Свой выключатель, по умолчанию выключен и в репетиции."""
+    _minimal_env(monkeypatch)
+    monkeypatch.delenv("ORDER_DELETIONS_ENABLED", raising=False)
+    monkeypatch.delenv("ORDER_DELETIONS_DRY_RUN", raising=False)
+
+    s = Settings.from_env()
+
+    assert s.order_deletions_enabled is False
+    assert s.order_deletions_dry_run is True
+
+
+def test_order_deletions_env_overrides(monkeypatch):
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("ORDER_DELETIONS_ENABLED", "1")
+    monkeypatch.setenv("ORDER_DELETIONS_DRY_RUN", "0")
+
+    s = Settings.from_env()
+
+    assert s.order_deletions_enabled is True
+    assert s.order_deletions_dry_run is False
