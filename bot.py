@@ -209,6 +209,8 @@ from cleaning.handlers import (
     start_cleaning_order,
     start_cleaning_payout_button,
 )
+from cleaning.format import format_order_provided_alert as _format_cleaning_order_provided_alert
+from cleaning.notify import send_cleaning_money_flow
 from crm import (
     ChannelKind,
     ClientContact,
@@ -3529,16 +3531,29 @@ async def ensure_orders_address_schema(conn: asyncpg.Connection) -> None:
 
 
 async def ensure_pending_order_reports_schema(conn: asyncpg.Connection) -> None:
-    """Очередь отложенного отчёта в чат и сообщения о деньгах (задача 5 ТЗ
-    «адреса до конца», 2026-09-16) — см. app/migrations/0009_pending_order_reports.sql."""
+    """Очередь отложенного отчёта в чат и сообщения о деньгах — двух контуров:
+    заказы химчистки (задача 5 ТЗ «адреса до конца», 2026-09-16) и уборки
+    клининга (задача 3 ТЗ «адреса в клининге», 2026-09-17). Номера уборок и
+    заказов пересекаются, поэтому контур различает явная колонка `kind`
+    ('order'|'cleaning'), а не догадка по `order_id` — ключ составной.
+    См. app/migrations/0009_pending_order_reports.sql,
+    0011_pending_order_reports_kind.sql."""
     await conn.execute(
         """
         CREATE TABLE IF NOT EXISTS pending_order_reports (
-            order_id    integer PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+            kind        text NOT NULL DEFAULT 'order',
+            order_id    integer NOT NULL,
             payload     jsonb NOT NULL,
             created_at  timestamptz NOT NULL DEFAULT now(),
-            sent_at     timestamptz
+            sent_at     timestamptz,
+            PRIMARY KEY (kind, order_id)
         );
+        """
+    )
+    await conn.execute(
+        """
+        ALTER TABLE pending_order_reports
+        ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'order';
         """
     )
     await conn.execute(
@@ -7145,16 +7160,50 @@ async def _dispatch_order_report(
         await _notify_order_income(conn, total_non_wire_amount, order_id, notify_label)
 
 
-async def _alert_deal_created_without_address(order_id: int, phone: str | None) -> None:
-    """Сигнал 1 задачи 6 ТЗ «адреса до конца»: админ-бот отработал заказ, но
+async def _dispatch_cleaning_order_report(
+    order_id: int,
+    payload: Mapping[str, Any],
+    resolved_address: str | None,
+) -> None:
+    """Отправляет сообщение о проведённой уборке в кассу клининга — с адресом
+    сделки CRM (adminbot.cleaning_links.deal_address), прочитанным заново
+    непосредственно перед отправкой, или без него (задача 3 ТЗ «адреса
+    в клининге», 2026-09-17). В отличие от химчистки, у уборки одно сообщение
+    и один адресат — CLEANING_MONEY_FLOW_CHAT_ID (send_cleaning_money_flow)."""
+    text = _format_cleaning_order_provided_alert(
+        order_id=order_id,
+        foreman_name=payload.get("foreman_name") or "Бригадир",
+        client_phone=payload.get("client_phone") or "",
+        client_name=payload.get("client_name") or "Клиент",
+        address=resolved_address,
+        comment=payload.get("comment"),
+        total_amount=Decimal(str(payload.get("total_amount", "0"))),
+        payments=[(p["method"], Decimal(p["amount"])) for p in payload.get("payments") or []],
+        expenses=[(e["category"], Decimal(e["amount"])) for e in payload.get("expenses") or []],
+        bonuses_used=Decimal(str(payload.get("bonuses_used", "0"))),
+        bonuses_earned=Decimal(str(payload.get("bonuses_earned", "0"))),
+        profit=Decimal(str(payload.get("profit", "0"))),
+        balance_after=Decimal(str(payload.get("balance_after", "0"))),
+    )
+    await send_cleaning_money_flow(bot, text)
+
+
+async def _alert_deal_created_without_address(
+    order_id: int, phone: str | None, *, kind: str = "order",
+) -> None:
+    """Сигнал 1 задачи 6 ТЗ «адреса до конца» (химчистка) и задачи 4 ТЗ
+    «адреса в клининге» (уборки, 2026-09-17): админ-бот отработал заказ, но
     сделку клиента в CRM не нашёл и завёл новую (`path == "C"`, create_new) —
-    в ней ещё нет адреса. Частая причина — мастер ввёл не тот номер телефона."""
+    в ней ещё нет адреса. Частая причина — мастер ввёл не тот номер телефона.
+    `kind` помечает контур в подписи — номера уборок и заказов пересекаются,
+    молчать об этом в тексте сигнала нельзя."""
     if not LOGS_CHAT_ID:
         return
+    label = "Уборка" if kind == "cleaning" else "Заказ"
     phone_text = _escape_html(phone) if phone else "не известен"
     text = (
         "⚠️ <b>Сделка создана без адреса</b>\n"
-        f"Заказ №{order_id}\n"
+        f"{label} №{order_id}\n"
         f"Телефон: <code>{phone_text}</code>\n"
         "Админ-бот не нашёл сделку клиента в CRM и завёл новую — возможно, "
         "мастер ввёл не тот номер телефона. Проверьте телефон и сделку в CRM."
@@ -7165,15 +7214,17 @@ async def _alert_deal_created_without_address(order_id: int, phone: str | None) 
         logging.warning("deal-without-address alert failed for order_id=%s: %s", order_id, exc)
 
 
-async def _alert_admin_bot_silent(order_id: int) -> None:
-    """Сигнал 2 задачи 6: связка не появилась вовсе за DEAL_LINK_WAIT_TIMEOUT_SEC.
-    Это авария (служба встала или CRM недоступна), а не обычное ожидание —
-    поэтому текст и реакция на него другие, чем у сигнала 1."""
+async def _alert_admin_bot_silent(order_id: int, *, kind: str = "order") -> None:
+    """Сигнал 2 задачи 6 (химчистка) / задачи 4 (уборки, 2026-09-17): связка
+    не появилась вовсе за DEAL_LINK_WAIT_TIMEOUT_SEC. Это авария (служба
+    встала или CRM недоступна), а не обычное ожидание — поэтому текст и
+    реакция на него другие, чем у сигнала 1. `kind` — см. сигнал 1."""
     if not LOGS_CHAT_ID:
         return
+    label = "Уборка" if kind == "cleaning" else "Заказ"
     text = (
         "🚨 <b>Админ-бот не ответил за 30 минут</b>\n"
-        f"Заказ №{order_id}\n"
+        f"{label} №{order_id}\n"
         "Связка с CRM не появилась. Похоже на аварию: служба встала или CRM недоступна."
     )
     try:
@@ -7184,14 +7235,22 @@ async def _alert_admin_bot_silent(order_id: int) -> None:
 
 async def run_pending_order_reports() -> None:
     """Досылает отчёт в чат и сообщение о деньгах, отложенные в `commit_order`
-    (задача 5 ТЗ «адреса до конца», 2026-09-16). Тем же проходом ловит два
-    сигнала в LOGS_CHAT_ID для владельца (задача 6): сделку без адреса и
-    молчание админ-бота дольше получаса.
+    (задача 5 ТЗ «адреса до конца», 2026-09-16), и сообщение о проведённой
+    уборке, отложенное в `do_provesti` (задача 3 ТЗ «адреса в клининге»,
+    2026-09-17). Тем же проходом ловит два сигнала в LOGS_CHAT_ID для
+    владельца (задача 6 / задача 4): сделку без адреса и молчание админ-бота
+    дольше получаса — для обоих контуров.
 
-    Условие отправки — не адрес, а появление связки заказа со сделкой CRM
-    (`adminbot.amo_links`): появилась — уходит с адресом или без него (если
-    в сделке адреса ещё нет). Не появилась за DEAL_LINK_WAIT_TIMEOUT_SEC —
-    уходит как есть, без адреса: это предохранитель, а не обычный путь.
+    Условие отправки — не адрес, а появление связки заказа со сделкой CRM:
+    появилась — уходит с адресом или без него (если в сделке адреса ещё нет).
+    Не появилась за DEAL_LINK_WAIT_TIMEOUT_SEC — уходит как есть, без адреса:
+    это предохранитель, а не обычный путь.
+
+    Контур различает колонка `kind` очереди ('order' — химчистка,
+    `public.orders` + `adminbot.amo_links`; 'cleaning' — уборки,
+    `public.cleaning_orders` + `adminbot.cleaning_links`) — номера уборок
+    и заказов пересекаются, поэтому по одному только order_id контур не
+    угадать.
     """
     if pool is None:
         return
@@ -7200,7 +7259,7 @@ async def run_pending_order_reports() -> None:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT order_id, payload, created_at
+            SELECT kind, order_id, payload, created_at
             FROM pending_order_reports
             WHERE sent_at IS NULL
             ORDER BY created_at
@@ -7208,10 +7267,12 @@ async def run_pending_order_reports() -> None:
             """
         )
         for row in rows:
+            kind = row.get("kind") or "order"
             order_id = row["order_id"]
             payload = _order_report_payload_from_db(row["payload"])
+            links_table = "adminbot.cleaning_links" if kind == "cleaning" else "adminbot.amo_links"
             link = await conn.fetchrow(
-                "SELECT path, deal_address FROM adminbot.amo_links WHERE order_id=$1",
+                f"SELECT path, deal_address FROM {links_table} WHERE order_id=$1",
                 order_id,
             )
             timed_out = row["created_at"] <= timeout_cutoff
@@ -7220,20 +7281,24 @@ async def run_pending_order_reports() -> None:
             resolved_address = (link["deal_address"] or "").strip() or None if link is not None else None
             # Сигнал 1: сделку завели с нуля, и адреса в ней как не было, так и нет.
             if link is not None and link["path"] == "C" and not resolved_address:
-                await _alert_deal_created_without_address(order_id, payload.get("client_phone"))
+                await _alert_deal_created_without_address(order_id, payload.get("client_phone"), kind=kind)
             # Сигнал 2: связка не появилась вовсе — это уже авария, а не ожидание.
             if link is None and timed_out:
-                await _alert_admin_bot_silent(order_id)
+                await _alert_admin_bot_silent(order_id, kind=kind)
             try:
-                await _dispatch_order_report(conn, order_id, payload, resolved_address)
+                if kind == "cleaning":
+                    await _dispatch_cleaning_order_report(order_id, payload, resolved_address)
+                else:
+                    await _dispatch_order_report(conn, order_id, payload, resolved_address)
             except Exception as exc:  # noqa: BLE001
                 logging.warning(
-                    "pending order report dispatch failed for order_id=%s: %s", order_id, exc,
+                    "pending order report dispatch failed for kind=%s order_id=%s: %s",
+                    kind, order_id, exc,
                 )
                 continue
             await conn.execute(
-                "UPDATE pending_order_reports SET sent_at=now() WHERE order_id=$1",
-                order_id,
+                "UPDATE pending_order_reports SET sent_at=now() WHERE kind=$1 AND order_id=$2",
+                kind, order_id,
             )
 
 
