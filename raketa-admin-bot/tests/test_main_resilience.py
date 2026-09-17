@@ -256,3 +256,96 @@ async def test_close_without_autocall_manager_bot_does_not_break():
               stop=asyncio.Event())
 
     await app.close()                                  # не падает
+
+
+# --- разбор удалений (задача 5/7, ТЗ 2026-09-17): свой выключатель и письмо владельцу ---
+
+def _minimal_settings(**overrides):
+    from adminbot.config import Settings
+
+    return Settings(
+        tg_token="t", owner_tg_id=1, bot_db_dsn="postgresql://x", own_db_dsn="postgresql://x",
+        amo_base_url="https://raketacleancrm.amocrm.ru", amo_token="t", **overrides)
+
+
+def test_deletions_disabled_returns_none():
+    from adminbot.main import _build_deletions
+
+    settings = _minimal_settings(order_deletions_enabled=False)
+
+    assert _build_deletions(settings, None, None, object(), object()) is None
+
+
+def test_deletions_rehearsal_uses_the_rehearsal_amo_client():
+    from adminbot.main import _build_deletions
+
+    settings = _minimal_settings(order_deletions_enabled=True, order_deletions_dry_run=True)
+    live, rehearsal = object(), object()
+
+    handler = _build_deletions(settings, None, None, live, rehearsal)
+
+    assert handler is not None
+    assert handler.amo is rehearsal
+
+
+def test_deletions_live_uses_the_live_amo_client():
+    from adminbot.main import _build_deletions
+
+    settings = _minimal_settings(order_deletions_enabled=True, order_deletions_dry_run=False)
+    live, rehearsal = object(), object()
+
+    handler = _build_deletions(settings, None, None, live, rehearsal)
+
+    assert handler.amo is live
+
+
+def _make_outcome(outcome: str, **fields):
+    from datetime import datetime, timezone
+
+    from adminbot.models import AmoLink, DeletionRecord
+    from adminbot.sync.deletions import DeletionOutcome
+
+    record = DeletionRecord(kind=fields.pop("kind", "order"), order_id=596,
+                            deleted_at=datetime(2026, 9, 17, 9, 30, tzinfo=timezone.utc))
+    link = AmoLink(order_id=596, phone10="9601861067", status="done")
+    return DeletionOutcome(record=record, link=link, outcome=outcome, **fields)
+
+
+def test_deletion_text_mentions_phone_and_deal_link():
+    from adminbot.main import _deletion_text
+
+    text = _deletion_text(_make_outcome("reopened", lead_id=41400001),
+                          "https://raketacleancrm.amocrm.ru", dry_run=False)
+
+    assert "+79601861067" in text                     # полный телефон (правило for_owner)
+    assert "Заказ подтвержден" in text
+    assert "https://raketacleancrm.amocrm.ru/leads/detail/41400001" in text
+    assert "🎭 РЕПЕТИЦИЯ" not in text
+
+
+def test_deletion_text_marks_rehearsal():
+    from adminbot.main import _deletion_text
+
+    text = _deletion_text(_make_outcome("reopened", lead_id=41400001),
+                          "https://x", dry_run=True)
+
+    assert text.startswith("🎭 РЕПЕТИЦИЯ")
+
+
+def test_deletion_text_held_by_other_names_the_other_order():
+    from adminbot.main import _deletion_text
+
+    outcome = _make_outcome("held_by_other", lead_id=41400001,
+                            other_kind="cleaning", other_order_id=777)
+    text = _deletion_text(outcome, "https://x", dry_run=False)
+
+    assert "№777" in text and "уборкой" in text
+
+
+def test_deletion_text_lead_gone_has_no_dead_crm_link():
+    from adminbot.main import _deletion_text
+
+    text = _deletion_text(_make_outcome("lead_gone", lead_id=41400001), "https://x", dry_run=False)
+
+    assert "leads/detail" not in text
+    assert "связку убрал" in text

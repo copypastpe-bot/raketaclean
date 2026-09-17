@@ -31,7 +31,7 @@ from aiogram import Bot, Dispatcher
 from adminbot import db
 from adminbot.amo import ids
 from adminbot.amo.client import AmoAuthError, AmoClient, AmoError
-from adminbot.amo.fields import MOSCOW_TZ
+from adminbot.amo.fields import MOSCOW_TZ, as_msk
 from adminbot.config import Settings
 from adminbot.autocall import pbx as autocall_pbx
 from adminbot.autocall.engine import AutocallEngine
@@ -47,8 +47,10 @@ from adminbot.carpets.store import MemoryCarpetStore, PgCarpetStore
 from adminbot.carpets.watcher import CarpetWatcher
 from adminbot.control import PgControlPanel, sync_allowed
 from adminbot.mail import MailBox, mail_settings_from_env
+from adminbot.phone import for_owner
 from adminbot.sync.address_reminder import DEFAULT_CAP, AddressReminder, PgReminderSource
 from adminbot.sync.backlog import BacklogRunner
+from adminbot.sync.deletions import DeletionHandler, DeletionOutcome
 from adminbot.sync.engine import Engine, service_enums
 from adminbot.sync.reconcile import PgCleaningSummarySource, PgSummarySource, Reconciler
 from adminbot.sync.specialists import SpecialistIndex
@@ -63,7 +65,7 @@ from adminbot.tg.calendar_cards import (
     done_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
-    carpet_held_text, carpet_question_card, carpet_report_text,
+    carpet_held_text, carpet_question_card, carpet_report_text, mark_rehearsal,
     order_done_text, question_card, summary_text)
 from adminbot.tg.outbox import (
     SUMMARY_TTL_SEC, MemoryMailStore, OwnerMail, PgMailStore, Purpose)
@@ -90,6 +92,7 @@ MAIL_CARPET_REPORT = "carpet_report"
 MAIL_CARPET_HELD = "carpet_held"
 MAIL_ADDRESS_REMINDER = "address_reminder"
 MAIL_CLEANING_ADDRESS_REMINDER = "cleaning_address_reminder"
+MAIL_ORDER_DELETION = "order_deletion"
 MAIL_AUTOCALL_REHEARSAL = "autocall_rehearsal"
 MAIL_AUTOCALL_CONNECTED = "autocall_connected"
 MAIL_AUTOCALL_NO_PHONE = "autocall_no_phone"
@@ -254,6 +257,12 @@ async def build_app(settings: Settings) -> App:
                      store=PgMailStore(own_pool),
                      purposes={MAIL_SUMMARY: Purpose(ttl_sec=SUMMARY_TTL_SEC)})
 
+    # Удаление заказа освобождает сделку (задача 5, ТЗ 2026-09-17): свой
+    # выключатель (задача 7). Не отдельный цикл — первый шаг тика наблюдателя
+    # (решение владельца 4), поэтому подключается к Watcher параметром, а не
+    # своей задачей в App.run.
+    deletions_handler = _build_deletions(settings, own_pool, mail, live_amo, rehearsal_amo)
+
     source = PgOrderSource(bot_pool, own_pool, settings.backlog_from)
     watcher = Watcher(
         engine=engine,
@@ -265,6 +274,7 @@ async def build_app(settings: Settings) -> App:
         # заказе робот пишет владельцу сразу, со ссылкой на сделку.
         on_done=_make_order_done_sender(mail, settings.amo_base_url,
                                         dry_run=settings.amo_sync_dry_run),
+        handle_deletions=deletions_handler.run if deletions_handler is not None else None,
     )
     mail.register(MAIL_ORDER_QUESTION, _question_purpose(store))
 
@@ -284,7 +294,7 @@ async def build_app(settings: Settings) -> App:
     # владелец останавливает робота одной кнопкой.
     cleaning_watcher, cleaning_store, cleaning_backlog_from = _build_cleaning(
         settings, bot_pool, own_pool, mail, control, specialists, services,
-        live_amo, rehearsal_amo)
+        live_amo, rehearsal_amo, deletions_handler)
     cleaning_address_reminder = cleaning_address_answers = None
     if cleaning_store is not None:
         mail.register(MAIL_CLEANING_QUESTION, _question_purpose(cleaning_store))
@@ -399,7 +409,8 @@ async def build_app(settings: Settings) -> App:
 
 def _build_cleaning(settings: Settings, bot_pool: Any, own_pool: Any, mail: OwnerMail,
                     control: Any, specialists: SpecialistIndex, services: dict[str, int],
-                    live_amo: AmoClient, rehearsal_amo: AmoClient):
+                    live_amo: AmoClient, rehearsal_amo: AmoClient,
+                    deletions_handler: Optional[DeletionHandler] = None):
     """Собрать проведение уборок. Возвращает (наблюдатель, хранилище, дата хвоста).
 
     Функция выключена — уборки просто не поднимаются, а заказы, ковры, календарь
@@ -436,10 +447,41 @@ def _build_cleaning(settings: Settings, bot_pool: Any, own_pool: Any, mail: Owne
         on_question=_make_cleaning_question_sender(mail, dry_run=settings.cleaning_sync_dry_run),
         on_done=_make_cleaning_done_sender(mail, settings.amo_base_url,
                                            dry_run=settings.cleaning_sync_dry_run),
+        # Тот же разбор удалений, что и у заказов химчистки (задача 5, ТЗ
+        # 2026-09-17): один обработчик на оба вида работ, но гонка «удаление
+        # раньше нового заказа» закрывается только если он — первый шаг ОБОИХ
+        # тиков, а не только заказов. Идемпотентен (своя отметка о разборе),
+        # поэтому вызвать его из двух независимых циклов подряд безопасно.
+        handle_deletions=deletions_handler.run if deletions_handler is not None else None,
     )
     log.info("Уборки: включены, режим %s, хвост с %s",
              "репетиция" if settings.cleaning_sync_dry_run else "БОЕВОЙ", backlog_from)
     return watcher, store, backlog_from
+
+
+def _build_deletions(settings: Settings, own_pool: Any, mail: OwnerMail,
+                     live_amo: AmoClient, rehearsal_amo: AmoClient) -> Optional[DeletionHandler]:
+    """Собрать разбор удалений (задача 5, ТЗ 2026-09-17). None — функция выключена.
+
+    Свой выключатель (задача 7), по умолчанию выключен — заводится отдельно,
+    когда amo_sync/уборки уже проверены в бою. Своя бухгалтерия (пометка связки,
+    `adminbot.order_deletions_seen`) всегда идёт в настоящую базу — как и у
+    напоминания про адрес; репетиция отличается только выбором клиента амо
+    (`rehearsal_amo` ничего не пишет, `live_amo` пишет по-настоящему).
+    """
+    if not settings.order_deletions_enabled:
+        log.info("Удаления: функция выключена настройкой ORDER_DELETIONS_ENABLED")
+        return None
+
+    handler = DeletionHandler(
+        own_pool=own_pool,
+        amo=rehearsal_amo if settings.order_deletions_dry_run else live_amo,
+        on_notify=_make_deletion_notifier(mail, settings.amo_base_url,
+                                          dry_run=settings.order_deletions_dry_run),
+    )
+    log.info("Удаления: включены, режим %s",
+             "репетиция" if settings.order_deletions_dry_run else "БОЕВОЙ")
+    return handler
 
 
 def _build_address_reminder(settings: Settings, own_pool: Any, mail: OwnerMail,
@@ -702,6 +744,56 @@ def _make_calendar_summary_sender(mail: OwnerMail):
         await mail.send(calendar_summary_text(report), kind=MAIL_SUMMARY)
 
     return send
+
+
+# Что стало со сделкой после разбора удаления — эмодзи в начало сообщения
+# (задача 5, ТЗ 2026-09-17). Ключи — `DeletionOutcome.outcome`.
+_DELETION_EMOJI = {
+    "held_by_other": "🔗",
+    "lead_gone": "🗑",
+    "left_open": "⏳",
+    "reopened": "↩️",
+}
+
+
+def _deletion_text(outcome: DeletionOutcome, amo_base_url: str, dry_run: bool) -> str:
+    """Письмо владельцу об одном разобранном удалении.
+
+    Полный телефон и дата допустимы (правило `adminbot.phone.for_owner`): бот
+    приватный, владелец — единственный получатель, и ему нужно дозвониться
+    клиенту, не открывая CRM.
+    """
+    record, link = outcome.record, outcome.link
+    label = "Уборка" if record.kind == "cleaning" else "Заказ"
+    when = as_msk(record.deleted_at).strftime("%d.%m.%Y %H:%M")
+    emoji = _DELETION_EMOJI.get(outcome.outcome, "🤖")
+
+    if outcome.outcome == "held_by_other":
+        other_label = "уборкой" if outcome.other_kind == "cleaning" else "заказом"
+        body = (f"сделка #{outcome.lead_id} осталась за {other_label} "
+                f"№{outcome.other_order_id} — не трогал")
+    elif outcome.outcome == "lead_gone":
+        body = f"сделки #{outcome.lead_id} в CRM больше нет — связку убрал"
+    elif outcome.outcome == "left_open":
+        body = f"сделка #{outcome.lead_id} ещё открыта — не трогал, посмотрите сами"
+    else:                                          # reopened
+        body = f"сделка #{outcome.lead_id} закрыта — вернул на этап «Заказ подтвержден»"
+
+    lines = [f"{emoji} {label} №{record.order_id} удалён — {body}.",
+             f"Телефон: {for_owner(link.phone10)}. Удалён: {when} МСК."]
+    if outcome.lead_id and outcome.outcome != "lead_gone":
+        lines += ["", f"{amo_base_url.rstrip('/')}/leads/detail/{outcome.lead_id}"]
+    return mark_rehearsal("\n".join(lines), dry_run)
+
+
+def _make_deletion_notifier(mail: OwnerMail, amo_base_url: str, dry_run: bool):
+    """Письмо владельцу о разобранном удалении (задача 5)."""
+
+    async def notify(outcome: DeletionOutcome) -> None:
+        await mail.send(_deletion_text(outcome, amo_base_url, dry_run),
+                        kind=MAIL_ORDER_DELETION, ref=outcome.record.order_id)
+
+    return notify
 
 
 def _make_order_done_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = False):
