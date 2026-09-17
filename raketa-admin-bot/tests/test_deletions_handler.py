@@ -20,7 +20,7 @@ import pytest
 
 from adminbot import db
 from adminbot.amo import ids
-from adminbot.sync.deletions import DeletionHandler
+from adminbot.sync.deletions import DeletionHandler, fetch_pending_deletions
 from adminbot.sync.store import PgCleaningLinkStore, PgLinkStore
 from tests.fakes import FakeAmo
 
@@ -121,7 +121,7 @@ async def _seen_outcome(pool, kind, order_id):
 async def test_no_link_marks_seen_and_stays_silent(pool):
     """Ветка 1 (решение 7): связки нет — молчим."""
     notify = NotifyLog()
-    handler = DeletionHandler(own_pool=pool, amo=FakeAmo(), on_notify=notify)
+    handler = DeletionHandler(own_pool=pool, amo=FakeAmo(), on_notify=notify, dry_run=False)
 
     handled = await handler.run()
 
@@ -135,7 +135,7 @@ async def test_link_without_a_lead_is_cancelled_silently(pool):
     но связку помечаем отменённой, чтобы не считалась вечно активной."""
     await _seed_link(pool, 101, status="waiting_owner")
     notify = NotifyLog()
-    handler = DeletionHandler(own_pool=pool, amo=FakeAmo(), on_notify=notify)
+    handler = DeletionHandler(own_pool=pool, amo=FakeAmo(), on_notify=notify, dry_run=False)
 
     await handler.run()
 
@@ -154,7 +154,7 @@ async def test_deal_held_by_another_live_order_is_left_untouched(pool):
     amo = FakeAmo()
     amo.add_lead(5002, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_DONE)
     notify = NotifyLog()
-    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify)
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=False)
 
     await handler.run()
 
@@ -178,7 +178,7 @@ async def test_deal_held_across_link_tables_is_detected_too(pool):
     amo = FakeAmo()
     amo.add_lead(5021, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_DONE)
     notify = NotifyLog()
-    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify)
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=False)
 
     await handler.run()
 
@@ -193,7 +193,7 @@ async def test_deal_missing_in_crm_is_reported_and_link_dropped(pool):
     amo = FakeAmo()
     amo.leads[5004] = {}                                    # «удалённая» сделка амо
     notify = NotifyLog()
-    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify)
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=False)
 
     await handler.run()
 
@@ -212,7 +212,7 @@ async def test_open_deal_is_left_untouched(pool):
     amo = FakeAmo()
     amo.add_lead(5005, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)   # не финальный этап
     notify = NotifyLog()
-    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify)
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=False)
 
     await handler.run()
 
@@ -230,7 +230,7 @@ async def test_closed_deal_is_reopened_to_confirmed_stage(pool):
     amo = FakeAmo()
     amo.add_lead(5006, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)
     notify = NotifyLog()
-    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify)
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=False)
 
     await handler.run()
 
@@ -246,13 +246,57 @@ async def test_closed_deal_is_reopened_to_confirmed_stage(pool):
     assert outcome.outcome == "reopened" and outcome.lead_id == 5006
 
 
+async def test_rehearsal_leaves_no_traces_and_reprocesses_every_time(pool):
+    """Правило проекта: репетиция не должна оставлять следов, которые заберут
+    работу у последующего боя. Отметка о разборе необратима (второго шанса
+    у записи нет), поэтому в dry_run обработчик решает и логирует действие
+    (`amo_actions`, `dry_run=True`), но не ставит `order_deletions_seen`, не
+    гасит связку и не пишет владельцу — иначе, включив функцию по-настоящему,
+    владелец обнаружил бы уже «разобранные» удаления с закрытыми сделками."""
+    await _seed_link(pool, 106, real_lead_id=5006)
+    # dry_run=True на самом amo — как боевой сервис передаёт rehearsal_amo,
+    # когда ORDER_DELETIONS_DRY_RUN=1 (main.py:_build_deletions): move_lead и
+    # add_note не пишут по-настоящему, но intent.performed=False фиксируется
+    # в журнале действий тем же способом, что и у движка.
+    amo = FakeAmo(dry_run=True)
+    amo.add_lead(5006, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)
+    notify = NotifyLog()
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=True)
+
+    first = await handler.run()
+
+    assert first >= 1
+    assert await _seen_outcome(pool, "order", 106) is None
+    link = await PgLinkStore(pool).get(106)
+    assert link.status != "cancelled" and link.real_lead_id == 5006
+    assert notify.outcomes == []                          # владельцу в репетиции не пишем
+
+    # решение при этом действительно принято и видно в журнале действий —
+    # "движок" в репетиции тоже не молчит, просто не пишет в CRM по-настоящему
+    async with pool.acquire() as conn:
+        actions = await conn.fetch(
+            "SELECT action, dry_run FROM adminbot.amo_actions WHERE order_id = 106 ORDER BY id")
+    assert [(r["action"], r["dry_run"]) for r in actions] == [
+        ("move_lead", True), ("add_note", True),
+    ]
+
+    # запись всё ещё пендинг — и на СЛЕДУЮЩЕМ проходе репетиция разберёт её
+    # заново (это ожидаемо, а не сбой), а после переключения в бой разберёт
+    # по-настоящему
+    second = await handler.run()
+    assert second == first
+    assert await _seen_outcome(pool, "order", 106) is None
+    pending = await fetch_pending_deletions(pool)
+    assert any(r.kind == "order" and r.order_id == 106 for r in pending)
+
+
 async def test_cleaning_deletion_uses_its_own_table_too(pool):
     """Тот же путь для уборки — своя таблица связок, тот же результат."""
     await _seed_link(pool, 200, table=db.CLEANING_LINKS_TABLE, real_lead_id=5200)
     amo = FakeAmo()
     amo.add_lead(5200, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)
     notify = NotifyLog()
-    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify)
+    handler = DeletionHandler(own_pool=pool, amo=amo, on_notify=notify, dry_run=False)
 
     await handler.run()
 
@@ -268,7 +312,7 @@ async def test_already_seen_records_are_not_reprocessed(pool):
     await _seed_link(pool, 106, real_lead_id=5006)
     amo = FakeAmo()
     amo.add_lead(5006, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS)
-    handler = DeletionHandler(own_pool=pool, amo=amo)
+    handler = DeletionHandler(own_pool=pool, amo=amo, dry_run=False)
 
     first = await handler.run()
     second = await handler.run()
@@ -284,7 +328,7 @@ async def test_one_broken_record_does_not_stop_the_rest(pool):
     await _seed_link(pool, 104, real_lead_id=5004)
     amo = FakeAmo()
     amo.fail_on = "get_lead"
-    handler = DeletionHandler(own_pool=pool, amo=amo)
+    handler = DeletionHandler(own_pool=pool, amo=amo, dry_run=False)
 
     await handler.run()
 

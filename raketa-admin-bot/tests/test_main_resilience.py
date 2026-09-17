@@ -286,6 +286,9 @@ def test_deletions_rehearsal_uses_the_rehearsal_amo_client():
 
     assert handler is not None
     assert handler.amo is rehearsal
+    # dry_run обязателен: без него репетиция ставила бы отметку "разобрано"
+    # по-настоящему и забирала бы записи у последующего боя (см. deletions.py).
+    assert handler.dry_run is True
 
 
 def test_deletions_live_uses_the_live_amo_client():
@@ -297,6 +300,7 @@ def test_deletions_live_uses_the_live_amo_client():
     handler = _build_deletions(settings, None, None, live, rehearsal)
 
     assert handler.amo is live
+    assert handler.dry_run is False
 
 
 def _make_outcome(outcome: str, **fields):

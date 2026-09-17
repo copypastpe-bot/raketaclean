@@ -464,10 +464,12 @@ def _build_deletions(settings: Settings, own_pool: Any, mail: OwnerMail,
     """Собрать разбор удалений (задача 5, ТЗ 2026-09-17). None — функция выключена.
 
     Свой выключатель (задача 7), по умолчанию выключен — заводится отдельно,
-    когда amo_sync/уборки уже проверены в бою. Своя бухгалтерия (пометка связки,
-    `adminbot.order_deletions_seen`) всегда идёт в настоящую базу — как и у
-    напоминания про адрес; репетиция отличается только выбором клиента амо
-    (`rehearsal_amo` ничего не пишет, `live_amo` пишет по-настоящему).
+    когда amo_sync/уборки уже проверены в бою. Своя репетиция, в отличие от
+    напоминания про адрес: отметка о разборе (`adminbot.order_deletions_seen`)
+    необратима, и `DeletionHandler` сам не ставит её в режиме `dry_run` — иначе
+    репетиция забрала бы у последующего боя те самые записи, которые нужно
+    разобрать по-настоящему (см. докстринг класса). `dry_run` передаётся ему
+    явно; выбор клиента амо (`rehearsal_amo`/`live_amo`) идёт по тому же флагу.
     """
     if not settings.order_deletions_enabled:
         log.info("Удаления: функция выключена настройкой ORDER_DELETIONS_ENABLED")
@@ -476,6 +478,7 @@ def _build_deletions(settings: Settings, own_pool: Any, mail: OwnerMail,
     handler = DeletionHandler(
         own_pool=own_pool,
         amo=rehearsal_amo if settings.order_deletions_dry_run else live_amo,
+        dry_run=settings.order_deletions_dry_run,
         on_notify=_make_deletion_notifier(mail, settings.amo_base_url,
                                           dry_run=settings.order_deletions_dry_run),
     )

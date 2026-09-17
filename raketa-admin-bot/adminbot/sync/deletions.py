@@ -136,13 +136,30 @@ class DeletionHandler:
 
     Не отдельный цикл: у него нет ни `run_forever`, ни своего `sleep` — только
     один проход `run()`, который наблюдатель (`sync/watcher.py`) вызывает первым
-    шагом своего тика (решение владельца 4). Собственная бухгалтерия (пометка
-    связки, `adminbot.order_deletions_seen`) всегда идёт в настоящий Postgres,
-    независимо от режима репетиции — как у `AddressReminder` (см. его модуль):
-    иначе отметки жили бы только в пределах одного запуска и разбор шёл бы по
-    кругу. Разницу между репетицией и боем приносит сам `amo` — репетиционный
-    клиент (`rehearsal_amo`) не пишет, боевой (`live_amo`) пишет — какой из них
-    передать сюда, решает `main.py`; обработчику про это знать не нужно.
+    шагом своего тика (решение владельца 4).
+
+    Репетиция (`dry_run=True`) не должна оставлять следов, которые заберут
+    работу у последующего боя, — это правило проекта, и здесь оно особенно
+    важно: отметка «разобрано» (`adminbot.order_deletions_seen`) окончательна,
+    второго шанса у записи нет (в отличие, например, от счётчика напоминаний
+    про адрес, где потерянная попытка ничего не портит). Поэтому в репетиции
+    обработчик ЧИТАЕТ записи, принимает решение по каждой и пишет его только
+    в журнал действий (`store.log`, `dry_run=True` — как это делает движок) и
+    в лог службы, — но НЕ ставит отметку о разборе, НЕ гасит связку
+    (`status='cancelled'`) и НЕ зовёт `on_notify`. Иначе, включив функцию по-
+    настоящему, владелец обнаружил бы, что все накопленные удаления уже
+    «разобраны» репетицией — сделки, которые нужно было вернуть на этап,
+    остались бы закрытыми навсегда. Одна и та же запись в репетиции
+    возвращается в список неразобранных на каждом проходе — это ожидаемо,
+    а не сбой; повторные записи в журнал действий безвредны, дублей писем
+    владельцу при этом не будет вовсе (`on_notify` не вызывается).
+
+    Что до самих действий в CRM (`move_lead`, `add_note`): их выполняет `amo`,
+    и настоящую сеть трогает только боевой клиент — какой из двух передать
+    сюда (`rehearsal_amo` или `live_amo`), решает `main.py` по тому же
+    `dry_run`. Так что писать в амо в репетиции и без того нечем; `dry_run`
+    этого класса нужен ИМЕННО для того, чтобы не закрепить эффект такой
+    несостоявшейся записи в собственной базе.
     """
 
     def __init__(
@@ -150,10 +167,12 @@ class DeletionHandler:
         *,
         own_pool: asyncpg.Pool,
         amo: Any,
+        dry_run: bool = True,
         on_notify: Optional[Callable[[DeletionOutcome], Awaitable[Any]]] = None,
     ) -> None:
         self.own_pool = own_pool
         self.amo = amo
+        self.dry_run = dry_run
         self.on_notify = on_notify
 
     async def run(self) -> int:
@@ -182,13 +201,12 @@ class DeletionHandler:
         link = await store.get(record.order_id)
 
         if link is None:                                            # ветка 1
-            await self._mark_seen(record, "no_link")
+            await self._settle(store, record, "no_link", cancel=False)
             return
 
         lead_id = link.real_lead_id or link.primary_lead_id
-        if lead_id is None:                                          # см. докстринг модуля
-            await store.update(record.order_id, **_CANCEL_FIELDS)
-            await self._mark_seen(record, "no_lead")
+        if lead_id is None:                                          # см. докстринг класса
+            await self._settle(store, record, "no_lead", cancel=True)
             return
 
         other = await self._find_other_live_holder(lead_id, record.kind, record.order_id)
@@ -197,24 +215,19 @@ class DeletionHandler:
             await self._note(store, record, lead_id,
                               _note_text(record, "held_by_other",
                                          other_kind=other_kind, other_order_id=other_order_id))
-            await store.update(record.order_id, **_CANCEL_FIELDS)
-            await self._mark_seen(record, "held_by_other")
-            await self._notify(record, link, "held_by_other", lead_id=lead_id,
-                                other_kind=other_kind, other_order_id=other_order_id)
+            await self._settle(store, record, "held_by_other", cancel=True, link=link,
+                                lead_id=lead_id, other_kind=other_kind,
+                                other_order_id=other_order_id)
             return
 
         lead = await self.amo.get_lead(lead_id)
         if lead is None or lead.get("id") is None:                    # ветка 3 (факт 11)
-            await store.update(record.order_id, **_CANCEL_FIELDS)
-            await self._mark_seen(record, "lead_gone")
-            await self._notify(record, link, "lead_gone", lead_id=lead_id)
+            await self._settle(store, record, "lead_gone", cancel=True, link=link, lead_id=lead_id)
             return
 
         if int(lead.get("status_id") or 0) not in ids.STATUSES_FINAL:  # ветка 4
             await self._note(store, record, lead_id, _note_text(record, "left_open"))
-            await store.update(record.order_id, **_CANCEL_FIELDS)
-            await self._mark_seen(record, "left_open")
-            await self._notify(record, link, "left_open", lead_id=lead_id)
+            await self._settle(store, record, "left_open", cancel=True, link=link, lead_id=lead_id)
             return
 
         # ветка 5 — сделка закрыта, возвращаем на этап, снова делая её кандидатом
@@ -222,9 +235,7 @@ class DeletionHandler:
                            self.amo.move_lead(lead_id, ids.PIPELINE_REALIZATION,
                                               ids.REAL_STAGE_CONFIRMED))
         await self._note(store, record, lead_id, _note_text(record, "reopened"))
-        await store.update(record.order_id, **_CANCEL_FIELDS)
-        await self._mark_seen(record, "reopened")
-        await self._notify(record, link, "reopened", lead_id=lead_id)
+        await self._settle(store, record, "reopened", cancel=True, link=link, lead_id=lead_id)
 
     # --- внутреннее ---
 
@@ -253,6 +264,27 @@ class DeletionHandler:
             row = await conn.fetchrow(_OTHER_LIVE_HOLDER_SQL, lead_id, exclude_order_id,
                                        exclude_kind)
         return None if row is None else (row["kind"], row["order_id"])
+
+    async def _settle(self, store: Any, record: DeletionRecord, outcome: str, *, cancel: bool,
+                       link: Optional[AmoLink] = None, lead_id: Optional[int] = None,
+                       other_kind: Optional[str] = None,
+                       other_order_id: Optional[int] = None) -> None:
+        """Общий хвост каждой ветки: погасить связку (решение 1), поставить
+        отметку о разборе и сообщить владельцу — либо, в репетиции, не делать
+        из этого ничего (см. докстринг класса про необратимость отметки).
+        Действия в CRM и запись в журнал действий (`_write`/`_note`) к этому
+        методу не относятся — они уже случились до его вызова, как положено
+        и в бою, и в репетиции."""
+        if self.dry_run:
+            log.info("%s №%s: репетиция — решил бы %r, связку и отметку не трогаю, "
+                     "владельцу не пишу", _label(record.kind), record.order_id, outcome)
+            return
+        if cancel:
+            await store.update(record.order_id, **_CANCEL_FIELDS)
+        await self._mark_seen(record, outcome)
+        if link is not None:
+            await self._notify(record, link, outcome, lead_id=lead_id,
+                               other_kind=other_kind, other_order_id=other_order_id)
 
     async def _mark_seen(self, record: DeletionRecord, outcome: str) -> None:
         """Отметка о разборе — своя таблица (`adminbot.order_deletions_seen`,
