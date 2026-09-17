@@ -12073,6 +12073,37 @@ async def order_remove_choose(msg: Message, state: FSMContext):
     await msg.answer("\n".join(lines), reply_markup=confirm_inline_kb("order_remove"))
 
 
+async def _record_deleted_order(
+    conn: asyncpg.Connection,
+    *,
+    order_id: int,
+    phone_digits: str | None,
+    client_id: int | None,
+    amount_total: Decimal | None,
+    deleted_by: int | None,
+) -> None:
+    """Кладёт строку в `deleted_orders` (app/migrations/0012_deleted_orders.sql).
+
+    Вызывается из `order_remove_confirm` внутри уже открытой транзакции —
+    своей транзакции не открывает, поэтому откат удаления заказа откатывает
+    и эту запись. `ON CONFLICT DO NOTHING`: номер заказа не переиспользуется
+    (счётчик Postgres не отматывается), но обработчик мог сработать повторно.
+    """
+    await conn.execute(
+        """
+        INSERT INTO deleted_orders
+            (order_id, phone_digits, client_id, amount_total, deleted_by)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (order_id) DO NOTHING
+        """,
+        order_id,
+        phone_digits,
+        client_id,
+        amount_total,
+        deleted_by,
+    )
+
+
 @dp.callback_query(OrderDeleteFSM.waiting_confirm)
 async def order_remove_confirm(query: CallbackQuery, state: FSMContext):
     data = (query.data or "").strip()
@@ -12182,6 +12213,21 @@ async def order_remove_confirm(query: CallbackQuery, state: FSMContext):
                     await conn.execute(
                         "DELETE FROM orders WHERE id = $1",
                         target_id,
+                    )
+
+                    # Регистр для админ-бота (ТЗ 2026-09-17 «удаление заказа
+                    # освобождает сделку в amoCRM», задача 2): без него связка
+                    # с CRM не узнает, что заказ пропал, и сделка останется
+                    # закрытой как успешная. Пишем в той же транзакции, что и
+                    # DELETE — откат удаления не должен оставить запись в
+                    # регистре.
+                    await _record_deleted_order(
+                        conn,
+                        order_id=target_id,
+                        phone_digits=only_digits(normalize_phone_for_db(row["client_phone"] or "")) or None,
+                        client_id=client_id,
+                        amount_total=amount_total,
+                        deleted_by=query.from_user.id,
                     )
 
                     balance = await get_cash_balance_excluding_withdrawals(conn)
