@@ -229,6 +229,72 @@ async def test_order_waiting_for_the_owner_is_not_reported_twice():
     assert reported == []
 
 
+async def test_deletions_step_runs_before_orders_are_fetched():
+    """Решение владельца 4 (ТЗ 2026-09-17): разбор удалений — первым шагом
+    тика, до того как источник увидит заказы. Порядок вызовов и есть защита
+    от гонки «удаление позже нового заказа»."""
+    calls = []
+
+    async def handle_deletions():
+        calls.append("deletions")
+        return 1
+
+    class RecordingSource(FakeSource):
+        async def pending(self):
+            calls.append("pending")
+            return await super().pending()
+
+    source = RecordingSource([make_order()])
+    engine = FakeEngine({596: make_link(596, "done")})
+
+    await Watcher(engine=engine, source=source, handle_deletions=handle_deletions).tick()
+
+    assert calls == ["deletions", "pending"]
+
+
+async def test_deletions_step_is_skipped_when_watcher_is_paused():
+    calls = []
+
+    async def handle_deletions():
+        calls.append(1)
+
+    source = FakeSource([make_order()])
+    engine = FakeEngine()
+
+    report = await Watcher(engine=engine, source=source, handle_deletions=handle_deletions,
+                           is_enabled=lambda: False).tick()
+
+    assert report.paused is True
+    assert calls == []
+
+
+async def test_broken_deletions_step_does_not_stop_the_tick():
+    """Сбой разбора удалений (например, амо недоступна) не должен мешать
+    обычной доводке заказов в том же тике."""
+    async def handle_deletions():
+        raise RuntimeError("амо недоступна")
+
+    source = FakeSource([make_order()])
+    engine = FakeEngine({596: make_link(596, "done")})
+
+    report = await Watcher(engine=engine, source=source,
+                           handle_deletions=handle_deletions).tick()
+
+    assert engine.processed == [596]
+    assert report.by_status == {"done": 1}
+
+
+async def test_watcher_without_deletions_handler_behaves_as_before():
+    """Существующие вызовы (без handle_deletions) не меняют поведение."""
+    source = FakeSource([make_order()])
+    engine = FakeEngine({596: make_link(596, "done")})
+
+    report = await Watcher(engine=engine, source=source).tick()
+
+    assert report.scanned == 1
+    assert report.by_status == {"done": 1}
+
+
 class _SourceStub:
     def __init__(self, orders):
         self._orders = orders
