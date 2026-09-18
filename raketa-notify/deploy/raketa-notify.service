@@ -1,0 +1,27 @@
+[Unit]
+Description=Raketa Notify (служба-почтальон оповещений)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=notify
+Group=notify
+WorkingDirectory=/opt/raketa-notify/app
+EnvironmentFile=/opt/raketa-notify/.env
+ExecStart=/opt/raketa-notify/.venv/bin/python -m notifyd.main
+Restart=always
+RestartSec=5s
+
+# Сервис пишет во внешние Telegram-чаты, поэтому прав на сервере ему нужно
+# как можно меньше (тот же приём, что у raketa-admin-bot.service).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+# Postgres на этом сервере без TLS: иначе asyncpg пробует SSL и падает.
+Environment=PGSSLMODE=disable
+
+[Install]
+WantedBy=multi-user.target
