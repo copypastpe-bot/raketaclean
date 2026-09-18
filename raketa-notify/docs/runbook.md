@@ -10,7 +10,7 @@
 
 ## 1. Что владелец вписывает своими руками
 
-Агент за паролями и токенами не ходит. Эти пять значений владелец вносит
+Агент за паролями и токенами не ходит. Эти значения владелец вносит
 в `/opt/raketa-notify/.env` на сервере сам:
 
 | Переменная | Что это |
@@ -19,6 +19,7 @@
 | `MY_ADMIN_TG_TOKEN` | токен бота My_admin |
 | `TECH_JOURNAL_CHAT_ID` | номер технического чата (вида `-100…`) |
 | `TELEGRAM_API_IPS`, `TELEGRAM_PROXY_URL` | копируются из `.env` рабочего бота как есть |
+| `MY_ADMIN_OWNER_TG_ID` | Telegram id владельца — кому разрешено нажимать кнопки инцидентов |
 
 Остальное — `WORKER_TG_TOKEN`, `ADMINBOT_TG_TOKEN`, `OPS_FEED_CHAT_ID`,
 `MY_ASSISTANT_CHAT_ID`, `MANAGER_CHAT_ID` — тоже копируются из настроек ботов.
@@ -29,6 +30,10 @@
 ## 2. Установка
 
 ```bash
+# 0. Пользователь, под которым работает служба (без него она не запустится).
+#    Тот же приём, что у админ-бота: системный, без входа в систему.
+sudo useradd --system --shell /usr/sbin/nologin --home /opt/raketa-notify notify || true
+
 # 1. Код
 sudo mkdir -p /opt/raketa-notify
 sudo rsync -a --delete ~/raketa-notify/ /opt/raketa-notify/app/
@@ -85,12 +90,28 @@ journalctl -u raketa-notify.service -n 30 --no-pager
 | 1 | репетиция почтальона | `NOTIFY_ENABLED=1`, `NOTIFY_DRY_RUN=1` | в журнале «отправила бы…», ни одного сообщения в чатах |
 | 2 | боевая доставка | `NOTIFY_DRY_RUN=0` | события из ящика доходят до чатов |
 | 3 | технический журнал | `NOTIFY_JOURNAL_ENABLED=1` | в технический чат идут записи с `#тегами`, без звука |
-| 4 | пульс ботов | `SERVICE_HEARTBEAT_ENABLED=1` (рабочий бот), `HEARTBEAT_ENABLED=1` (админ-бот) | отметки «жив» обновляются раз в минуту |
+| 4 | пульс ботов — **в настройках самих ботов, не службы** (см. ниже) | `SERVICE_HEARTBEAT_ENABLED=1` (рабочий бот), `HEARTBEAT_ENABLED=1` (админ-бот) | отметки «жив» обновляются раз в минуту |
 | 5 | сторож | `NOTIFY_WATCHDOG_ENABLED=1` | в журнале службы результаты семи проверок |
-| 6 | инциденты | `NOTIFY_INCIDENTS_ENABLED=1` | поломка доходит до My_admin с кнопкой |
+| 6 | инциденты и приём кнопок | `NOTIFY_INCIDENTS_ENABLED=1`, `NOTIFY_MY_ADMIN_ENABLED=1`, `MY_ADMIN_OWNER_TG_ID=<ваш id>` | поломка доходит до My_admin с кнопкой, и **кнопка работает** |
 
 Шаги 4 и 5 **нельзя менять местами**: сторож, включённый раньше пульса, увидит
 молчащие отметки и заведёт ложные поломки.
+
+**Шаг 4 делается не так, как остальные.** Эти две переменные живут в настройках самих
+ботов, а не службы, и перезапуск `raketa-notify.service` на них никак не влияет:
+
+```bash
+# рабочий бот: правим /opt/telegram-bot/.env, затем
+sudo systemctl restart telegram-bot.service
+
+# админ-бот: правим его .env, затем ДВА шага (простой restart поднимет старую версию)
+rsync -a ~/Projects/raketaclean/raketa-admin-bot/ /home/admin/raketa-admin-bot/
+sudo raketa-admin-bot-update
+```
+
+**Шаг 6 без `NOTIFY_MY_ADMIN_ENABLED` и `MY_ADMIN_OWNER_TG_ID` включать нельзя.** Кнопка
+нарисуется, но нажимать её будет некому: красная тревога продолжит приходить каждые
+10 минут круглосуточно, а `/status` не ответит.
 
 Выключить любой шаг — вернуть переменную в `0` и перезапустить службу.
 
