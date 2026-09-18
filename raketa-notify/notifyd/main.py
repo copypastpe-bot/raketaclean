@@ -64,10 +64,13 @@ async def run() -> None:
     settings = Settings.from_env()
 
     pool = await db.create_pool(settings.db_dsn)
+    # Дорога до Telegram у всех трёх отправителей одна и та же — та, которой
+    # ходят сами боты: прямые адреса плюс прокси, если он задан.
+    road = {"ip_pool": settings.telegram_api_ips, "proxy": settings.telegram_proxy_url}
     senders = {
-        "worker": AiogramSender(settings.worker_tg_token),
-        "adminbot": AiogramSender(settings.adminbot_tg_token),
-        "my_admin": AiogramSender(settings.my_admin_tg_token),
+        "worker": AiogramSender(settings.worker_tg_token, **road),
+        "adminbot": AiogramSender(settings.adminbot_tg_token, **road),
+        "my_admin": AiogramSender(settings.my_admin_tg_token, **road),
     }
     targets = build_targets(settings, senders)
 

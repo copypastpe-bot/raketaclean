@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+
+from notifyd.tg_session import parse_ip_pool
 
 # Обязательные переменные окружения; порядок важен — сообщение об ошибке
 # называет первую недостающую (тот же приём, что в adminbot/config.py).
@@ -90,6 +92,12 @@ class Settings:
     poll_interval_sec: int = 60
     batch_limit: int = 20
 
+    # Дорога до Telegram. С боевого VPS имя api.telegram.org не разрешается, и оба
+    # бота давно ходят по прямым адресам и через прокси. Служба обязана ходить так же,
+    # иначе на проде не отправит ничего (найдено координатором при проверке задачи 3).
+    telegram_api_ips: tuple[str, ...] = field(default_factory=tuple)
+    telegram_proxy_url: str = ""
+
     # Номера чатов по адресам справочника notify.routes.address. Какой бот
     # физически пишет в какой адрес — решение исполнителя этой задачи (не в ТЗ):
     # my_assistant — существующий бот админ-бота (решение владельца 18.09, это
@@ -125,4 +133,6 @@ class Settings:
             my_assistant_chat_id=_chat_id("MY_ASSISTANT_CHAT_ID"),
             my_admin_chat_id=_chat_id("MY_ADMIN_CHAT_ID"),
             manager_chat_id=_chat_id("MANAGER_CHAT_ID"),
+            telegram_api_ips=tuple(parse_ip_pool(os.environ.get("TELEGRAM_API_IPS"))),
+            telegram_proxy_url=(os.environ.get("TELEGRAM_PROXY_URL") or "").strip(),
         )
