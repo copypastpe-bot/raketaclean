@@ -319,6 +319,21 @@ CLIENT_BOT_HEALTHCHECK_INTERVAL_SEC = int(
 CLIENT_BOT_HEALTH_MAX_AGE_SEC = int(
     os.getenv("CLIENT_BOT_HEALTH_MAX_AGE_SEC", "300") or "300"
 )
+# Свой пульс рабочего бота (ТЗ 2026-09-18 «оповещения», задача 6): раз в
+# минуту отмечается «я жив» в той же таблице service_heartbeats, которую уже
+# читает check_client_bot_health для клиентского бота — формат тот же самый,
+# только service_key другой, чтобы сторож (raketa-notify/notifyd/watchdog.py)
+# мог проверить оба пульса одним и тем же запросом. Свой выключатель, по
+# умолчанию ВЫКЛЮЧЕН (правило проекта) — по «Порядку выката» ТЗ включается
+# вместе со сторожем, отдельным шагом.
+SERVICE_HEARTBEAT_ENABLED = _env_int("SERVICE_HEARTBEAT_ENABLED", 0) == 1
+SERVICE_HEARTBEAT_SERVICE_KEY = (
+    os.getenv("SERVICE_HEARTBEAT_SERVICE_KEY") or "telegram-bot-worker"
+).strip()
+SERVICE_HEARTBEAT_DISPLAY_NAME = (
+    os.getenv("SERVICE_HEARTBEAT_DISPLAY_NAME") or "Рабочий бот (заказы)"
+).strip()
+SERVICE_HEARTBEAT_INTERVAL_SEC = max(30, _env_int("SERVICE_HEARTBEAT_INTERVAL_SEC", 60))
 # Дозаполнение адреса заказа/клиента из связки админ-бота с CRM (ТЗ 2026-09-16
 # «адреса до конца», задача 4). Раз в минуту, глубина — неделя: заказы старше
 # решает владелец руками.
@@ -529,6 +544,7 @@ client_bot_health_task: asyncio.Task | None = None
 amocrm_api_task: asyncio.Task | None = None
 address_backfill_task: asyncio.Task | None = None  # дозаполнение адреса из связки админ-бота
 pending_order_reports_task: asyncio.Task | None = None  # отложенный отчёт и сообщение о деньгах
+own_heartbeat_task: asyncio.Task | None = None      # пульс рабочего бота (оповещения, задача 6)
 BONUS_CHANGE_NOTIFICATIONS_ENABLED = False
 
 # === Ignore group/supergroup/channel updates; work only in private chats ===
@@ -7468,6 +7484,39 @@ async def check_client_bot_health() -> None:
                 CLIENT_BOT_HEALTH_SERVICE_KEY,
             )
             logger.info("Client bot health recovered")
+
+
+async def write_own_heartbeat() -> None:
+    """Отметить «я жив» в той же таблице, которую уже читает
+    check_client_bot_health для клиентского бота (ТЗ 2026-09-18, задача 6).
+
+    Без отдельного «глубокого» самотеста: сам факт успешного UPSERT в базу
+    и есть проверка «я жив» — если процесс завис или потерял связь с базой,
+    строка просто не обновится, и сторож (raketa-notify) увидит это по
+    возрасту last_seen_at. last_ok_at ставится тем же значением, что и
+    last_seen_at: отдельного «глубокого» health-чека, как у клиентского бота
+    (там это настоящая проверка Telegram), здесь нет и не требуется задачей.
+    """
+    if pool is None:
+        return
+    now_utc = datetime.now(timezone.utc)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO service_heartbeats
+                (service_key, display_name, status, last_seen_at, last_ok_at, updated_at)
+            VALUES ($1, $2, 'ok', $3, $3, $3)
+            ON CONFLICT (service_key) DO UPDATE
+            SET display_name = EXCLUDED.display_name,
+                status = 'ok',
+                last_seen_at = EXCLUDED.last_seen_at,
+                last_ok_at = EXCLUDED.last_ok_at,
+                updated_at = EXCLUDED.updated_at
+            """,
+            SERVICE_HEARTBEAT_SERVICE_KEY,
+            SERVICE_HEARTBEAT_DISPLAY_NAME,
+            now_utc,
+        )
 
 
 async def clear_dead_channels_weekly() -> None:
@@ -15183,7 +15232,7 @@ async def unknown(msg: Message, state: FSMContext):
     await msg.answer("Команда не распознана. Выберите действие на клавиатуре ниже.", reply_markup=kb)
 
 async def main():
-    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task
+    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task, own_heartbeat_task
     notification_rules = _load_notification_rules()
     pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=5)
     dp["pool"] = pool
@@ -15305,6 +15354,14 @@ async def main():
         )
     if amocrm_api_task is None and _amocrm_api_enabled():
         amocrm_api_task = asyncio.create_task(amocrm_api_polling_loop())
+    if own_heartbeat_task is None and SERVICE_HEARTBEAT_ENABLED:
+        own_heartbeat_task = asyncio.create_task(
+            schedule_periodic_job(
+                SERVICE_HEARTBEAT_INTERVAL_SEC,
+                write_own_heartbeat,
+                "own_heartbeat",
+            )
+        )
     if notification_rules is not None:
         notification_worker = NotificationWorker(
             pool,
