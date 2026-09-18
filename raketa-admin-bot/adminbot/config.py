@@ -208,6 +208,14 @@ class Settings:
     # Мастер заказа → вид работ для поля «Услуга»
     service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
+    # Пульс админ-бота (ТЗ 2026-09-18 «оповещения», задача 6): свой выключатель,
+    # по умолчанию выключен — включается вместе со сторожем службы оповещений
+    # (raketa-notify), не раньше. Своей репетиции нет: сама отметка «я жив»
+    # ничего не решает и никому не пишет, кроме собственной строки в
+    # notify.service_heartbeats.
+    heartbeat_enabled: bool = False
+    heartbeat_interval_sec: int = 60
+
     # Уборки клининг-контура: свой выключатель и своя репетиция.
     # Работы приходят из отдельной таблицы бота (`public.cleaning_orders`),
     # поэтому и поток свой — со своей таблицей связок.
@@ -308,6 +316,8 @@ class Settings:
             order_deletions_dry_run=_flag("ORDER_DELETIONS_DRY_RUN", True),
             service_by_master=_service_by_master("SERVICE_BY_MASTER",
                                                  DEFAULT_SERVICE_BY_MASTER),
+            heartbeat_enabled=_flag("HEARTBEAT_ENABLED", False),
+            heartbeat_interval_sec=_int("HEARTBEAT_INTERVAL_SEC", 60),
             telegram_api_ips=tuple(parse_ip_pool(os.environ.get("TELEGRAM_API_IPS"))),
             telegram_proxy_url=(os.environ.get("TELEGRAM_PROXY_URL") or "").strip(),
             cleaning_sync_enabled=_flag("CLEANING_SYNC_ENABLED", False),

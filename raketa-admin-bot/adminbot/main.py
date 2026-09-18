@@ -46,6 +46,7 @@ from adminbot.gcal.watcher import CalendarWatcher
 from adminbot.carpets.store import MemoryCarpetStore, PgCarpetStore
 from adminbot.carpets.watcher import CarpetWatcher
 from adminbot.control import PgControlPanel, sync_allowed
+from adminbot.heartbeat import HeartbeatWriter
 from adminbot.mail import MailBox, mail_settings_from_env
 from adminbot.phone import for_owner
 from adminbot.sync.address_reminder import DEFAULT_CAP, AddressReminder, PgReminderSource
@@ -129,6 +130,9 @@ class App:
     # в опросе, но его aiohttp-сессия открывается лениво при первой отправке и должна
     # закрыться вместе с сервисом, как и сессия self.bot.
     autocall_manager_bot: Optional[Bot] = None
+    # Пульс админ-бота (оповещения, задача 6): свой выключатель, поэтому обычно
+    # пусто, даже когда остальное уже в бою.
+    heartbeat: Optional[Any] = None
 
     async def run(self) -> None:
         """Запустить всё до сигнала остановки."""
@@ -165,6 +169,9 @@ class App:
         if self.mail is not None:
             background.append(asyncio.create_task(
                 self.mail.run_forever(self.stop), name="mail"))
+        if self.heartbeat is not None:
+            background.append(asyncio.create_task(
+                self.heartbeat.run_forever(self.stop), name="heartbeat"))
         try:
             await self._poll_until_stopped()
         finally:
@@ -392,6 +399,15 @@ async def build_app(settings: Settings) -> App:
         cleaning_address=cleaning_address_answers,
     ))
 
+    # Пульс админ-бота (оповещения, задача 6): своя таблица notify.
+    # service_heartbeats — писать в public.service_heartbeats этому боту
+    # нельзя (хард-правило), а notify — территория, где право писать уже
+    # есть (см. adminbot/heartbeat.py).
+    heartbeat = (
+        HeartbeatWriter(pool=own_pool, poll_interval_sec=settings.heartbeat_interval_sec)
+        if settings.heartbeat_enabled else None
+    )
+
     return App(settings=settings, bot_pool=bot_pool, own_pool=own_pool,
                amo_clients=(rehearsal_amo, live_amo), bot=bot,
                dispatcher=dispatcher, watcher=watcher, reconciler=reconciler,
@@ -404,6 +420,7 @@ async def build_app(settings: Settings) -> App:
                address_reminder=address_reminder,
                cleaning_address_reminder=cleaning_address_reminder,
                mail=mail,
+               heartbeat=heartbeat,
                stop=asyncio.Event())
 
 
