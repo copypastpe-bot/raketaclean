@@ -347,8 +347,9 @@ async def open_incident(pool: asyncpg.Pool, *, key: str, level: str, address: st
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             f"""
-            INSERT INTO notify.incidents (key, level, address, detail, opened_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO notify.incidents
+                (key, level, address, detail, opened_at, last_notified_at, notify_count)
+            VALUES ($1, $2, $3, $4, $5, $5, 1)
             ON CONFLICT (key) WHERE state <> 'closed' DO NOTHING
             RETURNING {_INCIDENT_COLUMNS}
             """,
