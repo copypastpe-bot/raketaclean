@@ -1,0 +1,128 @@
+"""Настройки службы: читаются из окружения один раз при старте.
+
+Правило проекта (ТЗ 2026-09-18, задача 3): выключатель обязателен и по умолчанию
+ВЫКЛЮЧЕН; режим репетиции — по умолчанию ВКЛЮЧЁН, как у остальных функций обоих
+ботов (адрес, куда реально шлём, включает владелец явно).
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Optional
+
+# Обязательные переменные окружения; порядок важен — сообщение об ошибке
+# называет первую недостающую (тот же приём, что в adminbot/config.py).
+REQUIRED_ENV = (
+    "NOTIFY_DB_DSN",
+    "WORKER_TG_TOKEN",
+    "ADMINBOT_TG_TOKEN",
+    "MY_ADMIN_TG_TOKEN",
+)
+
+_TRUE_VALUES = {"1", "true"}
+
+# Адреса справочника notify.routes (CHECK-ограничение миграции 001) — здесь же
+# перечислены, чтобы CLI и служба сверялись с одним и тем же списком.
+ADDRESSES = ("work_chat", "ops_feed", "tech_journal", "my_assistant", "my_admin", "manager")
+LEVELS = ("red", "yellow", "grey")
+
+
+def _require(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Не задана обязательная переменная окружения: {name}")
+    return value
+
+
+def _flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in _TRUE_VALUES
+
+
+def _int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Переменная {name} должна быть целым числом, получено: {raw!r}"
+        ) from exc
+
+
+def _chat_id(name: str) -> Optional[int]:
+    """Номер чата для одного адреса справочника.
+
+    Пусто — адрес не настроен. Это не ошибка сама по себе: почтальон падает
+    не при старте, а только если справочник и правда сослался на пустой адрес
+    (тогда событие откладывается, а не отправляется в пустоту).
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Переменная {name} должна быть числовым id чата, получено: {raw!r}"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Настройки службы. Неизменяемы после чтения окружения."""
+
+    db_dsn: str
+
+    # Токены. Рабочий бот и админ-бот — уже существующие боты (их токены просто
+    # копируются в .env этой службы); My_admin — новый бот, завести должен владелец.
+    worker_tg_token: str
+    adminbot_tg_token: str
+    my_admin_tg_token: str
+
+    enabled: bool = False    # kill switch: по умолчанию служба ничего не отправляет
+    dry_run: bool = True     # по умолчанию репетиция: решения принимаем, никуда не шлём
+
+    poll_interval_sec: int = 60
+    batch_limit: int = 20
+
+    # Номера чатов по адресам справочника notify.routes.address. Какой бот
+    # физически пишет в какой адрес — решение исполнителя этой задачи (не в ТЗ):
+    # my_assistant — существующий бот админ-бота (решение владельца 18.09, это
+    # он и есть); my_admin — новый бот; work_chat/ops_feed/tech_journal/manager —
+    # рабочий бот, он уже пишет в чат логов и чат менеджера сегодня (факты
+    # разведки). Комментарий явный, чтобы владелец мог поправить, если не угадано.
+    work_chat_id: Optional[int] = None
+    ops_feed_chat_id: Optional[int] = None
+    tech_journal_chat_id: Optional[int] = None
+    my_assistant_chat_id: Optional[int] = None
+    my_admin_chat_id: Optional[int] = None
+    manager_chat_id: Optional[int] = None
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        """Собрать настройки из переменных окружения.
+
+        Обязательные переменные без значения -> RuntimeError с именем переменной.
+        """
+        values = {name: _require(name) for name in REQUIRED_ENV}
+        return cls(
+            db_dsn=values["NOTIFY_DB_DSN"],
+            worker_tg_token=values["WORKER_TG_TOKEN"],
+            adminbot_tg_token=values["ADMINBOT_TG_TOKEN"],
+            my_admin_tg_token=values["MY_ADMIN_TG_TOKEN"],
+            enabled=_flag("NOTIFY_ENABLED", False),
+            dry_run=_flag("NOTIFY_DRY_RUN", True),
+            poll_interval_sec=_int("NOTIFY_POLL_INTERVAL_SEC", 60),
+            batch_limit=_int("NOTIFY_BATCH_LIMIT", 20),
+            work_chat_id=_chat_id("WORK_CHAT_ID"),
+            ops_feed_chat_id=_chat_id("OPS_FEED_CHAT_ID"),
+            tech_journal_chat_id=_chat_id("TECH_JOURNAL_CHAT_ID"),
+            my_assistant_chat_id=_chat_id("MY_ASSISTANT_CHAT_ID"),
+            my_admin_chat_id=_chat_id("MY_ADMIN_CHAT_ID"),
+            manager_chat_id=_chat_id("MANAGER_CHAT_ID"),
+        )
