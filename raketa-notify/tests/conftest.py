@@ -92,3 +92,24 @@ class FakeSender:
         self.sent.append((chat_id, text, reply_markup))
         self._next_id += 1
         return self._next_id
+
+
+class FakeJournalSource:
+    """Источник журнала для тестов переходника (задача 5): читать
+    настоящий journald на macOS нельзя (ограничение среды в ТЗ), поэтому
+    тест кладёт строки сам через `.push(...)`, а `read_new()` отдаёт их
+    один раз и очищает — как реальный источник отдаёт только новое."""
+
+    def __init__(self, unit: str) -> None:
+        self.unit = unit
+        self._pending: list[Any] = []
+
+    def push(self, message: str, *, timestamp: Optional[datetime] = None) -> None:
+        from notifyd.journal_source import JournalEntry
+
+        self._pending.append(JournalEntry(unit=self.unit, timestamp=timestamp or NOW,
+                                          message=message))
+
+    async def read_new(self) -> list[Any]:
+        entries, self._pending = self._pending, []
+        return entries

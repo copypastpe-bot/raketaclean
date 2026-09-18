@@ -13,6 +13,12 @@ ExecStart=/opt/raketa-notify/.venv/bin/python -m notifyd.main
 Restart=always
 RestartSec=5s
 
+# Переходник журнала (задача 5) читает journalctl обоих ботов. Членство в
+# systemd-journal — стандартный способ читать чужой журнал без root (см.
+# journalctl(1), «Access Control»); группа существует на любом systemd-хосте
+# сама по себе, ничего заводить отдельно не нужно.
+SupplementaryGroups=systemd-journal
+
 # Сервис пишет во внешние Telegram-чаты, поэтому прав на сервере ему нужно
 # как можно меньше (тот же приём, что у raketa-admin-bot.service).
 NoNewPrivileges=true

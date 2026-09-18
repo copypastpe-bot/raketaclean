@@ -16,6 +16,8 @@ import signal
 
 from notifyd import db
 from notifyd.config import Settings
+from notifyd.journal_adapter import WATCHED_UNITS, JournalAdapter
+from notifyd.journal_source import SystemdJournalSource
 from notifyd.postman import Postman, Target
 from notifyd.telegram import AiogramSender
 
@@ -79,15 +81,28 @@ async def run() -> None:
                       poll_interval_sec=settings.poll_interval_sec,
                       batch_limit=settings.batch_limit)
 
+    # Переходник журнала (задача 5) — свой цикл в том же процессе; кладёт
+    # в notify.outbox, дальше тот же почтальон доставляет как любое другое
+    # событие. Источники настоящие (journalctl) всегда, даже если сам
+    # переходник выключен — JournalAdapter.run_forever их просто не трогает.
+    journal_adapter = JournalAdapter(
+        pool=pool,
+        sources={unit: SystemdJournalSource(unit) for unit in WATCHED_UNITS},
+        enabled=settings.journal_enabled,
+        poll_interval_sec=settings.journal_poll_interval_sec,
+        cap_per_cycle=settings.journal_max_per_minute,
+    )
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
-    log.info("notify: служба запущена (enabled=%s, dry_run=%s, адресов настроено=%s)",
-             settings.enabled, settings.dry_run, len(targets))
+    log.info("notify: служба запущена (enabled=%s, dry_run=%s, адресов настроено=%s, "
+             "переходник журнала enabled=%s)",
+             settings.enabled, settings.dry_run, len(targets), settings.journal_enabled)
     try:
-        await postman.run_forever(stop)
+        await asyncio.gather(postman.run_forever(stop), journal_adapter.run_forever(stop))
     finally:
         for sender in senders.values():
             await sender.close()

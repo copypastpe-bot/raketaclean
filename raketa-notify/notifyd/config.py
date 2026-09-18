@@ -92,6 +92,14 @@ class Settings:
     poll_interval_sec: int = 60
     batch_limit: int = 20
 
+    # Переходник журнала (задача 5) — свой выключатель, по умолчанию
+    # ВЫКЛЮЧЕН (правило проекта), отдельно от NOTIFY_ENABLED почтальона:
+    # можно читать journalctl и класть в ящик, не трогая остальную службу,
+    # и наоборот — почтальон работает, даже если переходник выключен.
+    journal_enabled: bool = False
+    journal_poll_interval_sec: int = 60
+    journal_max_per_minute: int = 20
+
     # Дорога до Telegram. С боевого VPS имя api.telegram.org не разрешается, и оба
     # бота давно ходят по прямым адресам и через прокси. Служба обязана ходить так же,
     # иначе на проде не отправит ничего (найдено координатором при проверке задачи 3).
@@ -127,6 +135,9 @@ class Settings:
             dry_run=_flag("NOTIFY_DRY_RUN", True),
             poll_interval_sec=_int("NOTIFY_POLL_INTERVAL_SEC", 60),
             batch_limit=_int("NOTIFY_BATCH_LIMIT", 20),
+            journal_enabled=_flag("NOTIFY_JOURNAL_ENABLED", False),
+            journal_poll_interval_sec=_int("NOTIFY_JOURNAL_POLL_INTERVAL_SEC", 60),
+            journal_max_per_minute=_int("NOTIFY_JOURNAL_MAX_PER_MINUTE", 20),
             work_chat_id=_chat_id("WORK_CHAT_ID"),
             ops_feed_chat_id=_chat_id("OPS_FEED_CHAT_ID"),
             tech_journal_chat_id=_chat_id("TECH_JOURNAL_CHAT_ID"),

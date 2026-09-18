@@ -29,6 +29,33 @@ async def create_pool(dsn: str, *, min_size: int = 1, max_size: int = 5) -> asyn
 # Почтовый ящик notify.outbox
 # --------------------------------------------------------------------------
 
+async def insert_event(pool: asyncpg.Pool, *, kind: str, text: str, source: str,
+                       now: datetime, expires_at: datetime,
+                       ref: Optional[str] = None) -> int:
+    """Положить новое событие в ящик — из самой службы (сторож, переходник
+    журнала), а не от ботов: те кладут события своим отдельным клиентом
+    (`notifications/notify_bus.py`, `raketa-admin-bot/adminbot/notify_bus.py`),
+    сюда не заходя. `reply_markup` здесь не параметр: у событий самой службы
+    кнопок не бывает.
+
+    `next_try_at` ставится в `now` явно, а не отдаётся дефолту колонки
+    (`DEFAULT now()`) — источники времени разные: вызывающий код (почтальон,
+    переходник журнала) может работать на подложенных часах в тестах, а
+    дефолт колонки — это всегда настоящее время самого Postgres. Если бы
+    `next_try_at` брался из дефолта, «созревшесть» события в `claim_due`
+    сравнивалась бы с ЧУЖИМИ часами, независимо от того, какое `now`
+    подложено в тесте вызывающему коду."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO notify.outbox (kind, text, ref, source, next_try_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+            """,
+            kind, text, ref, source, now, expires_at,
+        )
+
+
 # Аренда строки на время попытки доставки. Не путать с BACKOFF_SEC в
 # notifyd/postman.py (та пауза — после ПОДТВЕРЖДЁННОЙ неудачи). Эта — страховка
 # от двух одновременно работающих циклов почтальона: строка помечена «занята»
