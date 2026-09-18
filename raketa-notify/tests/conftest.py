@@ -26,6 +26,7 @@ TEST_DB_DSN = os.environ.get("TEST_DB_DSN")
 
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = sorted((ROOT / "migrations").glob("*.sql"))
+BOT_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "bot_schema_min.sql"
 
 NOW = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
 
@@ -39,6 +40,34 @@ async def pool():
     admin_pool = await db.create_pool(TEST_DB_DSN, min_size=1, max_size=5)
     async with admin_pool.acquire() as conn:
         await conn.execute("DROP SCHEMA IF EXISTS notify CASCADE")
+        for migration in MIGRATIONS:
+            await conn.execute(migration.read_text())
+    try:
+        yield admin_pool
+    finally:
+        await admin_pool.close()
+
+
+@pytest.fixture
+async def watchdog_pool():
+    """Пул для тестов сторожа (задача 7): вдобавок к схеме `notify` — урезанная
+    копия таблиц рабочего бота (public.service_heartbeats, amocrm_api_state,
+    notification_outbox), которые сторож только читает (см. fixtures/bot_schema_min.sql).
+
+    Не переиспользует фикстуру `pool` — порядок здесь важен и обратный по
+    отношению к бою. Копия таблиц бота накатывается ПЕРЕД миграциями notify,
+    а не после: миграция 002 выдаёт роли notify SELECT на эти таблицы, и
+    если создать их позже, права потеряются (GRANT привязан к конкретному
+    объекту, а не к имени — DROP+CREATE делает новую таблицу без унаследованных
+    прав). В бою порядок и вправду обратный: эти таблицы бутстрапит bot.py
+    и они живут годами, а миграция 002 приходит уже на готовые."""
+    if not TEST_DB_DSN:
+        pytest.skip("TEST_DB_DSN не задан — нужен Postgres")
+
+    admin_pool = await db.create_pool(TEST_DB_DSN, min_size=1, max_size=5)
+    async with admin_pool.acquire() as conn:
+        await conn.execute("DROP SCHEMA IF EXISTS notify CASCADE")
+        await conn.execute(BOT_FIXTURE.read_text())
         for migration in MIGRATIONS:
             await conn.execute(migration.read_text())
     try:

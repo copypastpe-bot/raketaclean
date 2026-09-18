@@ -56,6 +56,18 @@ def _int(name: str, default: int) -> int:
         ) from exc
 
 
+def _float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Переменная {name} должна быть числом, получено: {raw!r}"
+        ) from exc
+
+
 def _chat_id(name: str) -> Optional[int]:
     """Номер чата для одного адреса справочника.
 
@@ -100,6 +112,26 @@ class Settings:
     journal_poll_interval_sec: int = 60
     journal_max_per_minute: int = 20
 
+    # Сторож (задача 7) — свой выключатель, по умолчанию ВЫКЛЮЧЕН (по «Порядку
+    # выката» ТЗ включается вместе с пульсом ботов, задача 6, шагом позже
+    # переходника журнала). Определяет только «сломано/работает» — инциденты
+    # (задача 8) не пишет и не открывает.
+    watchdog_enabled: bool = False
+    watchdog_poll_interval_sec: int = 60
+    # Пороги «сломано» — по возрасту последней отметки/успеха. 5 минут для
+    # пульса — то же число, что уже проверено на клиентском боте
+    # (CLIENT_BOT_HEALTH_MAX_AGE_SEC, bot.py:319); для amoCRM — тот же порядок
+    # (опрос по умолчанию раз в 30 сек, AMOCRM_POLL_INTERVAL_SEC, bot.py:268,
+    # 5 минут — большой запас на разовую заминку CRM).
+    watchdog_heartbeat_max_age_sec: int = 300
+    watchdog_amocrm_max_age_sec: int = 300
+    watchdog_db_timeout_sec: float = 5.0
+    watchdog_proxy_timeout_sec: float = 5.0
+    # Рассыльщик клиентам ходит раз в CLIENT_MESSAGING_INTERVAL_SEC (по
+    # умолчанию 600 сек, bot.py:284) — порог с запасом в 3 цикла, чтобы одна
+    # медленная попытка не считалась поломкой.
+    watchdog_dispatch_max_age_sec: int = 1800
+
     # Дорога до Telegram. С боевого VPS имя api.telegram.org не разрешается, и оба
     # бота давно ходят по прямым адресам и через прокси. Служба обязана ходить так же,
     # иначе на проде не отправит ничего (найдено координатором при проверке задачи 3).
@@ -138,6 +170,13 @@ class Settings:
             journal_enabled=_flag("NOTIFY_JOURNAL_ENABLED", False),
             journal_poll_interval_sec=_int("NOTIFY_JOURNAL_POLL_INTERVAL_SEC", 60),
             journal_max_per_minute=_int("NOTIFY_JOURNAL_MAX_PER_MINUTE", 20),
+            watchdog_enabled=_flag("NOTIFY_WATCHDOG_ENABLED", False),
+            watchdog_poll_interval_sec=_int("NOTIFY_WATCHDOG_POLL_INTERVAL_SEC", 60),
+            watchdog_heartbeat_max_age_sec=_int("NOTIFY_WATCHDOG_HEARTBEAT_MAX_AGE_SEC", 300),
+            watchdog_amocrm_max_age_sec=_int("NOTIFY_WATCHDOG_AMOCRM_MAX_AGE_SEC", 300),
+            watchdog_db_timeout_sec=_float("NOTIFY_WATCHDOG_DB_TIMEOUT_SEC", 5.0),
+            watchdog_proxy_timeout_sec=_float("NOTIFY_WATCHDOG_PROXY_TIMEOUT_SEC", 5.0),
+            watchdog_dispatch_max_age_sec=_int("NOTIFY_WATCHDOG_DISPATCH_MAX_AGE_SEC", 1800),
             work_chat_id=_chat_id("WORK_CHAT_ID"),
             ops_feed_chat_id=_chat_id("OPS_FEED_CHAT_ID"),
             tech_journal_chat_id=_chat_id("TECH_JOURNAL_CHAT_ID"),

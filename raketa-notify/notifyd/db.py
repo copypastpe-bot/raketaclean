@@ -3,6 +3,11 @@
 здесь её не повторяем и не переизобретаем.
 
 `notify.incidents` сюда не входит — это отдельная задача (8), не эта.
+
+Ниже также чтения для сторожа (задача 7, `notifyd/watchdog.py`): пульс
+админ-бота (`notify.service_heartbeats`, миграция 002) и существующие таблицы
+ботов схемы `public` (`service_heartbeats`, `amocrm_api_state`,
+`notification_outbox`) — сторож их только читает, права см. в 002.
 """
 
 from __future__ import annotations
@@ -238,3 +243,64 @@ async def set_route_enabled(pool: asyncpg.Pool, kind: str, enabled: bool) -> boo
             kind, enabled,
         )
     return row is not None
+
+
+# --------------------------------------------------------------------------
+# Чтения для сторожа (задача 7): пульс ботов и существующие таблицы ботов.
+# --------------------------------------------------------------------------
+
+async def fetch_heartbeat(pool: asyncpg.Pool, *, table: str, service_key: str) -> Optional[dict]:
+    """Одна строка пульса — `table` это `public.service_heartbeats` (рабочий
+    и клиентский боты) или `notify.service_heartbeats` (админ-бот, миграция
+    002: писать в `public` ему нельзя). `table` — только имя из кода этого
+    модуля, никогда пользовательский ввод, поэтому f-строка безопасна (тот же
+    приём, что у `table` в raketa-admin-bot/adminbot/db.py)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"SELECT service_key, display_name, status, last_seen_at "
+            f"FROM {table} WHERE service_key = $1",
+            service_key,
+        )
+    return dict(row) if row is not None else None
+
+
+async def ping_database(pool: asyncpg.Pool) -> bool:
+    """«База отвечает» — тривиальный SELECT 1 через тот же пул, что у всей
+    службы. Таймаут — забота вызывающего кода (asyncio.wait_for снаружи)."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT 1") == 1
+
+
+async def fetch_amocrm_last_poll(pool: asyncpg.Pool, *, stream: str = "lead_events") -> Optional[datetime]:
+    """Когда опрос amoCRM последний раз успешно прошёл цикл.
+
+    `amocrm_api_state.updated_at` (bot.py:_amocrm_set_cursor) обновляется на
+    КАЖДЫЙ успешный проход `_amocrm_poll_new_leads_once`, даже если новых
+    событий не было — а значит застывшая отметка и есть точный сигнал того,
+    что цикл `amocrm_api_polling_loop` встал (факт 6 ТЗ: он выходит навсегда
+    при ошибке авторизации, ничего больше не пишет). Нет строки вовсе — опрос
+    либо выключен, либо ещё не сделал ни одного цикла."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT updated_at FROM public.amocrm_api_state WHERE stream = $1", stream,
+        )
+
+
+async def fetch_dispatch_stats(pool: asyncpg.Pool, *, now: datetime) -> dict:
+    """Состояние рассыльщика сообщений клиентам (`notifications/outbox.py`):
+    когда последний раз что-то реально ушло (`sent_at` ставится один раз,
+    при первой успешной отправке — mark_outbox_sent, COALESCE) и сколько
+    созревших писем ждёт (status='pending' и время подошло — тот же фильтр,
+    что у самого рассыльщика в pick_ready_batch)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                (SELECT MAX(sent_at) FROM public.notification_outbox
+                 WHERE sent_at IS NOT NULL) AS last_sent_at,
+                (SELECT COUNT(*) FROM public.notification_outbox
+                 WHERE status = 'pending' AND scheduled_at <= $1) AS pending_due
+            """,
+            now,
+        )
+    return {"last_sent_at": row["last_sent_at"], "pending_due": int(row["pending_due"])}

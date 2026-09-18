@@ -20,6 +20,7 @@ from notifyd.journal_adapter import WATCHED_UNITS, JournalAdapter
 from notifyd.journal_source import SystemdJournalSource
 from notifyd.postman import Postman, Target
 from notifyd.telegram import AiogramSender
+from notifyd.watchdog import Watchdog
 
 log = logging.getLogger(__name__)
 
@@ -93,16 +94,35 @@ async def run() -> None:
         cap_per_cycle=settings.journal_max_per_minute,
     )
 
+    # Сторож (задача 7) — свой цикл в том же процессе. «Прокси отвечает»
+    # проверяется через уже поднятую сессию рабочего бота (тем же путём,
+    # которым идёт доставка) — второй сессии специально под проверку не
+    # заводим, senders["worker"] в build_targets всегда есть (WORKER_TG_TOKEN
+    # обязателен, см. REQUIRED_ENV).
+    watchdog = Watchdog(
+        pool=pool,
+        proxy_probe=senders["worker"].ping,
+        enabled=settings.watchdog_enabled,
+        poll_interval_sec=settings.watchdog_poll_interval_sec,
+        heartbeat_max_age_sec=settings.watchdog_heartbeat_max_age_sec,
+        amocrm_max_age_sec=settings.watchdog_amocrm_max_age_sec,
+        db_timeout_sec=settings.watchdog_db_timeout_sec,
+        proxy_timeout_sec=settings.watchdog_proxy_timeout_sec,
+        dispatch_max_age_sec=settings.watchdog_dispatch_max_age_sec,
+    )
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
     log.info("notify: служба запущена (enabled=%s, dry_run=%s, адресов настроено=%s, "
-             "переходник журнала enabled=%s)",
-             settings.enabled, settings.dry_run, len(targets), settings.journal_enabled)
+             "переходник журнала enabled=%s, сторож enabled=%s)",
+             settings.enabled, settings.dry_run, len(targets), settings.journal_enabled,
+             settings.watchdog_enabled)
     try:
-        await asyncio.gather(postman.run_forever(stop), journal_adapter.run_forever(stop))
+        await asyncio.gather(postman.run_forever(stop), journal_adapter.run_forever(stop),
+                             watchdog.run_forever(stop))
     finally:
         for sender in senders.values():
             await sender.close()

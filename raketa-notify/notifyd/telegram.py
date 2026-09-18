@@ -45,6 +45,19 @@ class AiogramSender:
         sent = await self._bot.send_message(chat_id, text, reply_markup=markup)
         return getattr(sent, "message_id", None)
 
+    async def ping(self) -> bool:
+        """«Путь до Telegram отвечает» — проверка сторожа (задача 7, ТЗ
+        «прокси отвечает»). `getMe` ничего не отправляет получателю, просто
+        спрашивает у Telegram «ты тут» тем же путём (прямые адреса + прокси),
+        которым ходит доставка — тот же приём, что у существующего
+        `scripts/telegram_proxy_watchdog.py` (там — HTTP getMe вручную, здесь —
+        через уже поднятую сессию бота, чтобы не открывать вторую)."""
+        try:
+            await self._bot.get_me()
+            return True
+        except Exception:                                # noqa: BLE001
+            return False
+
     async def close(self) -> None:
         await self._bot.session.close()
 
