@@ -132,6 +132,24 @@ class Settings:
     # медленная попытка не считалась поломкой.
     watchdog_dispatch_max_age_sec: int = 1800
 
+    # Инциденты и напоминания (задача 8) — свой выключатель, по умолчанию
+    # ВЫКЛЮЧЕН, по «Порядку выката» ТЗ включается ПОСЛЕДНИМ, после сторожа
+    # (задачи 6-7). Расписание напоминаний (10 минут/сутки, потолок,
+    # эскалация) — решения владельца, зафиксированы константами в
+    # notifyd/incidents.py, а не настройками: это не операционная подстройка,
+    # а зафиксированное правило.
+    incidents_enabled: bool = False
+    incidents_poll_interval_sec: int = 60
+
+    # Слушатель My_admin (кнопки инцидентов задачи 8, команда /status задачи
+    # 9) — свой выключатель, отдельно от incidents_enabled: /status полезен
+    # и до включения напоминаний, а кнопки без открытых инцидентов безвредны.
+    # owner_tg_id — решение исполнителя (см. notifyd/admin_bot.py): без него
+    # слушатель не поднимается вовсе (в журнал — почему), а не принимает
+    # команды от кого попало.
+    my_admin_listener_enabled: bool = False
+    my_admin_owner_tg_id: Optional[int] = None
+
     # Дорога до Telegram. С боевого VPS имя api.telegram.org не разрешается, и оба
     # бота давно ходят по прямым адресам и через прокси. Служба обязана ходить так же,
     # иначе на проде не отправит ничего (найдено координатором при проверке задачи 3).
@@ -177,6 +195,10 @@ class Settings:
             watchdog_db_timeout_sec=_float("NOTIFY_WATCHDOG_DB_TIMEOUT_SEC", 5.0),
             watchdog_proxy_timeout_sec=_float("NOTIFY_WATCHDOG_PROXY_TIMEOUT_SEC", 5.0),
             watchdog_dispatch_max_age_sec=_int("NOTIFY_WATCHDOG_DISPATCH_MAX_AGE_SEC", 1800),
+            incidents_enabled=_flag("NOTIFY_INCIDENTS_ENABLED", False),
+            incidents_poll_interval_sec=_int("NOTIFY_INCIDENTS_POLL_INTERVAL_SEC", 60),
+            my_admin_listener_enabled=_flag("NOTIFY_MY_ADMIN_ENABLED", False),
+            my_admin_owner_tg_id=_chat_id("MY_ADMIN_OWNER_TG_ID"),
             work_chat_id=_chat_id("WORK_CHAT_ID"),
             ops_feed_chat_id=_chat_id("OPS_FEED_CHAT_ID"),
             tech_journal_chat_id=_chat_id("TECH_JOURNAL_CHAT_ID"),

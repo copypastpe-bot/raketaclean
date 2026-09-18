@@ -13,9 +13,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from typing import Optional
 
 from notifyd import db
+from notifyd.admin_bot import AdminBotListener
 from notifyd.config import Settings
+from notifyd.incidents import IncidentManager
 from notifyd.journal_adapter import WATCHED_UNITS, JournalAdapter
 from notifyd.journal_source import SystemdJournalSource
 from notifyd.postman import Postman, Target
@@ -111,19 +114,57 @@ async def run() -> None:
         dispatch_max_age_sec=settings.watchdog_dispatch_max_age_sec,
     )
 
+    # Инциденты (задача 8) — свой цикл, свой выключатель, отдельно от
+    # сторожа: по «Порядку выката» ТЗ включается ПОСЛЕДНИМ, уже когда
+    # владелец обжился с сторожем и переходником журнала. Дёргает
+    # watchdog.check_once() на своём расписании (независимо от собственного
+    # цикла Watchdog.run_forever выше) — сознательное решение исполнителя:
+    # раздельные выключатели дороже двойным вызовом check_once(), когда оба
+    # включены, но зато включаются в разное время, как того и хочет ТЗ.
+    incidents = IncidentManager(
+        pool=pool,
+        check_source=watchdog.check_once,
+        enabled=settings.incidents_enabled,
+        poll_interval_sec=settings.incidents_poll_interval_sec,
+    )
+
+    # Слушатель My_admin (кнопки инцидентов + команда /status, задачи 8-9).
+    # Поднимается на ТОМ ЖЕ объекте Bot, которым почтальон уже отправляет
+    # (AiogramSender.bot) — второй сессии на тот же токен не заводим.
+    my_admin_listener: Optional[AdminBotListener] = None
+    if settings.my_admin_listener_enabled:
+        if settings.my_admin_owner_tg_id is None:
+            log.error("notify: NOTIFY_MY_ADMIN_ENABLED=1, но MY_ADMIN_OWNER_TG_ID не "
+                     "задан — слушатель My_admin не поднимаю, кнопки и /status не "
+                     "будут работать (остальная служба работает как обычно)")
+        else:
+            my_admin_listener = AdminBotListener(
+                bot=senders["my_admin"].bot, pool=pool, watchdog=watchdog,
+                owner_tg_id=settings.my_admin_owner_tg_id,
+            )
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
     log.info("notify: служба запущена (enabled=%s, dry_run=%s, адресов настроено=%s, "
-             "переходник журнала enabled=%s, сторож enabled=%s)",
+             "переходник журнала enabled=%s, сторож enabled=%s, инциденты enabled=%s, "
+             "слушатель My_admin enabled=%s)",
              settings.enabled, settings.dry_run, len(targets), settings.journal_enabled,
-             settings.watchdog_enabled)
+             settings.watchdog_enabled, settings.incidents_enabled,
+             my_admin_listener is not None)
+
+    tasks = [postman.run_forever(stop), journal_adapter.run_forever(stop),
+            watchdog.run_forever(stop), incidents.run_forever(stop)]
+    if my_admin_listener is not None:
+        tasks.append(my_admin_listener.run_forever(stop))
+
     try:
-        await asyncio.gather(postman.run_forever(stop), journal_adapter.run_forever(stop),
-                             watchdog.run_forever(stop))
+        await asyncio.gather(*tasks)
     finally:
+        if my_admin_listener is not None:
+            await my_admin_listener.stop_polling()
         for sender in senders.values():
             await sender.close()
         await pool.close()

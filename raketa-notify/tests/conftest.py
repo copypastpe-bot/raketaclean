@@ -106,6 +106,41 @@ async def fetch_outbox(pool: Any, outbox_id: int) -> dict:
     return dict(row)
 
 
+async def insert_incident(pool: Any, *, key: str, level: str = "red",
+                          address: str = "my_admin", state: str = "open",
+                          detail: str = "", opened_at: Optional[datetime] = None,
+                          acked_at: Optional[datetime] = None,
+                          ack_until: Optional[datetime] = None,
+                          closed_at: Optional[datetime] = None,
+                          escalated_at: Optional[datetime] = None,
+                          last_notified_at: Optional[datetime] = None,
+                          notify_count: int = 0) -> int:
+    """Завести строку в notify.incidents прямо, минуя db.open_incident (задача
+    8, другая территория этого ТЗ) — нужно тестам, которым важны конкретные
+    временные метки (давность открытия для эскалации, давность напоминания
+    для расписания), а не сам момент открытия."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO notify.incidents
+                (key, level, address, state, detail, opened_at, acked_at, ack_until,
+                 closed_at, escalated_at, last_notified_at, notify_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING id
+            """,
+            key, level, address, state, detail, opened_at or NOW, acked_at, ack_until,
+            closed_at, escalated_at, last_notified_at, notify_count,
+        )
+
+
+async def fetch_incident(pool: Any, incident_id: int) -> dict:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM notify.incidents WHERE id = $1", incident_id)
+    assert row is not None, f"инцидент {incident_id} исчез из notify.incidents"
+    return dict(row)
+
+
 class FakeSender:
     """Отправитель для тестов: ничего не шлёт по-настоящему, только запоминает."""
 

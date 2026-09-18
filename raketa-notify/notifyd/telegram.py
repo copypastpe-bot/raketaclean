@@ -39,6 +39,16 @@ class AiogramSender:
         # же путём: без этого на проде она не отправит ни одного сообщения.
         self._bot = Bot(token=token, session=build_session(ip_pool, proxy or None))
 
+    @property
+    def bot(self) -> Any:
+        """Доступ к живому `aiogram.Bot` — нужен только My_admin (задачи 8-9,
+        `notifyd/admin_bot.py`): там этот же объект дополнительно слушает
+        обновления (`Dispatcher.start_polling`), пока почтальон продолжает
+        через него же отправлять. Один `Bot` на приём и отправку — обычное
+        для aiogram использование (тот же приём, что в `adminbot/main.py`:
+        один `self.bot` и для рассылки, и для polling)."""
+        return self._bot
+
     async def send(self, chat_id: Any, text: str,
                    reply_markup: Optional[dict] = None) -> Optional[int]:
         markup = _load_markup(reply_markup)
