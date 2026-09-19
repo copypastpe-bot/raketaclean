@@ -381,7 +381,9 @@ async def test_flapping_check_never_alerts(pool):
 
     assert await open_incidents(pool) == []
     assert await events(pool, KEY_DISPATCH) == []
-    assert len(await events(pool, incidents.BLIP_KIND)) == 2
+    # Два мигания за четыре минуты попадают в одно окно тишины — в журнале
+    # остаётся одна строка (свой тест окна ниже).
+    assert len(await events(pool, incidents.BLIP_KIND)) == 1
 
 
 async def test_open_incident_closes_on_the_first_healthy_pass(pool):
@@ -399,3 +401,23 @@ async def test_open_incident_closes_on_the_first_healthy_pass(pool):
     assert await open_incidents(pool) == []
     texts = [row["text"] for row in await events(pool, KEY_DISPATCH)]
     assert any("Отбой" in text for text in texts), texts
+
+
+async def test_repeated_blips_are_quiet_for_ten_minutes(pool):
+    """Проверка, которая дребезжит, не должна залить технический журнал:
+    в окне тишины остаётся одна запись, следующая — уже за окном."""
+    clock = {"now": NOW}
+    mgr = confirming(pool, clock)
+
+    for minute in range(0, 8, 2):                     # четыре мигания за 6 минут
+        clock["now"] = NOW + timedelta(minutes=minute)
+        await mgr.process_checks([failing()])
+        clock["now"] = NOW + timedelta(minutes=minute + 1)
+        await mgr.process_checks([healthy()])
+    assert len(await events(pool, incidents.BLIP_KIND)) == 1
+
+    clock["now"] = NOW + timedelta(minutes=20)
+    await mgr.process_checks([failing()])
+    clock["now"] = NOW + timedelta(minutes=21)
+    await mgr.process_checks([healthy()])
+    assert len(await events(pool, incidents.BLIP_KIND)) == 2

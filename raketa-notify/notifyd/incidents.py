@@ -113,6 +113,11 @@ CONFIRM_PASSES = 3
 # запись в технический журнал, а не тревога» (владелец, 19.09).
 BLIP_KIND = "notify.incident.blip"
 BLIP_ADDRESS = "tech_journal"
+# Окно тишины по одному ключу: дребезжащая проверка (например, очередь
+# рассыльщика, которая то растёт, то опадает) иначе залила бы технический
+# журнал строкой на каждое колебание. Окно то же, что у схлопывания повторов
+# в переходнике журнала, — 10 минут.
+BLIP_QUIET_SEC = 10 * 60
 
 # Красный инцидент, не закрытый за это время, дублируется в My_assistant.
 ESCALATION_AFTER_SEC = 60 * 60
@@ -190,6 +195,8 @@ class IncidentManager:
         # После перезапуска службы возможна одна повторная запись — дешевле,
         # чем заводить под серые поломки собственную таблицу.
         self._grey_noted: set[str] = set()
+        # Когда по ключу в последний раз писали «мигнуло» — окно тишины.
+        self._blip_noted_at: dict[str, datetime] = {}
 
     async def process_checks(self, results: Sequence[CheckResult]) -> int:
         """Один проход по готовым результатам проверок — их приносит цикл
@@ -226,6 +233,14 @@ class IncidentManager:
         streak = self._failing_streak.pop(result.key, 0)
         if not 0 < streak < self.confirm_passes:
             return 0
+
+        last = self._blip_noted_at.get(result.key)
+        if last is not None and (now - last).total_seconds() < BLIP_QUIET_SEC:
+            log.debug("notify: %s мигнуло снова, но окно тишины ещё открыто",
+                      result.key)
+            return 0
+        self._blip_noted_at[result.key] = now
+
         log.info("notify: %s мигнуло (%s проход(а) подряд) — тревоги нет, "
                  "только запись в журнал", result.key, streak)
         await self._ensure_route(BLIP_KIND, BLIP_ADDRESS, "grey")
