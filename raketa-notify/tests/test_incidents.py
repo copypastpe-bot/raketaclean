@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from notifyd import db, incidents
@@ -248,3 +248,71 @@ async def test_grey_level_reports_once_and_opens_no_incident(pool):
     clock["now"] = NOW + timedelta(minutes=10)
     assert await mgr.process_checks([failing()]) == 0
     assert len(await events(pool, KEY_DISPATCH)) == 1
+
+
+# --------------------------------------------------------------------------
+# Ночная пауза (решение владельца 19.09): 00:00-08:00 МСК красный дёргает
+# один раз. Время в тестах задано в UTC, Москва = UTC+3.
+# --------------------------------------------------------------------------
+
+NIGHT_0230 = datetime(2026, 9, 18, 23, 30, tzinfo=timezone.utc)    # 02:30 МСК
+EVENING_2200 = datetime(2026, 9, 18, 19, 0, tzinfo=timezone.utc)   # 22:00 МСК
+MORNING_0800 = datetime(2026, 9, 19, 5, 0, tzinfo=timezone.utc)    # 08:00 МСК
+
+
+async def test_red_at_night_alerts_once_then_waits_for_morning(pool):
+    """Ночью первое сообщение уходит сразу, а дальше тишина до восьми утра."""
+    await manager(pool, NIGHT_0230).process_checks([failing()])
+    assert len(await events(pool, KEY_DISPATCH)) == 1
+
+    ten_minutes = NIGHT_0230 + timedelta(minutes=10)               # 02:40 МСК
+    await manager(pool, ten_minutes).process_checks([failing()])
+    before_dawn = NIGHT_0230 + timedelta(hours=3)                  # 05:30 МСК
+    await manager(pool, before_dawn).process_checks([failing()])
+    assert len(await events(pool, KEY_DISPATCH)) == 1, "ночью повторов быть не должно"
+
+    await manager(pool, MORNING_0800).process_checks([failing()])
+    assert len(await events(pool, KEY_DISPATCH)) == 2, "в восемь утра напоминание возвращается"
+
+
+async def test_red_in_the_evening_reminds_then_goes_quiet_at_midnight(pool):
+    """Поломка, открытая вечером, напоминает каждые 10 минут до полуночи,
+    ночью молчит и возобновляется в восемь."""
+    await manager(pool, EVENING_2200).process_checks([failing()])
+    evening_reminder = EVENING_2200 + timedelta(minutes=10)        # 22:10 МСК
+    await manager(pool, evening_reminder).process_checks([failing()])
+    assert len(await events(pool, KEY_DISPATCH)) == 2
+
+    after_midnight = datetime(2026, 9, 18, 21, 30, tzinfo=timezone.utc)   # 00:30 МСК
+    await manager(pool, after_midnight).process_checks([failing()])
+    assert len(await events(pool, KEY_DISPATCH)) == 2, "после полуночи тишина"
+
+    await manager(pool, MORNING_0800).process_checks([failing()])
+    assert len(await events(pool, KEY_DISPATCH)) == 3
+
+
+async def test_yellow_is_not_touched_by_night_pause(pool):
+    """Жёлтый ночного режима не знает: решение владельца — «жёлтый не трогай»."""
+    yellow = failing(KEY_ADMIN_HEARTBEAT, level="yellow")
+    assert await manager(pool, NIGHT_0230).process_checks([yellow]) == 1
+
+    next_night = NIGHT_0230 + timedelta(hours=24)                  # снова 02:30 МСК
+    assert await manager(pool, next_night).process_checks([yellow]) == 1
+
+
+async def test_all_clear_goes_at_night(pool):
+    """Отбой разовый — ночью уходит сразу, ждать утра нечего."""
+    await manager(pool, NIGHT_0230).process_checks([failing()])
+    half_hour_later = NIGHT_0230 + timedelta(minutes=30)
+    assert await manager(pool, half_hour_later).process_checks([healthy()]) == 1
+
+
+async def test_escalation_goes_at_night(pool):
+    """Дубль затянувшейся поломки разовый — ночью тоже идёт сразу."""
+    await insert_incident(
+        pool, key=KEY_DISPATCH, level="red", state="open",
+        opened_at=NIGHT_0230 - timedelta(seconds=incidents.ESCALATION_AFTER_SEC + 60),
+        last_notified_at=NIGHT_0230)
+
+    assert await manager(pool, NIGHT_0230).process_checks([]) == 1
+    assert len(await events(pool, incidents.ESCALATION_KIND)) == 1

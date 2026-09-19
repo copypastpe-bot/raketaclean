@@ -8,10 +8,12 @@
 
 Три уровня из решения владельца (18.09):
 
-* **Красный** — повтор каждые `RED_REMINDER_SEC` (10 минут), круглосуточно,
-  без потолка. Кнопка «сел разбираться» глушит на `RED_ACK_SILENCE_SEC`
-  (час); не починилось — напоминания возвращаются сами. Починилось — робот
-  сам шлёт «отбой, работает».
+* **Красный** — повтор каждые `RED_REMINDER_SEC` (10 минут), без потолка,
+  но НЕ ночью: с 00:00 до 08:00 по Москве уходит только первое сообщение,
+  повторы ждут утра (решение владельца 19.09, см. `is_night`). Кнопка «сел
+  разбираться» глушит на `RED_ACK_SILENCE_SEC` (час); не починилось —
+  напоминания возвращаются сами. Починилось — робот сам шлёт «отбой,
+  работает», в любое время суток.
 * **Жёлтый** — раз в `YELLOW_REMINDER_SEC` (сутки), не больше `YELLOW_CAP`
   (3) сообщений всего. Кнопка «отложить» глушит на `YELLOW_SNOOZE_SEC`
   (тоже сутки) и не расходует потолок. Сегодня в проекте нет ни одного
@@ -53,6 +55,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from notifyd import db
 from notifyd.watchdog import (
@@ -61,6 +64,23 @@ from notifyd.watchdog import (
 )
 
 log = logging.getLogger(__name__)
+
+# --- ночная пауза (решение владельца 19.09) ---
+# «Ночью красный дёргает 1 раз и ждёт до 8:00 по МСК, дальше работает штатно.
+# Первая тревога может приходить сразу, просто не надо лупить каждые 10 минут.»
+# Москву считаем явно: часового пояса в настройках службы нет, сервер может
+# стоять в UTC, а «ночь» владельца от этого зависеть не должна.
+MOSCOW = ZoneInfo("Europe/Moscow")
+NIGHT_START_HOUR = 0
+NIGHT_END_HOUR = 8
+
+
+def is_night(moment: datetime) -> bool:
+    """Ночь по Москве: 00:00-08:00. Пауза касается только ПОВТОРОВ красного —
+    первое сообщение о поломке, отбой и дубль затянувшейся поломки разовые
+    и уходят сразу, ночью тоже."""
+    return NIGHT_START_HOUR <= moment.astimezone(MOSCOW).hour < NIGHT_END_HOUR
+
 
 # --- расписание напоминаний (решения владельца 18.09) ---
 RED_REMINDER_SEC = 10 * 60             # «повтор каждые 10 минут»
@@ -184,6 +204,14 @@ class IncidentManager:
         if changed is not None:
             log.info("notify: уровень инцидента %s сменён на %s (справочник)",
                      result.key, level)
+
+        if level == "red" and is_night(now):
+            # Напоминание не берём вовсе: claim_reminder_due не только решает
+            # «пора», но и отмечает попытку — пропускать надо ДО него, иначе
+            # ночь съедала бы утренние отсчёты.
+            log.debug("notify: ночь по Москве — повтор по %s ждёт восьми утра",
+                      result.key)
+            return 0
 
         claimed = await db.claim_reminder_due(
             self.pool, key=result.key, now=now,
