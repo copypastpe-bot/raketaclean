@@ -256,7 +256,12 @@ async def test_check_once_covers_all_seven_keys(watchdog_pool):
         KEY_WORKER_HEARTBEAT, KEY_CLIENT_HEARTBEAT, KEY_ADMIN_HEARTBEAT,
         KEY_AMOCRM_POLL, KEY_DATABASE, KEY_PROXY, KEY_DISPATCH,
     }
-    assert all(r.level == "red" for r in results)
+    # Уровень по умолчанию — табличка владельца 19.09: техника, которую видят
+    # клиенты, красная; личный инструмент владельца ждёт до утра.
+    levels = {r.key: r.level for r in results}
+    assert levels[KEY_ADMIN_HEARTBEAT] == "yellow"
+    assert all(level == "red" for key, level in levels.items()
+               if key != KEY_ADMIN_HEARTBEAT)
 
 
 async def test_disabled_watchdog_never_checks(watchdog_pool):

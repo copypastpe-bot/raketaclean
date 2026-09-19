@@ -183,3 +183,68 @@ async def test_disabled_incidents_do_nothing(pool):
     assert queued == 0
     assert await open_incidents(pool) == []
     assert await events(pool, KEY_DISPATCH) == []
+
+
+# --------------------------------------------------------------------------
+# Уровень берётся из справочника (замечание 7 ревью 18.09,
+# решения владельца 19.09)
+# --------------------------------------------------------------------------
+
+async def test_seeded_route_gets_real_level_not_default_grey(pool):
+    """Маршрут заводится сам — и сразу с настоящим уровнем. Иначе
+    `routes_cli list` показывает «серый» там, где на деле красный."""
+    await manager(pool, NOW).process_checks([failing(KEY_DISPATCH)])
+    await manager(pool, NOW).process_checks(
+        [failing(KEY_ADMIN_HEARTBEAT, level="yellow")])
+
+    assert (await db.get_route(pool, KEY_DISPATCH))["level"] == "red"
+    assert (await db.get_route(pool, KEY_ADMIN_HEARTBEAT))["level"] == "yellow"
+
+
+async def test_route_seeding_does_not_overwrite_manual_changes(pool):
+    """Засев идёт при каждом запуске службы. Ручная правка владельца обязана
+    его пережить, иначе команда работает до ближайшего рестарта."""
+    await manager(pool, NOW).process_checks([failing()])
+    await db.upsert_route_address(pool, KEY_DISPATCH, "ops_feed")
+
+    # перезапуск службы: новый менеджер, пустая память о засеянных маршрутах.
+    # Через 10 минут уходит красное напоминание — то самое место, где раньше
+    # маршрут переписывался обратно на my_admin.
+    await manager(pool, NOW + timedelta(minutes=10)).process_checks([failing()])
+
+    route = await db.get_route(pool, KEY_DISPATCH)
+    assert route["address"] == "ops_feed"
+    assert route["level"] == "red"
+
+
+async def test_level_change_applies_to_open_incident(pool):
+    """Владелец понизил уровень при уже идущей поломке — это действует сразу,
+    а не «со следующего раза» (решение владельца 19.09)."""
+    await manager(pool, NOW).process_checks([failing()])        # красный открыт
+    assert await db.update_route_level(pool, KEY_DISPATCH, "yellow") is True
+
+    ten_minutes = NOW + timedelta(minutes=10)                   # красный бы напомнил
+    assert await manager(pool, ten_minutes).process_checks([failing()]) == 0
+
+    incident = (await open_incidents(pool))[0]
+    assert (await fetch_incident(pool, incident["id"]))["level"] == "yellow"
+
+
+async def test_grey_level_reports_once_and_opens_no_incident(pool):
+    """Серый — «не дёргает»: инцидент не заводится, уходит одна запись без
+    кнопки, и висящая дальше поломка её не повторяет."""
+    clock = {"now": NOW}
+    mgr = IncidentManager(pool=pool, enabled=True, now=lambda: clock["now"])
+    await db.upsert_route_address(pool, KEY_DISPATCH, "tech_journal")
+    assert await db.update_route_level(pool, KEY_DISPATCH, "grey") is True
+
+    assert await mgr.process_checks([failing()]) == 1
+    assert await open_incidents(pool) == []
+
+    rows = await events(pool, KEY_DISPATCH)
+    assert len(rows) == 1
+    assert rows[0]["reply_markup"] is None
+
+    clock["now"] = NOW + timedelta(minutes=10)
+    assert await mgr.process_checks([failing()]) == 0
+    assert len(await events(pool, KEY_DISPATCH)) == 1

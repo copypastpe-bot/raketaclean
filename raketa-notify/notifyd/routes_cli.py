@@ -24,6 +24,7 @@ from typing import Any
 
 from notifyd import db
 from notifyd.config import ADDRESSES, LEVELS, Settings
+from notifyd.watchdog import DEFAULT_LEVELS   # ключи сторожевых проверок
 
 
 async def cmd_list(pool: Any) -> int:
@@ -44,7 +45,8 @@ async def cmd_set_address(pool: Any, kind: str, address: str) -> int:
         print(f"Неизвестный адрес {address!r}. Допустимо: {', '.join(ADDRESSES)}",
               file=sys.stderr)
         return 2
-    await db.upsert_route_address(pool, kind, address)
+    await db.upsert_route_address(pool, kind, address,
+                                  level=DEFAULT_LEVELS.get(kind, "grey"))
     print(f"{kind}: адрес -> {address}")
     return 0
 
@@ -52,6 +54,15 @@ async def cmd_set_address(pool: Any, kind: str, address: str) -> int:
 async def cmd_set_level(pool: Any, kind: str, level: str) -> int:
     if level not in LEVELS:
         print(f"Неизвестный уровень {level!r}. Допустимо: {', '.join(LEVELS)}",
+              file=sys.stderr)
+        return 2
+    if level == "grey" and kind in DEFAULT_LEVELS:
+        # Решение владельца 19.09: серая поломка бессмысленна — инцидент бывает
+        # только красным или жёлтым (CHECK в миграции 001), а «замолчать
+        # совсем» делает выключатель маршрута.
+        print(f"«{kind}» — сторожевая проверка, серым уровень у неё не бывает: "
+              f"поломка бывает красной или жёлтой.\n"
+              f"Чтобы этот сигнал замолчал совсем: routes_cli disable «{kind}»",
               file=sys.stderr)
         return 2
     if not await db.update_route_level(pool, kind, level):

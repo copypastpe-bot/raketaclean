@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from notifyd import db, routes_cli
+from notifyd.watchdog import KEY_DATABASE
 
 
 async def test_set_address_creates_route_with_defaults(pool):
@@ -94,3 +95,25 @@ async def test_cli_dispatch_end_to_end_through_argparse(pool, capsys):
     args = parser.parse_args(["list"])
     assert await routes_cli.dispatch(pool, args) == 0
     assert "kind.cli" in capsys.readouterr().out
+
+
+async def test_set_level_refuses_grey_for_watchdog_check(pool):
+    """Серый на поломке бессмыслен: инцидент серым быть не может (ограничение
+    в миграции 001), а «замолчать совсем» делает выключатель маршрута."""
+    await routes_cli.cmd_set_address(pool, KEY_DATABASE, "my_admin")
+
+    code = await routes_cli.cmd_set_level(pool, KEY_DATABASE, "grey")
+
+    assert code == 2
+    # и уровень остался тем, что положен по табличке владельца
+    assert (await db.get_route(pool, KEY_DATABASE))["level"] == "red"
+
+
+async def test_set_level_allows_grey_for_ordinary_kind(pool):
+    """Обычный вид события серым быть обязан — технический журнал именно такой."""
+    await routes_cli.cmd_set_address(pool, "notify.journal", "tech_journal")
+
+    code = await routes_cli.cmd_set_level(pool, "notify.journal", "grey")
+
+    assert code == 0
+    assert (await db.get_route(pool, "notify.journal"))["level"] == "grey"

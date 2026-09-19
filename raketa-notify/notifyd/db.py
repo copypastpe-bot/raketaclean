@@ -199,23 +199,67 @@ async def list_routes(pool: asyncpg.Pool) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-async def upsert_route_address(pool: asyncpg.Pool, kind: str, address: str) -> None:
-    """Завести маршрут (если его не было) или поменять адрес существующего.
+async def upsert_route_address(pool: asyncpg.Pool, kind: str, address: str,
+                               level: str = "grey") -> None:
+    """Поменять адрес маршрута, а если его ещё не было — завести.
 
-    Единственная команда, которая может СОЗДАТЬ строку: без адреса маршрут
-    не имеет смысла, а остальные поля (уровень/тег/включённость) берут
-    разумные значения по умолчанию из самой таблицы.
+    `level` применяется ТОЛЬКО при создании строки: у существующего маршрута
+    уровень решает владелец. Значение по умолчанию «серый» то же, что в самой
+    таблице, но для сторожевых проверок вызывающий передаёт настоящий уровень
+    (`watchdog.DEFAULT_LEVELS`) — иначе смена адреса до первого запуска службы
+    молча делала бы поломку серой, то есть отключала бы тревогу.
     """
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO notify.routes (kind, address)
-            VALUES ($1, $2)
+            INSERT INTO notify.routes (kind, address, level)
+            VALUES ($1, $2, $3)
             ON CONFLICT (kind) DO UPDATE
                 SET address = $2, updated_at = now()
             """,
-            kind, address,
+            kind, address, level,
         )
+
+
+async def seed_route(pool: asyncpg.Pool, kind: str, address: str,
+                     level: str) -> None:
+    """Завести маршрут, если его ещё нет, и НЕ трогать, если он уже есть.
+
+    Отдельная команда от `upsert_route_address`: та перезаписывает адрес (это
+    нужно команде `set-address`), а засев идёт при каждом запуске службы.
+    Пока засев шёл через `upsert_route_address`, ручная правка владельца жила
+    до ближайшего рестарта службы — найдено при разборе замечания 7 ревью 18.09.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO notify.routes (kind, address, level)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (kind) DO NOTHING
+            """,
+            kind, address, level,
+        )
+
+
+async def sync_incident_level(pool: asyncpg.Pool, *, key: str,
+                              level: str) -> Optional[dict]:
+    """Привести уровень открытого инцидента к уровню из справочника.
+
+    Решение владельца 19.09: смена уровня командой действует сразу, а не
+    «со следующей поломки». Возвращает строку, только если уровень и правда
+    изменился — чтобы вызывающий записал это в журнал.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"""
+            UPDATE notify.incidents
+            SET level = $2
+            WHERE key = $1 AND state <> 'closed' AND level <> $2
+            RETURNING {_INCIDENT_COLUMNS}
+            """,
+            key, level,
+        )
+    return dict(row) if row is not None else None
 
 
 async def update_route_level(pool: asyncpg.Pool, kind: str, level: str) -> bool:

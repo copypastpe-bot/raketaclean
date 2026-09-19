@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional, Sequence
 
@@ -58,6 +58,21 @@ KEY_DATABASE = "база данных"
 KEY_PROXY = "прокси"
 KEY_DISPATCH = "рассыльщик клиентам"
 
+# Уровень по умолчанию для каждой проверки — табличка владельца 19.09
+# (ТЗ 2026-09-19, «Решения владельца»): техника, которую видят клиенты, —
+# красная; личный инструмент владельца (админ-бот) ждёт до утра. Это только
+# значение для ПЕРВОГО засева маршрута: последнее слово за справочником
+# notify.routes, его читает notifyd.incidents.
+DEFAULT_LEVELS = {
+    KEY_WORKER_HEARTBEAT: "red",
+    KEY_CLIENT_HEARTBEAT: "red",
+    KEY_ADMIN_HEARTBEAT: "yellow",
+    KEY_AMOCRM_POLL: "red",
+    KEY_DATABASE: "red",
+    KEY_PROXY: "red",
+    KEY_DISPATCH: "red",
+}
+
 DEFAULT_POLL_INTERVAL_SEC = 60
 
 # Куда цикл отдаёт готовые результаты — инцидентам (notifyd.incidents).
@@ -72,10 +87,9 @@ class CheckResult:
     key: str
     ok: bool
     detail: str
-    # Все проверки сторожа — техника (решение владельца 18.09: «кому чинить —
-    # тому и сигнал», технику получает My_admin), поэтому красный уровень
-    # везде один. Задача 8 не обязана этим пользоваться — это готовое
-    # предположение, а не запрет читать notify.routes самой.
+    # Уровень по умолчанию — из DEFAULT_LEVELS выше (табличка владельца 19.09).
+    # Это рекомендация кода на случай, когда маршрута в справочнике ещё нет:
+    # у заведённого маршрута уровень решает владелец, а не код.
     level: str = "red"
 
 
@@ -158,7 +172,7 @@ class Watchdog:
         Иначе нажатие команды съедает у цикла замер очереди и рост
         рассыльщика теряется."""
         now = self._now()
-        return [
+        results = [
             await self._safe(KEY_WORKER_HEARTBEAT, self._check_heartbeat(
                 key=KEY_WORKER_HEARTBEAT, table=PUBLIC_HEARTBEATS_TABLE,
                 service_key=WORKER_BOT_SERVICE_KEY, label="рабочего бота", now=now)),
@@ -174,6 +188,10 @@ class Watchdog:
             await self._safe(KEY_DISPATCH,
                              self._check_dispatch(now, remember=remember)),
         ]
+        # Уровень проставляем в одном месте, чтобы каждая проверка не помнила
+        # про табличку владельца — включая ту, что упала с исключением (_safe).
+        return [replace(r, level=DEFAULT_LEVELS.get(r.key, r.level))
+                for r in results]
 
     async def _safe(self, key: str, coro: Awaitable[CheckResult]) -> CheckResult:
         try:

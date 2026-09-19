@@ -18,9 +18,11 @@
   производителя жёлтых инцидентов (все семь проверок сторожа — красные,
   «техника»), но механика общая и рассчитана на будущее (второе ТЗ) —
   проверена тестами на искусственных `CheckResult(level="yellow")`.
-* Серый в инциденты не попадает вовсе — по определению «не дёргает»
-  (`notify.routes.level`), а `Watchdog.check_once` серых результатов не
-  производит.
+* **Серый** — «не дёргает»: инцидент не заводится вовсе, в чат по адресу
+  маршрута уходит одна запись о поломке и одна об отбое. Уровень берётся
+  из справочника, поэтому серым поломку может сделать только владелец
+  правкой в базе: команда `routes_cli set-level` для сторожевых проверок
+  серый не принимает и отсылает к выключателю маршрута (решение 19.09).
 
 **Эскалация.** Красный инцидент, который «бьёт по клиентам или заказам» и
 не закрыт за час, дублируется в My_assistant словами последствия, без
@@ -133,6 +135,11 @@ class IncidentManager:
         # приём (и то же ограничение: не переживает перезапуск), что
         # `JournalAdapter._route_seeded`, только на несколько kind сразу.
         self._routes_seeded: set[str] = set()
+        # О каких серых поломках уже сообщили: серый инцидентом не бывает
+        # (CHECK в миграции 001), значит и «уже сообщали» записать некуда.
+        # После перезапуска службы возможна одна повторная запись — дешевле,
+        # чем заводить под серые поломки собственную таблицу.
+        self._grey_noted: set[str] = set()
 
     async def process_checks(self, results: Sequence[CheckResult]) -> int:
         """Один проход по готовым результатам проверок — их приносит цикл
@@ -157,13 +164,26 @@ class IncidentManager:
     # --- открытие и напоминание ---
 
     async def _handle_failing(self, result: CheckResult, now: datetime) -> int:
-        opened = await db.open_incident(self.pool, key=result.key, level=result.level,
+        level = await self._route_level(result)
+        if level == "grey":
+            return await self._note_grey_failure(result, now)
+
+        opened = await db.open_incident(self.pool, key=result.key, level=level,
                                         address=INCIDENT_ADDRESS, detail=result.detail,
                                         now=now)
         if opened is not None:
             log.warning("notify: инцидент открыт — %s (%s)", result.key, result.detail)
             await self._send_alert(opened, first=True, now=now)
             return 1
+
+        # Уровень могли сменить командой, пока поломка идёт: решение владельца
+        # 19.09 — смена действует сразу. Понижение красного до жёлтого при
+        # уже израсходованном потолке жёлтого означает тишину: это и есть то,
+        # ради чего уровень понижают.
+        changed = await db.sync_incident_level(self.pool, key=result.key, level=level)
+        if changed is not None:
+            log.info("notify: уровень инцидента %s сменён на %s (справочник)",
+                     result.key, level)
 
         claimed = await db.claim_reminder_due(
             self.pool, key=result.key, now=now,
@@ -178,13 +198,51 @@ class IncidentManager:
 
     async def _handle_recovered(self, result: CheckResult, now: datetime) -> int:
         closed = await db.close_incident(self.pool, result.key, now)
-        if closed is None:
+        was_grey_noted = result.key in self._grey_noted
+        self._grey_noted.discard(result.key)
+
+        if closed is not None:
+            log.info("notify: инцидент закрыт — %s", result.key)
+            if closed["level"] == "red":
+                await self._send_all_clear(closed, now)
+                return 1
             return 0
-        log.info("notify: инцидент закрыт — %s", result.key)
-        if closed["level"] == "red":
-            await self._send_all_clear(closed, now)
+
+        if was_grey_noted:
+            # Серая поломка инцидента не заводила, но запись о ней была —
+            # закрываем её парной записью, чтобы в чате не висело «сломано».
+            await db.insert_event(
+                self.pool, kind=result.key,
+                text=f"Отбой: «{result.key}» — работает.",
+                source="notify", now=now, expires_at=now + _ALL_CLEAR_TTL)
             return 1
         return 0
+
+    async def _route_level(self, result: CheckResult) -> str:
+        """Уровень поломки решает справочник, а не код — ради этого вся затея
+        (комментарий к `notify.routes` в миграции 001). Код даёт значение
+        только для первого засева: `watchdog.DEFAULT_LEVELS`, табличка
+        владельца 19.09."""
+        route = await db.get_route(self.pool, result.key)
+        if route is not None:
+            return route["level"]
+        await self._ensure_route(result.key, INCIDENT_ADDRESS, result.level)
+        return result.level
+
+    async def _note_grey_failure(self, result: CheckResult, now: datetime) -> int:
+        """Серый уровень — «не дёргает»: инцидент не заводим (серого инцидента
+        не бывает, CHECK в миграции 001), кладём одну запись по адресу маршрута
+        и молчим, пока поломка держится."""
+        if result.key in self._grey_noted:
+            return 0
+        self._grey_noted.add(result.key)
+        log.info("notify: %s сломано, но уровень в справочнике серый — тревоги "
+                 "нет, только запись (%s)", result.key, result.detail)
+        detail = f"\n{result.detail}" if result.detail else ""
+        await db.insert_event(
+            self.pool, kind=result.key, text=f"Сломано: «{result.key}»{detail}",
+            source="notify", now=now, expires_at=now + _ALL_CLEAR_TTL)
+        return 1
 
     async def _run_escalations(self, now: datetime) -> int:
         rows = await db.claim_escalations(self.pool, now=now,
@@ -197,7 +255,7 @@ class IncidentManager:
                        row["key"])
             text = ESCALATION_TEXT.get(row["key"],
                                        f"уже час не устранена поломка: {row['key']}")
-            await self._ensure_route(ESCALATION_KIND, ESCALATION_ADDRESS)
+            await self._ensure_route(ESCALATION_KIND, ESCALATION_ADDRESS, "grey")
             await db.insert_event(self.pool, kind=ESCALATION_KIND, text=text, source="notify",
                                   ref=str(row["id"]), now=now, expires_at=now + _ESCALATION_TTL)
             queued += 1
@@ -206,7 +264,7 @@ class IncidentManager:
     # --- отправка ---
 
     async def _send_alert(self, incident: dict, *, first: bool, now: datetime) -> None:
-        await self._ensure_route(incident["key"], INCIDENT_ADDRESS)
+        # Маршрут уже засеян в `_route_level` — здесь только отправка.
         ttl = _ALERT_TTL.get(incident["level"], timedelta(hours=1))
         await db.insert_event(
             self.pool, kind=incident["key"], text=_alert_text(incident, first=first),
@@ -218,16 +276,15 @@ class IncidentManager:
         await db.insert_event(self.pool, kind=incident["key"], text=text, source="notify",
                               ref=str(incident["id"]), now=now, expires_at=now + _ALL_CLEAR_TTL)
 
-    async def _ensure_route(self, kind: str, address: str) -> None:
-        """Завести маршрут `kind -> address`, если его ещё нет — идемпотентно,
-        один раз за жизнь процесса (тот же приём и то же ограничение, что
-        `JournalAdapter._ensure_route`: не спорит с ручной правкой владельца
-        В ЭТОМ запуске службы, но переживёт следующий рестарт заново — тот же
-        компромисс, что и там, не расширяем и не сужаем задачей 8)."""
+    async def _ensure_route(self, kind: str, address: str, level: str) -> None:
+        """Завести маршрут `kind -> address` с нужным уровнем, если его ещё
+        нет. Существующую строку не трогает вовсе (`db.seed_route`): ручная
+        правка владельца должна пережить рестарт службы, иначе команды
+        `set-address` и `set-level` работают до ближайшего перезапуска."""
         if kind in self._routes_seeded:
             return
         try:
-            await db.upsert_route_address(self.pool, kind, address)
+            await db.seed_route(self.pool, kind, address, level)
             self._routes_seeded.add(kind)
         except Exception:                                  # noqa: BLE001
             log.warning("notify: не завёл маршрут %s -> %s — событие всё равно уйдёт "
