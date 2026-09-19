@@ -90,6 +90,85 @@ def test_text_without_address_markers_is_not_touched():
 
 
 # --------------------------------------------------------------------------
+# Адрес — расширенные формы (задача 2 ТЗ 2026-09-19, пункт 5 ревью)
+# --------------------------------------------------------------------------
+
+def test_house_number_after_street_with_comma_is_masked():
+    """«ул. Ленина, 5» — номер дома шёл открытым (нет слова «д.»)."""
+    text = mask_addresses("адрес: ул. Ленина, 5")
+    assert "Ленина" not in text
+    assert "5" not in text
+    assert "ул. … …" in text
+
+
+def test_house_number_after_street_without_comma_is_masked():
+    """«ул. Ленина 5» — та же дыра без запятой."""
+    text = mask_addresses("адрес: ул. Ленина 5")
+    assert "Ленина" not in text
+    assert "5" not in text
+    assert "ул. … …" in text
+
+
+def test_prospekt_short_form_pr_t_is_masked():
+    """«пр-т» не было в списке маркеров — не маскировалось вовсе."""
+    text = mask_addresses("едем на пр-т Мира 12")
+    assert "Мира" not in text
+    assert "12" not in text
+    assert "пр-т" in text
+
+
+def test_prospekt_short_form_with_dot_is_masked():
+    text = mask_addresses("едем на пр. Победы 100")
+    assert "Победы" not in text
+    assert "100" not in text
+    assert "пр." in text
+
+
+def test_prospekt_full_word_is_still_masked():
+    text = mask_addresses("едем на проспект Победы 100")
+    assert "Победы" not in text
+    assert "100" not in text
+    assert "проспект" in text
+
+
+def test_stroenie_number_is_masked_not_only_word():
+    """«строение 5» — терялось только слово, номер оставался."""
+    text = mask_addresses("уточнили строение 5 у диспетчера")
+    assert "5" not in text
+    assert "строение …" in text
+
+
+def test_glued_house_marker_d5_is_masked():
+    """«д5» слитно — не ловилось вовсе."""
+    text = mask_addresses("уточнили: д5, всё верно")
+    assert "д5" not in text
+    assert "5" not in text
+    assert "д…" in text
+
+
+def test_glued_apartment_marker_kv12_is_masked():
+    text = mask_addresses("отметили кв12 в заявке")
+    assert "кв12" not in text
+    assert "12" not in text
+    assert "кв…" in text
+
+
+def test_order_number_is_not_touched_by_address_mask():
+    text = mask_addresses("заказ 581 не разобран")
+    assert text == "заказ 581 не разобран"
+
+
+def test_money_amount_is_not_touched_by_address_mask():
+    text = mask_addresses("к оплате 1200 руб")
+    assert text == "к оплате 1200 руб"
+
+
+def test_time_is_not_touched_by_address_mask():
+    text = mask_addresses("приедем к 12:30")
+    assert text == "приедем к 12:30"
+
+
+# --------------------------------------------------------------------------
 # Комбинированная функция (то, чем пользуется адаптер)
 # --------------------------------------------------------------------------
 
