@@ -182,3 +182,11 @@ def test_redact_masks_both_phone_and_address_in_one_pass():
     assert "ул. …" in text
     assert "д. …" in text
     assert "кв. …" in text
+
+
+def test_house_building_number_is_masked_in_full_word_form():
+    """«корпус N» — та же природа дефекта, что у «строение N»: короткая форма
+    маркера съедала хвост слова, а номер оставался открытым (найдено 19.09)."""
+    assert mask_addresses("корпус 3") == "корпус …"
+    assert mask_addresses("корп. 3") == "корп. …"
+    assert mask_addresses("корп 3") == "корп …"
