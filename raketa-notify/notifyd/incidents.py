@@ -48,10 +48,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from notifyd import db
 from notifyd.watchdog import (
@@ -60,10 +59,6 @@ from notifyd.watchdog import (
 )
 
 log = logging.getLogger(__name__)
-
-CheckSource = Callable[[], Awaitable[Sequence[CheckResult]]]
-
-DEFAULT_POLL_INTERVAL_SEC = 60
 
 # --- расписание напоминаний (решения владельца 18.09) ---
 RED_REMINDER_SEC = 10 * 60             # «повтор каждые 10 минут»
@@ -121,45 +116,34 @@ _ALL_CLEAR_TTL = timedelta(hours=6)
 
 
 class IncidentManager:
-    """Один цикл: спросить `check_source` (обычно `Watchdog.check_once`),
-    провести каждый результат через open/remind/close, затем проверить
-    эскалации. Свой выключатель, по умолчанию выключен (правило проекта) —
-    по «Порядку выката» ТЗ включается ПОСЛЕДНИМ, после сторожа."""
+    """Проводит готовые результаты проверок через open/remind/close и
+    проверяет эскалации. Своего цикла нет: результаты приносит единственный
+    цикл службы — `Watchdog.run_forever(on_results=...)`. Так было не всегда:
+    до правки 19.09 здесь крутился второй цикл, который звал `check_once()`
+    на том же объекте сторожа и затирал ему межпроходную память (замечание 2
+    ревью 18.09). Свой выключатель остался — по «Порядку выката» ТЗ инциденты
+    включаются ПОСЛЕДНИМИ, уже при работающем стороже."""
 
-    def __init__(self, *, pool: Any, check_source: CheckSource, enabled: bool,
-                now: Optional[Callable[[], datetime]] = None,
-                sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-                poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC) -> None:
+    def __init__(self, *, pool: Any, enabled: bool,
+                now: Optional[Callable[[], datetime]] = None) -> None:
         self.pool = pool
-        self.check_source = check_source
         self.enabled = enabled
         self._now = now or (lambda: datetime.now(timezone.utc))
-        self.sleep = sleep
-        self.poll_interval_sec = poll_interval_sec
         # Какие kind уже засеяны в notify.routes в этом процессе — тот же
         # приём (и то же ограничение: не переживает перезапуск), что
         # `JournalAdapter._route_seeded`, только на несколько kind сразу.
         self._routes_seeded: set[str] = set()
 
-    async def run_forever(self, stop: Optional[asyncio.Event] = None) -> None:
-        if not self.enabled:
-            log.info("notify: инциденты выключены (выключатель в настройках), "
-                     "check_once не запускаю и notify.incidents не трогаю")
-            while stop is None or not stop.is_set():
-                await self.sleep(self.poll_interval_sec)
-            return
-
-        while stop is None or not stop.is_set():
-            try:
-                results = await self.check_source()
-                await self.process_checks(results)
-            except Exception:                             # noqa: BLE001
-                log.exception("notify: проход инцидентов не удался")
-            await self.sleep(self.poll_interval_sec)
-
     async def process_checks(self, results: Sequence[CheckResult]) -> int:
-        """Один проход по уже готовым результатам проверок. Возвращает,
-        сколько сообщений положено в notify.outbox (для тестов)."""
+        """Один проход по готовым результатам проверок — их приносит цикл
+        сторожа. Возвращает, сколько сообщений положено в notify.outbox
+        (для тестов).
+
+        Выключатель проверяется здесь, а не в цикле: сторож обязан работать
+        и при выключенных инцидентах — он в это время пишет в журнал, и
+        владелец по «Порядку выката» сначала обживается с ним."""
+        if not self.enabled:
+            return 0
         now = self._now()
         queued = 0
         for result in results:

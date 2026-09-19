@@ -97,7 +97,7 @@ async def run() -> None:
         cap_per_cycle=settings.journal_max_per_minute,
     )
 
-    # Сторож (задача 7) — свой цикл в том же процессе. «Прокси отвечает»
+    # Сторож (задача 7) — единственный цикл проверок в службе. «Прокси отвечает»
     # проверяется через уже поднятую сессию рабочего бота (тем же путём,
     # которым идёт доставка) — второй сессии специально под проверку не
     # заводим, senders["worker"] в build_targets всегда есть (WORKER_TG_TOKEN
@@ -114,19 +114,13 @@ async def run() -> None:
         dispatch_max_age_sec=settings.watchdog_dispatch_max_age_sec,
     )
 
-    # Инциденты (задача 8) — свой цикл, свой выключатель, отдельно от
-    # сторожа: по «Порядку выката» ТЗ включается ПОСЛЕДНИМ, уже когда
-    # владелец обжился с сторожем и переходником журнала. Дёргает
-    # watchdog.check_once() на своём расписании (независимо от собственного
-    # цикла Watchdog.run_forever выше) — сознательное решение исполнителя:
-    # раздельные выключатели дороже двойным вызовом check_once(), когда оба
-    # включены, но зато включаются в разное время, как того и хочет ТЗ.
-    incidents = IncidentManager(
-        pool=pool,
-        check_source=watchdog.check_once,
-        enabled=settings.incidents_enabled,
-        poll_interval_sec=settings.incidents_poll_interval_sec,
-    )
+    # Инциденты (задача 8) — свой выключатель, но НЕ свой цикл: результаты
+    # приносит цикл сторожа (on_results ниже). Раздельные циклы звали
+    # check_once() на одном объекте и затирали друг другу замер очереди
+    # (замечание 2 ревью 18.09); выключатели при этом остались раздельными,
+    # как того и хочет «Порядок выката» ТЗ — инциденты включаются ПОСЛЕДНИМИ,
+    # когда владелец уже обжился со сторожем и переходником журнала.
+    incidents = IncidentManager(pool=pool, enabled=settings.incidents_enabled)
 
     # Слушатель My_admin (кнопки инцидентов + команда /status, задачи 8-9).
     # Поднимается на ТОМ ЖЕ объекте Bot, которым почтальон уже отправляет
@@ -156,7 +150,7 @@ async def run() -> None:
              my_admin_listener is not None)
 
     tasks = [postman.run_forever(stop), journal_adapter.run_forever(stop),
-            watchdog.run_forever(stop), incidents.run_forever(stop)]
+            watchdog.run_forever(stop, on_results=incidents.process_checks)]
     if my_admin_listener is not None:
         tasks.append(my_admin_listener.run_forever(stop))
 

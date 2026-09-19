@@ -31,15 +31,11 @@ def healthy(key: str = KEY_DISPATCH, level: str = "red") -> CheckResult:
     return CheckResult(key=key, ok=True, detail="", level=level)
 
 
-def manager(pool: Any, moment, results: Sequence[CheckResult] = ()) -> IncidentManager:
+def manager(pool: Any, moment) -> IncidentManager:
     """Менеджер с застывшими часами: расписание проверяется переводом
-    стрелок, а не ожиданием десяти настоящих минут."""
-
-    async def source() -> Sequence[CheckResult]:
-        return list(results)
-
-    return IncidentManager(pool=pool, check_source=source, enabled=True,
-                           now=lambda: moment)
+    стрелок, а не ожиданием десяти настоящих минут. Своего цикла у него нет —
+    результаты проверок приносит цикл сторожа, здесь их подаёт тест."""
+    return IncidentManager(pool=pool, enabled=True, now=lambda: moment)
 
 
 async def events(pool: Any, kind: str) -> list[dict]:
@@ -175,3 +171,15 @@ async def test_two_parallel_passes_send_one_message(pool):
     assert sum(queued) == 1, f"ожидалась одна тревога, вышло {queued}"
     assert len(await events(pool, KEY_DISPATCH)) == 1
     assert len(await open_incidents(pool)) == 1
+
+
+async def test_disabled_incidents_do_nothing(pool):
+    """Порядок выката: сторож уже включён, инциденты ещё нет. Проверки идут,
+    но notify.incidents не трогается и ни одной тревоги не уходит."""
+    mgr = IncidentManager(pool=pool, enabled=False, now=lambda: NOW)
+
+    queued = await mgr.process_checks([failing()])
+
+    assert queued == 0
+    assert await open_incidents(pool) == []
+    assert await events(pool, KEY_DISPATCH) == []

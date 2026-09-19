@@ -290,3 +290,70 @@ async def test_enabled_watchdog_runs_a_pass_then_stops(watchdog_pool):
     await wd.run_forever(stop)
 
     assert calls["n"] == 1
+
+
+# --------------------------------------------------------------------------
+# Один проход в минуту (замечание 2 ревью 18.09)
+# --------------------------------------------------------------------------
+
+async def test_manual_check_does_not_disturb_queue_growth(watchdog_pool):
+    """Команда «что сейчас сломано» зовёт те же проверки, но замер очереди
+    оставляет циклу: иначе рост между проходами теряется и «рассыльщик жив,
+    но захлёбывается» маскируется."""
+    await _insert_dispatch_row(watchdog_pool, status="pending",
+                               scheduled_at=NOW - timedelta(minutes=1))
+    await _insert_dispatch_row(watchdog_pool, status="sent",
+                               scheduled_at=NOW - timedelta(minutes=20),
+                               sent_at=NOW - timedelta(minutes=1))
+
+    wd = _watchdog(watchdog_pool, dispatch_max_age_sec=1800)
+    assert _result(await wd.check_once(), KEY_DISPATCH).ok is True
+
+    await _insert_dispatch_row(watchdog_pool, status="pending",
+                               scheduled_at=NOW - timedelta(minutes=1))
+    await wd.check_once(remember=False)          # владелец нажал «что сломано»
+    await wd.check_once(remember=False)          # и ещё раз
+
+    second = _result(await wd.check_once(), KEY_DISPATCH)
+    assert second.ok is False
+    assert "растёт" in second.detail
+
+
+async def test_cycle_hands_results_to_incidents(watchdog_pool):
+    """Проверки идут одним проходом: цикл сам отдаёт результат дальше,
+    второго независимого вызывающего у check_once нет."""
+    stop = asyncio.Event()
+    seen: list = []
+
+    async def fake_sleep(_seconds: float) -> None:
+        stop.set()
+
+    async def on_results(results) -> None:
+        seen.append(list(results))
+
+    wd = _watchdog(watchdog_pool, sleep=fake_sleep)
+    await wd.run_forever(stop, on_results=on_results)
+
+    assert len(seen) == 1
+    assert {r.key for r in seen[0]} == {
+        KEY_WORKER_HEARTBEAT, KEY_CLIENT_HEARTBEAT, KEY_ADMIN_HEARTBEAT,
+        KEY_AMOCRM_POLL, KEY_DATABASE, KEY_PROXY, KEY_DISPATCH,
+    }
+
+
+async def test_disabled_watchdog_does_not_feed_incidents(watchdog_pool):
+    """Сторож выключен — проверок нет, значит и инцидентам ничего не уходит."""
+    stop = asyncio.Event()
+    seen: list = []
+
+    async def fake_sleep(_seconds: float) -> None:
+        stop.set()
+
+    async def on_results(results) -> None:
+        seen.append(list(results))
+
+    wd = _watchdog(watchdog_pool, sleep=fake_sleep)
+    wd.enabled = False
+    await wd.run_forever(stop, on_results=on_results)
+
+    assert seen == []

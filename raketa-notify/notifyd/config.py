@@ -139,7 +139,6 @@ class Settings:
     # notifyd/incidents.py, а не настройками: это не операционная подстройка,
     # а зафиксированное правило.
     incidents_enabled: bool = False
-    incidents_poll_interval_sec: int = 60
 
     # Слушатель My_admin (кнопки инцидентов задачи 8, команда /status задачи
     # 9) — свой выключатель, отдельно от incidents_enabled: /status полезен
@@ -196,7 +195,6 @@ class Settings:
             watchdog_proxy_timeout_sec=_float("NOTIFY_WATCHDOG_PROXY_TIMEOUT_SEC", 5.0),
             watchdog_dispatch_max_age_sec=_int("NOTIFY_WATCHDOG_DISPATCH_MAX_AGE_SEC", 1800),
             incidents_enabled=_flag("NOTIFY_INCIDENTS_ENABLED", False),
-            incidents_poll_interval_sec=_int("NOTIFY_INCIDENTS_POLL_INTERVAL_SEC", 60),
             my_admin_listener_enabled=_flag("NOTIFY_MY_ADMIN_ENABLED", False),
             my_admin_owner_tg_id=_chat_id("MY_ADMIN_OWNER_TG_ID"),
             work_chat_id=_chat_id("WORK_CHAT_ID"),

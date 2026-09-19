@@ -93,7 +93,10 @@ class AdminBotListener:
 
     async def cmd_status(self, message: Any) -> None:
         now = self._now()
-        checks = await self.watchdog.check_once()
+        # remember=False: разовый вызов не трогает межпроходную память
+        # сторожа, иначе нажатие команды съедает у цикла замер очереди
+        # (замечание 2 ревью 18.09).
+        checks = await self.watchdog.check_once(remember=False)
         dispatch_stats = await db.fetch_dispatch_stats(self.pool, now=now)
         pending = await db.count_outbox_pending(self.pool)
         incidents = await db.list_open_incidents(self.pool)

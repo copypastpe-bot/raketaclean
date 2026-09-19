@@ -34,7 +34,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from notifyd import db
 
@@ -59,6 +59,10 @@ KEY_PROXY = "прокси"
 KEY_DISPATCH = "рассыльщик клиентам"
 
 DEFAULT_POLL_INTERVAL_SEC = 60
+
+# Куда цикл отдаёт готовые результаты — инцидентам (notifyd.incidents).
+# Своего цикла у инцидентов нет намеренно, см. run_forever.
+ResultsHandler = Callable[[Sequence["CheckResult"]], Awaitable[Any]]
 
 
 @dataclass(frozen=True)
@@ -105,10 +109,23 @@ class Watchdog:
         # Межпроходная память нужна только «растёт ли очередь» (задача 7,
         # второй сигнал рассыльщика) — не переживает перезапуск службы,
         # сознательный выбор ради простоты, тем же приёмом, что курсор
-        # переходника журнала (notifyd/journal_source.py).
+        # переходника журнала (notifyd/journal_source.py). Обновляет её
+        # только цикл: разовые вызовы (`check_once(remember=False)`) читают,
+        # но не пишут, иначе замер достаётся не тому, кто его ждёт.
         self._prev_dispatch_pending: Optional[int] = None
 
-    async def run_forever(self, stop: Optional[asyncio.Event] = None) -> None:
+    async def run_forever(self, stop: Optional[asyncio.Event] = None,
+                          on_results: Optional[ResultsHandler] = None) -> None:
+        """Единственный цикл проверок в службе.
+
+        `on_results` — инциденты (задача 8). Отдельного цикла у них нет
+        намеренно: два независимых цикла звали `check_once()` на одном и том
+        же объекте и затирали друг другу межпроходную память «сколько было
+        в очереди минуту назад», из-за чего рост очереди мог систематически
+        не замечаться (замечание 2 ревью 18.09). Свой выключатель у инцидентов
+        остался — он внутри обработчика, а не здесь: сторож должен уметь
+        работать и без них, так устроен порядок выката.
+        """
         if not self.enabled:
             log.info("notify: сторож выключен (выключатель в настройках), проверок не делаю")
             while stop is None or not stop.is_set():
@@ -124,15 +141,22 @@ class Watchdog:
                     else:
                         log.warning("notify: сторож — %s: сломано (%s)",
                                    result.key, result.detail)
+                if on_results is not None:
+                    await on_results(results)
             except Exception:                             # noqa: BLE001
                 log.exception("notify: проход сторожа не удался")
             await self.sleep(self.poll_interval_sec)
 
-    async def check_once(self) -> list[CheckResult]:
+    async def check_once(self, *, remember: bool = True) -> list[CheckResult]:
         """Один проход всех семи проверок. Каждая гасит собственное
         исключение (`_safe`) — падение одной (например, база недоступна)
         не должно скрыть остальные результаты: прокси проверяется вообще
-        без похода в базу."""
+        без похода в базу.
+
+        `remember=False` — разовый вызов со стороны (команда «что сейчас
+        сломано»): результаты отдаются, но межпроходная память не трогается.
+        Иначе нажатие команды съедает у цикла замер очереди и рост
+        рассыльщика теряется."""
         now = self._now()
         return [
             await self._safe(KEY_WORKER_HEARTBEAT, self._check_heartbeat(
@@ -147,7 +171,8 @@ class Watchdog:
             await self._safe(KEY_AMOCRM_POLL, self._check_amocrm(now)),
             await self._safe(KEY_DATABASE, self._check_database()),
             await self._safe(KEY_PROXY, self._check_proxy()),
-            await self._safe(KEY_DISPATCH, self._check_dispatch(now)),
+            await self._safe(KEY_DISPATCH,
+                             self._check_dispatch(now, remember=remember)),
         ]
 
     async def _safe(self, key: str, coro: Awaitable[CheckResult]) -> CheckResult:
@@ -205,12 +230,14 @@ class Watchdog:
             return CheckResult(key=KEY_PROXY, ok=False, detail=f"{type(exc).__name__}: {exc}")
         return CheckResult(key=KEY_PROXY, ok=bool(ok), detail="" if ok else "getMe не ответил")
 
-    async def _check_dispatch(self, now: datetime) -> CheckResult:
+    async def _check_dispatch(self, now: datetime, *,
+                              remember: bool = True) -> CheckResult:
         stats = await db.fetch_dispatch_stats(self.pool, now=now)
         pending = stats["pending_due"]
         last_sent_at = stats["last_sent_at"]
         prev = self._prev_dispatch_pending
-        self._prev_dispatch_pending = pending
+        if remember:
+            self._prev_dispatch_pending = pending
 
         if pending == 0:
             # Ничего не ждёт отправки — застарелость last_sent_at не значит
