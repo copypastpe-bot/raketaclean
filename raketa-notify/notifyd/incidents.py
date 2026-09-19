@@ -26,6 +26,13 @@
   правкой в базе: команда `routes_cli set-level` для сторожевых проверок
   серый не принимает и отсылает к выключателю маршрута (решение 19.09).
 
+**Порог подтверждения.** Инцидент открывается только если проверка сказала
+«сломано» `CONFIRM_PASSES` проходов подряд. Мигнувшее (упало и поднялось
+само) уходит строкой в технический журнал видом `BLIP_KIND` — это решение
+владельца 19.09: «если что-то упало и сразу починилось, это запись в
+технический журнал, а не тревога». Порог стоит только на открытие:
+выздоровление принимается с первого же удачного прохода.
+
 **Эскалация.** Красный инцидент, который «бьёт по клиентам или заказам» и
 не закрыт за час, дублируется в My_assistant словами последствия, без
 кнопки, один раз (`escalated_at`). Какие из семи ключей сторожа считаются
@@ -89,6 +96,19 @@ YELLOW_REMINDER_SEC = 24 * 60 * 60     # «раз в сутки»
 YELLOW_CAP = 3                          # «потолок три» (считая первое сообщение)
 YELLOW_SNOOZE_SEC = 24 * 60 * 60       # кнопка «отложить» — тоже сутки
 
+# Сколько проходов подряд проверка должна говорить «сломано», чтобы это
+# стало тревогой (решение владельца 19.09: «3 прохода — дальше переживаем
+# и тревожимся»). При проходе раз в минуту это три минуты ожидания.
+# Счётчик живёт в процессе: после перезапуска службы поломка подтверждается
+# заново — те же три минуты, дешевле собственной таблицы.
+CONFIRM_PASSES = 3
+
+# Мигнувшая поломка: упало и поднялось само, не дойдя до порога. Не тревога,
+# а след в техническом журнале — «если что-то упало и сразу починилось, это
+# запись в технический журнал, а не тревога» (владелец, 19.09).
+BLIP_KIND = "notify.incident.blip"
+BLIP_ADDRESS = "tech_journal"
+
 # Красный инцидент, не закрытый за это время, дублируется в My_assistant.
 ESCALATION_AFTER_SEC = 60 * 60
 
@@ -147,10 +167,15 @@ class IncidentManager:
     включаются ПОСЛЕДНИМИ, уже при работающем стороже."""
 
     def __init__(self, *, pool: Any, enabled: bool,
-                now: Optional[Callable[[], datetime]] = None) -> None:
+                now: Optional[Callable[[], datetime]] = None,
+                confirm_passes: int = CONFIRM_PASSES) -> None:
         self.pool = pool
         self.enabled = enabled
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self.confirm_passes = confirm_passes
+        # Сколько проходов подряд проверка говорит «сломано». Живёт в
+        # процессе — см. CONFIRM_PASSES.
+        self._failing_streak: dict[str, int] = {}
         # Какие kind уже засеяны в notify.routes в этом процессе — тот же
         # приём (и то же ограничение: не переживает перезапуск), что
         # `JournalAdapter._route_seeded`, только на несколько kind сразу.
@@ -175,11 +200,36 @@ class IncidentManager:
         queued = 0
         for result in results:
             if result.ok:
+                queued += await self._note_blip(result, now)
                 queued += await self._handle_recovered(result, now)
-            else:
-                queued += await self._handle_failing(result, now)
+                continue
+
+            streak = self._failing_streak.get(result.key, 0) + 1
+            self._failing_streak[result.key] = streak
+            if streak < self.confirm_passes:
+                log.debug("notify: %s сломано %s-й проход подряд, порог %s — жду",
+                          result.key, streak, self.confirm_passes)
+                continue
+            queued += await self._handle_failing(result, now)
         queued += await self._run_escalations(now)
         return queued
+
+    async def _note_blip(self, result: CheckResult, now: datetime) -> int:
+        """Проверка поднялась, не дойдя до порога, — записываем след и
+        молчим. Дошедшая до порога поломка сюда не попадает: её закрывает
+        `_handle_recovered` отбоем, как и раньше."""
+        streak = self._failing_streak.pop(result.key, 0)
+        if not 0 < streak < self.confirm_passes:
+            return 0
+        log.info("notify: %s мигнуло (%s проход(а) подряд) — тревоги нет, "
+                 "только запись в журнал", result.key, streak)
+        await self._ensure_route(BLIP_KIND, BLIP_ADDRESS, "grey")
+        await db.insert_event(
+            self.pool, kind=BLIP_KIND,
+            text=f"Мигнуло: «{result.key}» — сломалось и починилось само "
+                 f"(держалось проходов: {streak}).",
+            source="notify", now=now, expires_at=now + _ALL_CLEAR_TTL)
+        return 1
 
     # --- открытие и напоминание ---
 

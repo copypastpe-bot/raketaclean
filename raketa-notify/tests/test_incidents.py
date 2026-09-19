@@ -34,8 +34,13 @@ def healthy(key: str = KEY_DISPATCH, level: str = "red") -> CheckResult:
 def manager(pool: Any, moment) -> IncidentManager:
     """Менеджер с застывшими часами: расписание проверяется переводом
     стрелок, а не ожиданием десяти настоящих минут. Своего цикла у него нет —
-    результаты проверок приносит цикл сторожа, здесь их подаёт тест."""
-    return IncidentManager(pool=pool, enabled=True, now=lambda: moment)
+    результаты проверок приносит цикл сторожа, здесь их подаёт тест.
+
+    `confirm_passes=1` — порог подтверждения поломки здесь выключен: у него
+    свои тесты (ниже), а расписание напоминаний проверяется отдельно и на
+    каждый проход заводит новый менеджер, то есть новый счётчик проходов."""
+    return IncidentManager(pool=pool, enabled=True, now=lambda: moment,
+                           confirm_passes=1)
 
 
 async def events(pool: Any, kind: str) -> list[dict]:
@@ -234,7 +239,8 @@ async def test_grey_level_reports_once_and_opens_no_incident(pool):
     """Серый — «не дёргает»: инцидент не заводится, уходит одна запись без
     кнопки, и висящая дальше поломка её не повторяет."""
     clock = {"now": NOW}
-    mgr = IncidentManager(pool=pool, enabled=True, now=lambda: clock["now"])
+    mgr = IncidentManager(pool=pool, enabled=True, now=lambda: clock["now"],
+                          confirm_passes=1)      # порог проверяется своими тестами
     await db.upsert_route_address(pool, KEY_DISPATCH, "tech_journal")
     assert await db.update_route_level(pool, KEY_DISPATCH, "grey") is True
 
@@ -316,3 +322,80 @@ async def test_escalation_goes_at_night(pool):
 
     assert await manager(pool, NIGHT_0230).process_checks([]) == 1
     assert len(await events(pool, incidents.ESCALATION_KIND)) == 1
+
+
+# --------------------------------------------------------------------------
+# Подтверждение поломки (решение владельца 19.09): тревога после трёх
+# проходов подряд, мигнувшее — строкой в технический журнал
+# --------------------------------------------------------------------------
+
+def confirming(pool: Any, clock: dict) -> IncidentManager:
+    """Менеджер с настоящим порогом в три прохода и подвижными часами:
+    счётчик проходов живёт в процессе, поэтому менеджер должен быть один."""
+    return IncidentManager(pool=pool, enabled=True, now=lambda: clock["now"],
+                           confirm_passes=3)
+
+
+async def test_blip_does_not_alert_and_only_notes_the_journal(pool):
+    """Упало и поднялось само — это запись в журнал, а не тревога."""
+    clock = {"now": NOW}
+    mgr = confirming(pool, clock)
+
+    await mgr.process_checks([failing()])
+    clock["now"] = NOW + timedelta(minutes=1)
+    await mgr.process_checks([failing()])
+    clock["now"] = NOW + timedelta(minutes=2)
+    await mgr.process_checks([healthy()])
+
+    assert await open_incidents(pool) == []
+    assert await events(pool, KEY_DISPATCH) == []
+    blips = await events(pool, incidents.BLIP_KIND)
+    assert len(blips) == 1
+    assert blips[0]["reply_markup"] is None
+
+
+async def test_three_failing_passes_in_a_row_open_the_incident(pool):
+    """Держится три прохода подряд — это уже поломка, тревога уходит."""
+    clock = {"now": NOW}
+    mgr = confirming(pool, clock)
+
+    assert await mgr.process_checks([failing()]) == 0
+    clock["now"] = NOW + timedelta(minutes=1)
+    assert await mgr.process_checks([failing()]) == 0
+    clock["now"] = NOW + timedelta(minutes=2)
+    assert await mgr.process_checks([failing()]) == 1
+
+    assert len(await open_incidents(pool)) == 1
+    assert len(await events(pool, KEY_DISPATCH)) == 1
+    assert await events(pool, incidents.BLIP_KIND) == []
+
+
+async def test_flapping_check_never_alerts(pool):
+    """Дребезг «сломано — работает — сломано — работает» тревог не рождает."""
+    clock = {"now": NOW}
+    mgr = confirming(pool, clock)
+
+    for minute, result in enumerate([failing(), healthy(), failing(), healthy()]):
+        clock["now"] = NOW + timedelta(minutes=minute)
+        await mgr.process_checks([result])
+
+    assert await open_incidents(pool) == []
+    assert await events(pool, KEY_DISPATCH) == []
+    assert len(await events(pool, incidents.BLIP_KIND)) == 2
+
+
+async def test_open_incident_closes_on_the_first_healthy_pass(pool):
+    """Порог стоит только на открытие: выздоровление принимается сразу."""
+    clock = {"now": NOW}
+    mgr = confirming(pool, clock)
+
+    for minute in range(3):
+        clock["now"] = NOW + timedelta(minutes=minute)
+        await mgr.process_checks([failing()])
+    assert len(await open_incidents(pool)) == 1
+
+    clock["now"] = NOW + timedelta(minutes=3)
+    assert await mgr.process_checks([healthy()]) == 1
+    assert await open_incidents(pool) == []
+    texts = [row["text"] for row in await events(pool, KEY_DISPATCH)]
+    assert any("Отбой" in text for text in texts), texts
