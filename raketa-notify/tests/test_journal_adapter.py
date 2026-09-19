@@ -243,13 +243,94 @@ async def test_new_occurrence_after_window_starts_fresh_line(pool):
 
 
 # --------------------------------------------------------------------------
+# Схлопывание не зависит от чисел в тексте (ревью п.6, задача 3 ТЗ 2026-09-19)
+# --------------------------------------------------------------------------
+
+async def test_repeats_with_different_numbers_collapse_into_one_line(pool):
+    """Дефект ревью (п.6): раньше ключ схлопывания включал точный текст, а
+    номер заказа/сделки стоит прямо в тексте записи — массовый сбой давал
+    разный текст на каждый номер вместо одной строки со счётчиком. Теперь
+    сравнение идёт по «форме» текста (числа заменены на заглушку)."""
+    source = FakeJournalSource("telegram-bot.service")
+    for order_id in range(1, 21):
+        source.push(f"ERROR:bot:не удалось обработать заказ {order_id}")
+    adapter = _adapter(pool, {"telegram-bot.service": source})
+
+    queued = await adapter.poll_once()
+
+    assert queued == 1
+    rows = await _fetch_all_journal_rows(pool)
+    assert len(rows) == 1
+    assert "(×20)" in rows[0]["text"]
+
+
+async def test_different_errors_with_numbers_do_not_collapse_together(pool):
+    """Форма нужна только для чисел — разные по смыслу ошибки (разный текст
+    вокруг числа) остаются разными строками, а не схлопываются в одну."""
+    source = FakeJournalSource("telegram-bot.service")
+    source.push("ERROR:bot:не удалось обработать заказ 5")
+    source.push("ERROR:bot:не удалось отменить заказ 5")
+    adapter = _adapter(pool, {"telegram-bot.service": source})
+
+    queued = await adapter.poll_once()
+
+    assert queued == 2
+    rows = await _fetch_all_journal_rows(pool)
+    assert len(rows) == 2
+
+
+async def test_collapsed_line_shows_readable_text_of_first_occurrence(pool):
+    """Форма — только для сравнения. В чат уходит человеческий текст первого
+    вхождения с настоящим числом, заглушка наружу не просачивается."""
+    source = FakeJournalSource("telegram-bot.service")
+    source.push("ERROR:bot:не удалось обработать заказ 581")
+    source.push("ERROR:bot:не удалось обработать заказ 582")
+    adapter = _adapter(pool, {"telegram-bot.service": source})
+
+    queued = await adapter.poll_once()
+
+    assert queued == 1
+    rows = await _fetch_all_journal_rows(pool)
+    text = rows[0]["text"]
+    assert "не удалось обработать заказ 581" in text      # первое вхождение, число видно
+    assert "(×2)" in text
+    assert "\x00" not in text                               # заглушка не просочилась в чат
+
+
+async def test_masked_phone_tails_collapse_despite_different_digits(pool):
+    """Ограничение задачи: маскированный телефон (…1234) — уже не ПД,
+    схлопывание строк, различающихся только его хвостом, допустимо и
+    желательно."""
+    source = FakeJournalSource("telegram-bot.service")
+    source.push(
+        "WARNING:notifications.outbox:Webhook payload missing message id. "
+        "event=status payload={'to': '79991234567'}"
+    )
+    source.push(
+        "WARNING:notifications.outbox:Webhook payload missing message id. "
+        "event=status payload={'to': '79997654321'}"
+    )
+    adapter = _adapter(pool, {"telegram-bot.service": source})
+
+    queued = await adapter.poll_once()
+
+    assert queued == 1
+    rows = await _fetch_all_journal_rows(pool)
+    assert len(rows) == 1
+    assert "(×2)" in rows[0]["text"]
+
+
+# --------------------------------------------------------------------------
 # Потолок на цикл (при интервале 60с — потолок «на минуту» из ТЗ)
 # --------------------------------------------------------------------------
 
 async def test_cap_per_cycle_leaves_one_overflow_line(pool):
+    """Модуль, а не число в тексте, делает записи различными: с задачи 3
+    (ревью п.6) число в тексте на группировку не влияет, поэтому здесь нужен
+    другой источник различия, чтобы получить 25 РАЗНЫХ ключей."""
     source = FakeJournalSource("telegram-bot.service")
     for i in range(25):
-        source.push(f"ERROR:bot:сделка {i} не разобрана: timeout")   # 25 РАЗНЫХ ключей
+        source.push(f"ERROR:bot{i}:сделка не разобрана: timeout")
     adapter = _adapter(pool, {"telegram-bot.service": source}, cap_per_cycle=20)
 
     queued = await adapter.poll_once()
