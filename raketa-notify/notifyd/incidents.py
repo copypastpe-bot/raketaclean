@@ -85,7 +85,12 @@ NIGHT_END_HOUR = 8
 def is_night(moment: datetime) -> bool:
     """Ночь по Москве: 00:00-08:00. Пауза касается только ПОВТОРОВ красного —
     первое сообщение о поломке, отбой и дубль затянувшейся поломки разовые
-    и уходят сразу, ночью тоже."""
+    и уходят сразу, ночью тоже.
+
+    Время без зоны считаем UTC, а не временем машины: служба живёт в UTC,
+    и «ночь владельца» не должна зависеть от того, где стоит сервер."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
     return NIGHT_START_HOUR <= moment.astimezone(MOSCOW).hour < NIGHT_END_HOUR
 
 

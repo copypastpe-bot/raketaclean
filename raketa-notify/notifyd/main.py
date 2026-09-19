@@ -137,6 +137,11 @@ async def run() -> None:
                 owner_tg_id=settings.my_admin_owner_tg_id,
             )
 
+    if settings.incidents_enabled and not settings.watchdog_enabled:
+        log.warning("notify: инциденты включены, а сторож выключен — проверок никто "
+                   "не делает, тревог не будет. По «Порядку выката» сначала "
+                   "NOTIFY_WATCHDOG_ENABLED=1, потом NOTIFY_INCIDENTS_ENABLED=1")
+
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
