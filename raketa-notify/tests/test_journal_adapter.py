@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 
+from notifyd import db
 from notifyd.journal_adapter import (
     DEDUP_WINDOW_SEC,
     JOURNAL_KIND,
@@ -372,3 +373,21 @@ async def _list_routes(pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT kind, address, level FROM notify.routes")
     return [dict(row) for row in rows]
+
+
+async def test_route_seeding_keeps_manual_address(pool):
+    """Владелец увёл технический журнал в другой чат — перезапуск службы
+    не должен возвращать адрес обратно (тот же дефект, что нашли у инцидентов
+    в ревью 18.09, замечание 7)."""
+    source = FakeJournalSource("telegram-bot.service")
+    source.push("ERROR:bot:первая запись")
+    await _adapter(pool, {"telegram-bot.service": source}).poll_once()
+
+    await db.upsert_route_address(pool, JOURNAL_KIND, "ops_feed")
+
+    # перезапуск службы: новый переходник, пустая память о засеянном маршруте
+    source_after = FakeJournalSource("telegram-bot.service")
+    source_after.push("ERROR:bot:вторая запись")
+    await _adapter(pool, {"telegram-bot.service": source_after}).poll_once()
+
+    assert (await db.get_route(pool, JOURNAL_KIND))["address"] == "ops_feed"

@@ -194,17 +194,19 @@ class JournalAdapter:
             await self.sleep(self.poll_interval_sec)
 
     async def _ensure_route(self) -> None:
-        """Завести маршрут `JOURNAL_KIND -> tech_journal` при первом
-        проходе — идемпотентно (upsert_route_address трогает только адрес,
-        не level/enabled/tag, так что не спорит с тем, что владелец потом
-        поменяет руками через routes_cli). Не удалось — не страшно и не
-        фатально: событие всё равно уйдёт в tech_journal как
-        #неизвестный-вид (тот же фолбэк, что у любого вида без маршрута),
-        просто с чужим тегом; повторим попытку на следующем проходе."""
+        """Завести маршрут `JOURNAL_KIND -> tech_journal` при первом проходе,
+        если его ещё нет, и не трогать существующий (`db.seed_route`): засев
+        идёт при каждом запуске службы, а через `upsert_route_address` он
+        возвращал адрес на умолчание и затирал ручную правку владельца —
+        тот же дефект, что нашли у инцидентов (ревью 18.09, замечание 7).
+        Не удалось — не страшно и не фатально: событие всё равно уйдёт
+        в tech_journal как #неизвестный-вид (тот же фолбэк, что у любого
+        вида без маршрута), просто с чужим тегом; повторим на следующем
+        проходе."""
         if self._route_seeded:
             return
         try:
-            await db.upsert_route_address(self.pool, JOURNAL_KIND, "tech_journal")
+            await db.seed_route(self.pool, JOURNAL_KIND, "tech_journal", "grey")
             self._route_seeded = True
         except Exception:                                   # noqa: BLE001
             log.warning("notify: не завёл маршрут %s — не страшно, событие "
