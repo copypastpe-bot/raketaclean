@@ -30,6 +30,7 @@ import/
 .worktrees/
 Сохраняем файл на всякий/
 .env
+switches.env
 .venv-wahelp/
 test.db
 trace.txt
