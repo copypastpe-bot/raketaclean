@@ -31,7 +31,12 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramAPIError
 
 from .wahelp_client import WahelpAPIError
-from .wahelp_service import ChannelKind, ensure_user_in_channel, send_text_message
+from .wahelp_service import (
+    ChannelKind,
+    ensure_user_in_channel,
+    send_text_message,
+    send_text_to_phone,
+)
 
 logger = logging.getLogger(__name__)
 
