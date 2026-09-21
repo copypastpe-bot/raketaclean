@@ -66,10 +66,6 @@ CHANNEL_TO_KEY: dict[ChannelKind, str] = {
 }
 RATE_LIMIT_UNAVAILABLE_TTL = timedelta(minutes=10)
 
-FOLLOWUP_DELAY_SECONDS = 24 * 60 * 60  # 24h
-WA_FOLLOWUP_DISABLED = os.getenv("WA_FOLLOWUP_DISABLED", "").lower() in {"1", "true", "yes", "on"}
-_followup_tasks: dict[int, asyncio.Task] = {}
-
 CLIENT_BOT_TOKEN = os.getenv("CLIENT_BOT_TOKEN")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TELEGRAM_PROXY_URL = (os.getenv("TELEGRAM_PROXY_URL") or "").strip()
@@ -487,7 +483,6 @@ async def send_with_rules(
                 await _persist_user_id(conn, contact, channel, user_id)
                 response = await send_text_message(channel, user_id=user_id, text=send_text)
             if contact.recipient_kind == "client":
-                _cancel_followup(contact.client_id)
                 await _resolve_dead_channel(conn, contact.client_id, channel)
             logger.info("Message sent via %s to client %s", channel, contact.client_id)
             return SendResult(channel=channel, response=response if isinstance(response, Mapping) else None)
@@ -550,7 +545,6 @@ async def send_via_channel(
             await _persist_user_id(conn, contact, channel, user_id)
             response = await send_text_message(channel, user_id=user_id, text=send_text)
         if contact.recipient_kind == "client":
-            _cancel_followup(contact.client_id)
             await _resolve_dead_channel(conn, contact.client_id, channel)
         return SendResult(channel=channel, response=response if isinstance(response, Mapping) else None)
     except WahelpAPIError as exc:
@@ -657,49 +651,6 @@ async def _set_preferred_channel(conn: asyncpg.Connection, client_id: int, chann
         channel,
         client_id,
     )
-
-
-def _cancel_followup(client_id: int) -> None:
-    task = _followup_tasks.pop(client_id, None)
-    if task:
-        task.cancel()
-
-
-def cancel_followup_for_client(client_id: int) -> None:
-    """Expose follow-up cancellation for external consumers (e.g. webhook)."""
-    _cancel_followup(client_id)
-
-
-async def schedule_followup_for_client(
-    client_id: int,
-    phone: str,
-    name: str,
-    text: str,
-) -> None:
-    """Schedule WA follow-up 24h after delivery if not read."""
-    if WA_FOLLOWUP_DISABLED:
-        return
-    _cancel_followup(client_id)
-
-    async def _task() -> None:
-        try:
-            await asyncio.sleep(FOLLOWUP_DELAY_SECONDS)
-            logger.info("Follow-up via WhatsApp for client %s", client_id)
-            await send_text_to_phone(
-                WHATSAPP_CHANNEL,
-                phone=phone,
-                name=name,
-                text=text,
-            )
-        except asyncio.CancelledError:  # pragma: no cover
-            logger.debug("Follow-up task for client %s cancelled", client_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Follow-up send failed for client %s: %s", client_id, exc)
-        finally:
-            _followup_tasks.pop(client_id, None)
-
-    loop = asyncio.get_running_loop()
-    _followup_tasks[client_id] = loop.create_task(_task())
 
 
 def _is_not_connected_error(error: WahelpAPIError) -> bool:

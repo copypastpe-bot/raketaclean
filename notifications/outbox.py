@@ -8,7 +8,7 @@ from decimal import Decimal
 import json
 import logging
 import re
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import asyncpg
 
@@ -585,19 +585,11 @@ def _map_channel_to_key(channel: str | None) -> str | None:
 async def apply_provider_status_update(
     pool: asyncpg.Pool,
     payload: Mapping[str, Any] | Sequence[Mapping[str, Any]],
-    *,
-    cancel_followup: Callable[[int], None] | None = None,
-    schedule_followup_on_delivered: Callable[[int, str, str, str], Awaitable[None]] | None = None,
 ) -> bool:
     if isinstance(payload, Sequence) and not isinstance(payload, Mapping):
         handled_any = False
         for item in payload:
-            if await apply_provider_status_update(
-                pool,
-                item,
-                cancel_followup=cancel_followup,
-                schedule_followup_on_delivered=schedule_followup_on_delivered,
-            ):
+            if await apply_provider_status_update(pool, item):
                 handled_any = True
         return handled_any
 
@@ -611,12 +603,7 @@ async def apply_provider_status_update(
         for item in data:
             sub_payload = dict(payload)
             sub_payload["data"] = item
-            if await apply_provider_status_update(
-                pool,
-                sub_payload,
-                cancel_followup=cancel_followup,
-                schedule_followup_on_delivered=schedule_followup_on_delivered,
-            ):
+            if await apply_provider_status_update(pool, sub_payload):
                 handled_any = True
         return handled_any
 
@@ -763,23 +750,6 @@ async def apply_provider_status_update(
                         """,
                         row["client_id"],
                         channel_key,
-                    )
-
-        if normalized_status == "read" and row["channel"] == "clients_tg" and cancel_followup:
-            cancel_followup(row["client_id"])
-        if normalized_status == "delivered" and row["channel"] == "clients_tg" and schedule_followup_on_delivered:
-            msg_text = row.get("message_text")
-            if msg_text:
-                client_row = await conn.fetchrow(
-                    "SELECT phone, COALESCE(full_name, 'Клиент') AS name FROM clients WHERE id=$1",
-                    row["client_id"],
-                )
-                if client_row and client_row["phone"]:
-                    await schedule_followup_on_delivered(
-                        row["client_id"],
-                        client_row["phone"],
-                        client_row["name"],
-                        msg_text,
                     )
 
     return True

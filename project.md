@@ -140,7 +140,6 @@
 - Wahelp (`WAHELP_*` project/channel/token/login/password + webhook host/port/token)
 - OnlinePBX (`ONLINEPBX_WEBHOOK_TOKEN`, `ONLINEPBX_ALLOWED_IPS`)
 - sms.ru (`SMSRU_API_ID`, sender, low balance threshold)
-- флаги доставки (`WA_FOLLOWUP_DISABLED`, `WA_ALLOW_WA_FALLBACK`)
 - `CLIENT_BOT_TOKEN` (если нужен клиентский бот)
 
 Секреты из `.env` не коммитить.
