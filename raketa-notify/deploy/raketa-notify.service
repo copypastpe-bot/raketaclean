@@ -8,7 +8,14 @@ Type=simple
 User=notify
 Group=notify
 WorkingDirectory=/opt/raketa-notify/app
+# Два файла настроек, и это осознанно (решение владельца 21.09):
+#   .env          — секреты (токены, пароль базы), правит только владелец, root:notify 640;
+#   switches.env  — выключатели шагов выката, секретов нет, правит агент, admin:admin 644.
+# Порядок важен: второй файл перекрывает первый, поэтому выключатель из
+# switches.env выигрывает у случайно оставшегося в .env. Минус перед путём —
+# «файла может не быть»: служба поднимется и со старой раскладкой.
 EnvironmentFile=/opt/raketa-notify/.env
+EnvironmentFile=-/opt/raketa-notify/switches.env
 ExecStart=/opt/raketa-notify/.venv/bin/python -m notifyd.main
 Restart=always
 RestartSec=5s

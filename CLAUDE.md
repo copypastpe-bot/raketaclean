@@ -128,6 +128,12 @@ Common rules for python projects (Rules 4.1):
 - `ssh` output is trimmed to the useful part. Long or repeated work on the server still goes into a script run once, but step-by-step diagnosis from the main session is allowed (owner decision 2026-09-21, see «Server work» below).
 - Files longer than 500 lines are read in parts; the function map lives next to the file (owner decision 2026-09-10).
 - `.claude/settings.json` of this project holds the permissions its own work needs: `pytest`, `git status/diff/log`, file reads (`cat`, `sed -n`, `grep`, `rg`), `python -m`, project scripts. `ssh` to the bots' server is allowed (see «Server work»); `scp` and `rsync` stay a question for the owner.
+- **Switches live apart from secrets** (owner decision 2026-09-21, applies to every
+  service from now on): the `.env` with tokens and passwords is the owner's, while
+  on/off flags go into a separate non-secret file next to it (`switches.env`), owned
+  by `admin` and editable without sudo. systemd reads both, switches last, so the
+  switch file wins. This is what lets the agent run a staged rollout without ever
+  touching a token.
 - Subagent worktrees are removed after merge (`git worktree prune` plus branch deletion). No leftovers between sessions.
 - Images and screenshots do not go into working-session memory, unless the task is about the interface and the owner chose to show the screen.
 

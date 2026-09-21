@@ -8,10 +8,19 @@
 
 ---
 
-## 1. Что владелец вписывает своими руками
+## 1. Два файла настроек
 
-Агент за паролями и токенами не ходит. Эти значения владелец вносит
-в `/opt/raketa-notify/.env` на сервере сам:
+Настройки службы разделены (решение владельца 21.09):
+
+- `/opt/raketa-notify/.env` — **секреты**: токены, пароль базы. `root:notify`,
+  права `640`, правит только владелец. Агент их не ищет, не печатает и не вводит.
+- `/opt/raketa-notify/switches.env` — **выключатели** шагов выката. Секретов нет,
+  `admin:admin`, права `644`, правит агент. Образец — `switches.env.example`.
+
+Юнит читает оба файла, выключатели вторым — поэтому значение из `switches.env`
+выигрывает, даже если такое же осталось в `.env`.
+
+Эти значения владелец вносит в `.env` сам:
 
 | Переменная | Что это |
 |---|---|
@@ -59,7 +68,12 @@ sudo chown root:notify /opt/raketa-notify/.env
 sudo chmod 640 /opt/raketa-notify/.env
 sudo nano /opt/raketa-notify/.env
 
-# 5. Служба
+# 5. Выключатели — отдельным файлом, без секретов, правится без sudo
+sudo cp /opt/raketa-notify/app/switches.env.example /opt/raketa-notify/switches.env
+sudo chown admin:admin /opt/raketa-notify/switches.env
+sudo chmod 644 /opt/raketa-notify/switches.env
+
+# 6. Служба
 sudo cp /opt/raketa-notify/app/deploy/raketa-notify.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable raketa-notify.service
@@ -98,9 +112,11 @@ journalctl -u raketa-notify.service -n 30 --no-pager
 
 ## 5. Включение — по шагам, не разом
 
-Каждый шаг: поправить `.env`, `sudo systemctl restart raketa-notify.service`,
-посмотреть журнал. Между шагами — пауза хотя бы в сутки, чтобы увидеть, как
-ведёт себя предыдущий.
+Каждый шаг: поправить **`switches.env`** (не `.env` — там только секреты),
+`sudo systemctl restart raketa-notify.service`, посмотреть журнал. Между шагами —
+пауза хотя бы в сутки, чтобы увидеть, как ведёт себя предыдущий.
+
+Исключение — шаг 4: пульс живёт в настройках самих ботов, см. ниже.
 
 | Шаг | Что включаем | Переменные | Что должно произойти |
 |---|---|---|---|
@@ -130,7 +146,8 @@ sudo raketa-admin-bot-update
 нарисуется, но нажимать её будет некому: красная тревога продолжит приходить каждые
 10 минут (ночью, с 00:00 до 08:00 МСК, — одним сообщением), а `/status` не ответит.
 
-Выключить любой шаг — вернуть переменную в `0` и перезапустить службу.
+Выключить любой шаг — вернуть переменную в `0` в `switches.env` и перезапустить
+службу.
 
 ---
 
@@ -197,5 +214,8 @@ sudo systemctl restart raketa-notify.service
 
 Строка с `pip` нужна, только если менялся `requirements.txt`; лишней она
 не будет — уже установленное переставлять не станет.
+
+Обновление не трогает ни `.env`, ни `switches.env`: оба лежат уровнем выше
+каталога `app`, куда идёт `rsync`.
 
 Появились новые миграции — применять по разделу 3 **до** перезапуска.

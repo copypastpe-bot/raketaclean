@@ -71,3 +71,42 @@ def test_env_example_is_usable_as_systemd_environment_file():
                  if re.match(r"^[A-Z0-9_]+=.*\s#", line)]
 
     assert offenders == [], offenders
+
+
+SWITCHES = (
+    "NOTIFY_ENABLED",
+    "NOTIFY_DRY_RUN",
+    "NOTIFY_JOURNAL_ENABLED",
+    "NOTIFY_WATCHDOG_ENABLED",
+    "NOTIFY_INCIDENTS_ENABLED",
+    "NOTIFY_MY_ADMIN_ENABLED",
+)
+
+
+def _example(name: str) -> str:
+    return (Path(__file__).resolve().parent.parent / name).read_text(encoding="utf-8")
+
+
+def test_switches_live_apart_from_secrets():
+    """Решение владельца 21.09: выключатели отдельно от токенов, чтобы шаги
+    выката можно было вести без доступа к секретам. Тест держит раскладку:
+    в файле с секретами выключателей нет, в файле выключателей есть все."""
+    secrets_file = _example(".env.example")
+    switches_file = _example("switches.env.example")
+
+    for name in SWITCHES:
+        assert not re.search(rf"^{name}=", secrets_file, re.M), \
+            f"{name} вернулся в .env.example — секреты и выключатели снова в одном файле"
+        assert re.search(rf"^{name}=", switches_file, re.M), \
+            f"{name} отсутствует в switches.env.example"
+
+
+def test_switches_file_holds_no_secrets():
+    """Файл выключателей лежит доступным для правки без sudo — токену,
+    паролю или строке подключения в нём места нет."""
+    switches_file = _example("switches.env.example")
+
+    forbidden = [line for line in switches_file.splitlines()
+                 if re.match(r"^[A-Z0-9_]*(TOKEN|DSN|PASSWORD|SECRET)[A-Z0-9_]*=", line)]
+
+    assert forbidden == [], forbidden
