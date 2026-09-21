@@ -291,16 +291,17 @@ def test_backlog_title_says_it_was_a_cleaning():
 # --- одна картина дня: заказы и уборки в общем сообщении ---
 
 def test_evening_summary_keeps_both_streams_in_one_message():
+    """Обновлено под ТЗ 2026-09-21-evening-summary-rework.md (задача 4): сводка
+    больше не перечисляет проведённые заказы построчно — только числом
+    (`processed_today`); хвост уборки при этом виден в общей картине дня."""
     from adminbot.sync.reconcile import DailySummary, SummaryRow
     from adminbot.tg.cards import summary_text
 
     summary = DailySummary(
-        processed=(SummaryRow(581, "done", "A", 41400001),),
-        total_orders=1,
+        processed_today=1,
         cleaning=DailySummary(
-            processed=(SummaryRow(5, "done", "A", 41400002),),
+            processed_today=1,
             waiting_owner=(SummaryRow(7, "waiting_owner"),),
-            total_orders=2,
         ),
     )
 
@@ -308,17 +309,17 @@ def test_evening_summary_keeps_both_streams_in_one_message():
 
     assert text.count("📊 Вечерняя сверка") == 1        # одно сообщение, а не два
     assert "🧹 Уборки" in text
-    assert "№581" in text and "№5" in text
+    assert "№7" in text                                  # хвост уборки — в общей картине
     assert "разбираться не с чем" not in text.lower()   # уборка ждёт ответа владельца
 
 
 def test_a_quiet_day_stays_quiet_with_cleanings_too():
-    from adminbot.sync.reconcile import DailySummary, SummaryRow
+    from adminbot.sync.reconcile import DailySummary
     from adminbot.tg.cards import summary_text
 
     summary = DailySummary(
-        processed=(SummaryRow(581, "done", "A", 41400001),), total_orders=1,
-        cleaning=DailySummary(processed=(SummaryRow(5, "done", "A", 2),), total_orders=1),
+        processed_today=1,
+        cleaning=DailySummary(processed_today=1),
     )
 
     assert "разбираться не с чем" in summary_text(summary).lower()

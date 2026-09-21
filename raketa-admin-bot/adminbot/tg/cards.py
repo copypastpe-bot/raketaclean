@@ -193,75 +193,106 @@ def parse_address_choice(data: Optional[str],
     return int(parts[1]), choice
 
 
-# --- вечерняя сводка ---
+# --- вечерняя сводка (ТЗ 2026-09-21-evening-summary-rework.md) ---
 
-def summary_text(summary: Any) -> str:
-    """Отчёт за день. Сначала то, что требует внимания владельца.
+# Хвосты — категории и подписи, в порядке утверждённого макета.
+_TAIL_CATEGORIES = (
+    ("waiting_owner", "❓ Ждут вашего ответа"),
+    ("failed", "⛔ Сбой робота"),
+    ("stale", "⏳ Зависли дольше часа"),
+    ("missed", "🕳 Не разобрано"),
+)
+# Не больше позиций в категории, дальше «…и ещё N» (умолчание координатора 21.09,
+# владелец не возражал — меняется одной строкой).
+TAIL_CAP = 10
 
-    Уборки идут отдельным разделом того же сообщения: работы разные, но день
-    один, и владельцу нужна одна картина, а не два сообщения подряд.
+
+def summary_text(summary: Any, *, calendar_created: int = 0, calendar_handled: int = 0) -> str:
+    """Отчёт за день: сверху четыре числа — что сделал робот, — снизу хвосты —
+    что требует вмешательства владельца.
+
+    Числа и хвосты — две независимые части (см. «Связь со службой оповещений»,
+    ТЗ 2026-09-21-evening-summary-rework.md): своя функция на каждую
+    (`_numbers_block`, `_tails_block`), здесь только их склейка. Когда потоки
+    переедут на шину — первая часть в операционную ленту, вторая владельцу
+    лично, — резать нужно будет по этому шву.
+
+    `calendar_created`/`calendar_handled` — календарный контур считается
+    отдельно от `amo_links`/`cleaning_links` (`db.count_calendar_created`,
+    `db.count_calendar_owner_handled`, задачи 2 и 8 того же ТЗ) и подмешивается
+    сюда вызывающей стороной, а не собирается этой функцией.
     """
     cleaning = getattr(summary, "cleaning", None)
-    lines = ["📊 Вечерняя сверка"] + _summary_block(summary)
-    if cleaning is not None:
-        lines += ["", "🧹 Уборки"] + _summary_block(cleaning)
 
-    if summary.is_quiet and (cleaning is None or cleaning.is_quiet):
-        lines += ["", "Хвостов нет — разбираться не с чем."]
+    lines = ["📊 Вечерняя сверка", ""]
+    lines += _numbers_block(summary, calendar_created=calendar_created,
+                            calendar_handled=calendar_handled)
+    if cleaning is not None:
+        lines += ["", "🧹 Уборки"] + _numbers_block(cleaning)
+
+    lines.append("")
+    quiet = summary.is_quiet and (cleaning is None or cleaning.is_quiet)
+    lines += ["Хвостов нет — разбираться не с чем."] if quiet else _tails_block(summary)
     return "\n".join(lines)
 
 
-def _summary_block(summary: Any) -> list[str]:
-    """Один поток работ: сначала то, что требует внимания, потом сделанное."""
-    lines: list[str] = []
+def _numbers_block(summary: Any, *, calendar_created: int = 0, calendar_handled: int = 0) -> list[str]:
+    """Четыре числа «что сделал робот» за сутки («Ждут адрес» — исключение,
+    весь накопленный хвост). Ни одного движения — «Событий не было.» вместо
+    четырёх нулей (пустой случай, задача 4).
+    """
+    numbers = (
+        ("Завёл из календаря", calendar_created),
+        ("Провёл из бота", summary.processed_today),
+        ("Передано администратору", summary.handed_to_owner + calendar_handled),
+        ("Ждут адрес", summary.waiting_address),
+    )
+    if not any(count for _, count in numbers):
+        return ["Событий не было."]
+    return [f"{label}: {count}" for label, count in numbers]
 
-    if summary.waiting_owner:
-        lines += ["", f"❓ Ждут вашего ответа: {len(summary.waiting_owner)}"]
-        lines += _rows_block(summary.waiting_owner, with_lead=False)
-    stuck = summary.failed + summary.stale
-    if stuck:
-        lines += ["", f"⚠️ Зависли: {len(stuck)}"]
-        lines += _rows_block(stuck)
-    if summary.missed:
-        lines += ["", f"🕳 Не разобрано: {len(summary.missed)}"]
-        lines += _rows_block(summary.missed, with_lead=False)
 
-    lines.append("")
-    lines.append(f"✅ Проведено: {len(summary.processed)}")
-    lines += _rows_block(summary.processed)
-    if summary.created:
-        lines.append(f"🆕 Создано новых сделок: {len(summary.created)}")
-        lines += _rows_block(summary.created)
-    if summary.already_done:
-        lines.append(f"👤 Вы провели сами: {len(summary.already_done)}")
-        lines += _rows_block(summary.already_done)
-    if summary.in_flight:
-        lines.append(f"⏳ В работе прямо сейчас: {len(summary.in_flight)}")
+def _tails_block(summary: Any) -> list[str]:
+    """Что требует вмешательства владельца — заказы и уборки вместе, одной
+    картиной: владельцу нужен один список хвостов, а не два по потокам
+    (то же правило, что уже держит `DailySummary.is_quiet`)."""
+    cleaning = getattr(summary, "cleaning", None)
+    lines = ["⚠️ Хвосты"]
+    for field, label in _TAIL_CATEGORIES:
+        rows = list(getattr(summary, field))
+        if cleaning is not None:
+            rows += list(getattr(cleaning, field))
+        lines.append("")
+        lines.append(f"{label}: {len(rows)}")
+        lines += _tail_rows(rows, with_detail=(field == "failed"))
     return lines
 
 
-def _rows_block(rows: Sequence[Any], *, with_lead: bool = True) -> list[str]:
-    """Строки сводки: заказ, телефон, дата и сделка.
+def _tail_rows(rows: Sequence[Any], *, with_detail: bool) -> list[str]:
+    """Строки одной категории хвостов: заказ, телефон, дата, сделка.
 
-    Телефон и дата здесь затем, чтобы владелец понимал, о ком речь, прямо
-    из сообщения — без похода в CRM.
+    У сбоя (`with_detail`) следующей строкой идёт текст ошибки — остальные
+    категории его не показывают, макет утверждён без него.
     """
-    lines = []
-    for row in rows:
+    lines: list[str] = []
+    for row in rows[:TAIL_CAP]:
         parts = [f"№{row.order_id}"]
         phone = getattr(row, "phone10", None)
         if phone:
             parts.append(for_owner(phone))
         when = getattr(row, "order_date", None)
         if when:
-            parts.append(f"{when:%d.%m.%Y}")
-        line = "   • " + " · ".join(parts)
-        if with_lead and getattr(row, "lead_id", None):
-            line += f" → #{row.lead_id}"
-        detail = getattr(row, "detail", None)
-        if detail:
-            line += f" ({detail})"
-        lines.append(line)
+            parts.append(f"{when:%d.%m}")
+        lead_id = getattr(row, "lead_id", None)
+        if lead_id:
+            parts.append(f"#{lead_id}")
+        lines.append("   • " + " · ".join(parts))
+        if with_detail:
+            detail = getattr(row, "detail", None)
+            if detail:
+                lines.append(f"     {detail}")
+    if len(rows) > TAIL_CAP:
+        lines.append(f"   …и ещё {len(rows) - TAIL_CAP}")
     return lines
 
 

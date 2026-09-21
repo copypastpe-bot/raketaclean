@@ -164,51 +164,121 @@ def test_parse_address_choice_rejects_junk():
         assert parse_address_choice(data) is None
 
 
-# --- вечерняя сводка ---
+# --- вечерняя сводка (ТЗ 2026-09-21-evening-summary-rework.md, задачи 3 и 4) ---
 
 def summary_with(**fields):
     return DailySummary(**fields)
 
 
-def test_summary_lists_what_the_robot_did():
+def test_summary_text_matches_the_approved_layout_for_a_quiet_day():
+    """Тихий день: макет утверждён дословно — четыре числа, «Событий не было»
+    по уборкам, «Хвостов нет» вместо списка."""
+    summary = summary_with(processed_today=4, handed_to_owner=1, waiting_address=2,
+                           cleaning=summary_with())
+
+    text = summary_text(summary, calendar_created=3)
+
+    assert text == (
+        "📊 Вечерняя сверка\n\n"
+        "Завёл из календаря: 3\n"
+        "Провёл из бота: 4\n"
+        "Передано администратору: 1\n"
+        "Ждут адрес: 2\n\n"
+        "🧹 Уборки\n"
+        "Событий не было.\n\n"
+        "Хвостов нет — разбираться не с чем."
+    )
+
+
+def test_summary_text_matches_the_approved_layout_with_tails():
+    """День с хвостами: тот же верх, а вместо последней строки — блок «Хвосты»
+    с четырьмя категориями (та же строка данных, что и в утверждённом макете)."""
     summary = summary_with(
-        processed=(SummaryRow(581, "done", "A", 41400001),
-                   SummaryRow(585, "done", "B", 41400002)),
-        created=(SummaryRow(590, "done", "C", 41400003),),
-        already_done=(SummaryRow(591, "done", "done", 41400004),),
-        total_orders=4,
+        processed_today=4, handed_to_owner=1, waiting_address=2,
+        waiting_owner=(
+            SummaryRow(601, "waiting_owner", phone10="9519069162",
+                      order_date=datetime(2026, 8, 31), lead_id=31570357),
+            SummaryRow(605, "waiting_owner", phone10="9081559394",
+                      order_date=datetime(2026, 9, 1), lead_id=31585279),
+        ),
+        failed=(
+            SummaryRow(612, "error", phone10="9877568979",
+                      order_date=datetime(2026, 9, 4), lead_id=31587009,
+                      detail="амо ответила 504"),
+        ),
+        stale=(
+            SummaryRow(613, "in_progress", phone10="9101451011",
+                      order_date=datetime(2026, 9, 4), lead_id=31602355),
+        ),
+        cleaning=summary_with(),
+    )
+
+    text = summary_text(summary, calendar_created=3)
+
+    assert text == (
+        "📊 Вечерняя сверка\n\n"
+        "Завёл из календаря: 3\n"
+        "Провёл из бота: 4\n"
+        "Передано администратору: 1\n"
+        "Ждут адрес: 2\n\n"
+        "🧹 Уборки\n"
+        "Событий не было.\n\n"
+        "⚠️ Хвосты\n\n"
+        "❓ Ждут вашего ответа: 2\n"
+        "   • №601 · +79519069162 · 31.08 · #31570357\n"
+        "   • №605 · +79081559394 · 01.09 · #31585279\n\n"
+        "⛔ Сбой робота: 1\n"
+        "   • №612 · +79877568979 · 04.09 · #31587009\n"
+        "     амо ответила 504\n\n"
+        "⏳ Зависли дольше часа: 1\n"
+        "   • №613 · +79101451011 · 04.09 · #31602355\n\n"
+        "🕳 Не разобрано: 0"
+    )
+
+
+def test_summary_text_shows_cleaning_numbers_when_cleaning_moved_too():
+    """Раздел уборок строится тем же кодом, что и заказы: формат одинаковый,
+    данные свои (решение владельца) — не «Событий не было», раз было движение."""
+    cleaning = summary_with(processed_today=2, waiting_address=1)
+    summary = summary_with(processed_today=5, handed_to_owner=1, cleaning=cleaning)
+
+    text = summary_text(summary)
+
+    assert "🧹 Уборки\nЗавёл из календаря: 0\nПровёл из бота: 2\n" \
+           "Передано администратору: 0\nЖдут адрес: 1" in text
+    assert text.count("Провёл из бота:") == 2                # у каждого потока своё число
+
+
+def test_summary_text_omits_cleaning_section_when_the_feature_is_off():
+    """cleaning=None — функция уборок выключена, раздела в сообщении нет вовсе
+    (отличать от cleaning с нулевыми полями, который печатает «Событий не было»)."""
+    text = summary_text(summary_with(processed_today=1))
+
+    assert "Уборки" not in text
+
+
+def test_tails_merge_orders_and_cleaning_into_one_list():
+    """Хвосты — одна картина дня и для заказов, и для уборок (то же правило,
+    что уже держит is_quiet: оба потока считаются вместе)."""
+    summary = summary_with(
+        failed=(SummaryRow(700, "error", detail="боевая ошибка"),),
+        cleaning=summary_with(failed=(SummaryRow(5, "error", detail="ошибка уборки"),)),
     )
 
     text = summary_text(summary)
 
-    assert "Проведено: 2" in text
-    assert "№581" in text and "#41400001" in text
-    assert "Создано новых сделок: 1" in text
-    assert "провели сами" in text.lower()
+    assert "⛔ Сбой робота: 2" in text
+    assert "№700" in text and "№5" in text
 
 
-def test_summary_puts_owner_business_first():
-    """Главное для владельца — что требует его внимания, а не что прошло гладко."""
-    summary = summary_with(
-        processed=(SummaryRow(581, "done", "A", 41400001),),
-        waiting_owner=(SummaryRow(596, "waiting_owner"),),
-        failed=(SummaryRow(593, "error", "A", 41400005, "AmoError: 502"),),
-        missed=(SummaryRow(598, "missed", phone10="9601861067"),),
-        total_orders=4,
-    )
+def test_tails_block_caps_a_category_at_ten_and_counts_the_rest():
+    rows = tuple(SummaryRow(600 + i, "waiting_owner") for i in range(12))
+    summary = summary_with(waiting_owner=rows)
 
     text = summary_text(summary)
 
-    assert text.index("№596") < text.index("№581")     # вопросы выше отчёта об успехах
-    assert "AmoError: 502" in text
-    assert "№598" in text
-    assert "+79601861067" in text                      # телефон прямо в сводке
-
-
-def test_summary_of_a_quiet_day():
-    text = summary_text(summary_with(processed=(SummaryRow(581, "done", "A", 1),), total_orders=1))
-
-    assert "разбираться не с чем" in text.lower()
+    assert text.count("• №6") == 10
+    assert "…и ещё 2" in text
 
 
 # --- предпросмотр хвоста ---
