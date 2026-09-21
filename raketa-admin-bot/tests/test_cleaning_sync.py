@@ -356,7 +356,7 @@ async def test_reconciler_puts_cleanings_into_the_same_summary():
     cleaning_watcher = FakeWatcher()
     reconciler = Reconciler(
         watcher=FakeWatcher(), source=FakeSource(snapshot(581)),
-        on_summary=lambda summary: _remember(sent, summary),
+        on_summary=lambda summary, **_numbers: _remember(sent, summary),
         cleaning_watcher=cleaning_watcher, cleaning_source=FakeSource(snapshot(5)),
         now=lambda: CLEANING_MOMENT,
     )

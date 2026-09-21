@@ -248,7 +248,7 @@ async def test_run_once_scans_first_then_reports():
                                  orders=(OrderBrief(order, '9601945325', NOW),)))
     sent = []
 
-    async def on_summary(summary):
+    async def on_summary(summary, **_calendar_numbers):
         sent.append(summary)
 
     reconciler = Reconciler(watcher=watcher, source=source, on_summary=on_summary,
@@ -271,7 +271,7 @@ async def test_run_forever_waits_until_the_appointed_hour():
         naps.append(seconds)
         stop.set()
 
-    async def on_summary(summary):
+    async def on_summary(summary, **_calendar_numbers):
         pass
 
     reconciler = Reconciler(watcher=watcher, source=source, on_summary=on_summary,
@@ -283,47 +283,54 @@ async def test_run_forever_waits_until_the_appointed_hour():
 
 
 async def test_evening_check_covers_the_calendar():
-    """В 21:00 владелец получает и заказы, и календарь — одной картиной дня."""
-    from adminbot.gcal.watcher import CalendarTickReport
+    """В 21:00 числа календаря приходят внутри той же сводки — одной картиной
+    дня, без второго сообщения «📅 Календарь» (задача 6, ТЗ
+    2026-09-21-evening-summary-rework.md)."""
+    ticks = {"count": 0}
 
-    class FakeCalendar:
-        def __init__(self):
-            self.ticks = 0
+    async def calendar_counts():
+        ticks["count"] += 1
+        return 3, 1
 
-        async def tick(self):
-            self.ticks += 1
-            return CalendarTickReport(changes=3, processed=2, by_status={"done": 2})
-
-    calendar = FakeCalendar()
     sent: list = []
+
+    async def on_summary(summary, **numbers):
+        sent.append((summary, numbers))
+
     reconciler = Reconciler(
         watcher=_SilentWatcher(), source=_EmptySource(),
-        on_summary=_collect(sent), calendar_watcher=calendar,
-        on_calendar=lambda report: _collect(sent)(report),
+        on_summary=on_summary, calendar_counts=calendar_counts,
     )
 
     await reconciler.run_once()
 
-    assert calendar.ticks == 1
-    assert len(sent) == 2                       # сводка по заказам и строка календаря
+    assert ticks["count"] == 1
+    assert len(sent) == 1                       # одно сообщение, не два
+    _, numbers = sent[0]
+    assert numbers == {"calendar_created": 3, "calendar_handled": 1}
 
 
 async def test_calendar_failure_does_not_eat_the_summary():
-    """Сбой календаря вечером не должен лишить владельца сводки по заказам."""
-    class BrokenCalendar:
-        async def tick(self):
-            raise RuntimeError("Google недоступен")
+    """Сбой календарного прохода не должен лишить владельца сводки по заказам:
+    числа календаря уходят нулями, а сводка всё равно уходит одним сообщением."""
+    async def broken_calendar_counts():
+        raise RuntimeError("Google недоступен")
 
     sent: list = []
+
+    async def on_summary(summary, **numbers):
+        sent.append((summary, numbers))
+
     reconciler = Reconciler(
         watcher=_SilentWatcher(), source=_EmptySource(),
-        on_summary=_collect(sent), calendar_watcher=BrokenCalendar(),
-        on_calendar=lambda report: _collect(sent)(report),
+        on_summary=on_summary, calendar_counts=broken_calendar_counts,
     )
 
     await reconciler.run_once()                 # не падает
 
     assert len(sent) == 1                       # сводка по заказам всё равно ушла
+    _, numbers = sent[0]
+    assert numbers == {"calendar_created": 0, "calendar_handled": 0}
 
 
 class _SilentWatcher:
@@ -339,7 +346,7 @@ class _EmptySource:
 
 
 def _collect(box: list):
-    async def send(item) -> None:
+    async def send(item, **_kwargs) -> None:
         box.append(item)
 
     return send

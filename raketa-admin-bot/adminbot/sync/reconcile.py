@@ -210,9 +210,8 @@ class Reconciler:
         *,
         watcher: Any,
         source: SummarySource,
-        on_summary: Callable[[DailySummary], Awaitable[None]],
-        calendar_watcher: Optional[Any] = None,
-        on_calendar: Optional[Callable[[Any], Awaitable[None]]] = None,
+        on_summary: Callable[..., Awaitable[None]],
+        calendar_counts: Optional[Callable[[], Awaitable[tuple[int, int]]]] = None,
         cleaning_watcher: Optional[Any] = None,
         cleaning_source: Optional[SummarySource] = None,
         hour_msk: int = 21,
@@ -222,9 +221,14 @@ class Reconciler:
     ) -> None:
         self.watcher = watcher
         self.source = source
+        # Вызывается как on_summary(summary, calendar_created=.., calendar_handled=..)
+        # (задача 6, ТЗ 2026-09-21-evening-summary-rework.md) — числа календарного
+        # контура подмешиваются в ту же сводку, вторым сообщением больше не уходят.
         self.on_summary = on_summary
-        self.calendar_watcher = calendar_watcher
-        self.on_calendar = on_calendar
+        # Считает «Завёл из календаря» и календарную часть «Передано администратору»
+        # (db.count_calendar_created, db.count_calendar_owner_handled) — своим
+        # догоняющим проходом и своим окном, сбой не должен съесть сводку по заказам.
+        self.calendar_counts = calendar_counts
         # Уборки идут в том же вечернем сообщении, что и заказы: одна картина дня.
         self.cleaning_watcher = cleaning_watcher
         self.cleaning_source = cleaning_source
@@ -234,7 +238,10 @@ class Reconciler:
         self.sleep = sleep
 
     async def run_once(self) -> DailySummary:
-        """Догоняющий проход, затем сводка владельцу.
+        """Догоняющий проход, затем сводка владельцу — одним сообщением целиком,
+        числа календарного контура включены (задача 6, ТЗ
+        2026-09-21-evening-summary-rework.md: второе сообщение «📅 Календарь»
+        убрано).
 
         Порядок важен: если сначала посчитать, а потом дообработать, сводка
         сообщит о пропусках, которых через секунду уже не будет.
@@ -243,8 +250,9 @@ class Reconciler:
         snapshot = await self.source.collect()
         summary = build_summary(snapshot, now=self.now(), stale_after_sec=self.stale_after_sec)
         summary = replace(summary, cleaning=await self._cleaning_summary())
-        await self.on_summary(summary)
-        await self._report_calendar()
+        calendar_created, calendar_handled = await self._calendar_counts()
+        await self.on_summary(summary, calendar_created=calendar_created,
+                              calendar_handled=calendar_handled)
         return summary
 
     async def _cleaning_summary(self) -> Optional[DailySummary]:
@@ -264,20 +272,22 @@ class Reconciler:
             log.exception("Вечерний проход по уборкам не удался")
             return None
 
-    async def _report_calendar(self) -> None:
-        """Отдельная строка про календарь — если функция вообще включена.
+    async def _calendar_counts(self) -> tuple[int, int]:
+        """Числа календарного контура — «Завёл из календаря» и календарная часть
+        «Передано администратору» — если функция вообще включена.
 
-        Сбой здесь не должен съесть вечернюю сводку по заказам: она уже ушла,
-        и календарь — дополнение к ней, а не её часть.
+        Раньше сбой здесь не должен был съесть отдельное сообщение «📅 Календарь»;
+        теперь по тому же правилу он не должен съесть единую сводку по заказам —
+        при сбое числа уходят нулями, а не блокируют отправку (задача 6, ТЗ
+        2026-09-21-evening-summary-rework.md).
         """
-        if self.calendar_watcher is None or self.on_calendar is None:
-            return
+        if self.calendar_counts is None:
+            return 0, 0
         try:
-            report = await self.calendar_watcher.tick()
-            if not report.paused:
-                await self.on_calendar(report)
+            return await self.calendar_counts()
         except Exception:                              # noqa: BLE001
             log.exception("Вечерний проход по календарю не удался")
+            return 0, 0
 
     async def run_forever(self, stop: Optional[asyncio.Event] = None) -> None:
         while stop is None or not stop.is_set():

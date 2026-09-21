@@ -22,7 +22,7 @@ import asyncio
 import logging
 import signal
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import asyncpg
@@ -53,7 +53,8 @@ from adminbot.sync.address_reminder import DEFAULT_CAP, AddressReminder, PgRemin
 from adminbot.sync.backlog import BacklogRunner
 from adminbot.sync.deletions import DeletionHandler, DeletionOutcome
 from adminbot.sync.engine import Engine, service_enums
-from adminbot.sync.reconcile import PgCleaningSummarySource, PgSummarySource, Reconciler
+from adminbot.sync.reconcile import (
+    TOUCHED_WINDOW_HOURS, PgCleaningSummarySource, PgSummarySource, Reconciler)
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import MemoryLinkStore, PgCleaningLinkStore, PgLinkStore
 from adminbot.sync.watcher import PgCleaningSource, PgOrderSource, Watcher
@@ -62,7 +63,7 @@ from adminbot.tg.autocall_cards import (
 from adminbot.tg.bot import (
     AddressAnswers, CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router)
 from adminbot.tg.calendar_cards import (
-    boat_card, calendar_question_card, calendar_summary_text, cancellation_card,
+    boat_card, calendar_question_card, cancellation_card,
     done_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
@@ -356,8 +357,14 @@ async def build_app(settings: Settings) -> App:
     if calendar_store is not None:
         mail.register(MAIL_GCAL_QUESTION, _question_purpose(calendar_store))
         mail.register(MAIL_GCAL_DONE, _gcal_done_purpose(calendar_store))
-    reconciler.calendar_watcher = calendar_watcher
-    reconciler.on_calendar = _make_calendar_summary_sender(mail)
+    # Числа календарного контура вплетаются в единую вечернюю сводку, вторым
+    # сообщением больше не уходят (задача 6, ТЗ 2026-09-21-evening-summary-rework.md).
+    # Функция выключена — calendar_watcher is None, и reconciler просто не считает
+    # календарные числа (Reconciler._calendar_counts отдаёт нули).
+    reconciler.calendar_counts = (
+        _make_calendar_counts(calendar_watcher, own_pool)
+        if calendar_watcher is not None else None
+    )
 
     # Автозвонок по заявке с сайта: своя цепочка, свой выключатель и своя АТС.
     # Кривое окно валит старт осознанно (опечатку ловим при запуске); нет
@@ -760,13 +767,29 @@ def _address_reminder_purpose(store: Any) -> Purpose:
     return Purpose(still_needed=still_needed)
 
 
-def _make_calendar_summary_sender(mail: OwnerMail):
-    """Вечерняя строка про календарь — вслед за сводкой по заказам."""
+def _make_calendar_counts(calendar_watcher: Any, own_pool: Any, *,
+                          touched_window_hours: int = TOUCHED_WINDOW_HOURS,
+                          now=lambda: datetime.now(MOSCOW_TZ)):
+    """Календарные числа вечерней сводки (задача 6, ТЗ
+    2026-09-21-evening-summary-rework.md): «Завёл из календаря» и календарная
+    часть «Передано администратору» — свой догоняющий проход и свой подсчёт по
+    журналу действий, тем же окном суток, что и остальные числа сводки
+    (db.count_calendar_created, db.count_calendar_owner_handled, задачи 2 и 8).
 
-    async def send(report) -> None:
-        await mail.send(calendar_summary_text(report), kind=MAIL_SUMMARY)
+    Раньше этот проход кончался отдельным сообщением «📅 Календарь»
+    (calendar_summary_text) — теперь числа уходят внутри единой сводки, а
+    `Reconciler._calendar_counts` ловит сбой здесь так же, как раньше ловил
+    сбой перед отправкой того сообщения.
+    """
 
-    return send
+    async def counts() -> tuple[int, int]:
+        await calendar_watcher.tick()
+        since = now() - timedelta(hours=touched_window_hours)
+        created = await db.count_calendar_created(own_pool, since)
+        handled = await db.count_calendar_owner_handled(own_pool, since)
+        return created, handled
+
+    return counts
 
 
 # Что стало со сделкой после разбора удаления — эмодзи в начало сообщения
@@ -1022,10 +1045,12 @@ def _make_autocall_no_phone_sender(mail: OwnerMail, amo_base_url: str):
 
 
 def _make_summary_sender(mail: OwnerMail):
-    """Вечерняя сводка владельцу."""
+    """Вечерняя сводка владельцу — одним сообщением, включая числа календарного
+    контура (задача 6, ТЗ 2026-09-21-evening-summary-rework.md)."""
 
-    async def send(summary) -> None:
-        await mail.send(summary_text(summary), kind=MAIL_SUMMARY)
+    async def send(summary, *, calendar_created: int = 0, calendar_handled: int = 0) -> None:
+        await mail.send(summary_text(summary, calendar_created=calendar_created,
+                                     calendar_handled=calendar_handled), kind=MAIL_SUMMARY)
 
     return send
 
