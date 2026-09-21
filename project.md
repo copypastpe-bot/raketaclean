@@ -88,11 +88,6 @@
 - если система считает, что мессенджер недоступен, может выставляться `clients.wahelp_requires_connection=true`;
 - при этом флаге outbox-воркер перестаёт пытаться и отменяет отправки (анти-спам защита).
 
-### 5.4 OnlinePBX -> SMS
-- `/onlinepbx/webhook` принимает события звонков с проверкой токена/IP;
-- для подходящих входящих звонков бот запрашивает подтверждение у админов;
-- после подтверждения отправляет SMS через sms.ru.
-
 ## 6. Плановые задачи (MSK)
 Стартуют из `main()`:
 - `22:00` — ежедневные отчёты;
@@ -118,7 +113,8 @@
 - `leads`, `lead_logs`, `promo_reengagements`
 
 Технические:
-- `daily_job_runs`, `onlinepbx_sms_requests`
+- `daily_job_runs`
+- `onlinepbx_sms_requests` — архив 221 звонка за март-май 2026; код SMS-контура удалён 21.09.2026, таблица оставлена намеренно
 
 ## 8. Контракт прод-БД (обязательно перед правками SQL)
 Сначала прочитать:
@@ -138,8 +134,6 @@
 - `ADMIN_IDS` / `ADMIN_TG_IDS`
 - параметры бонусов/зарплаты (`BONUS_RATE_PERCENT`, и т.д.)
 - Wahelp (`WAHELP_*` project/channel/token/login/password + webhook host/port/token)
-- OnlinePBX (`ONLINEPBX_WEBHOOK_TOKEN`, `ONLINEPBX_ALLOWED_IPS`)
-- sms.ru (`SMSRU_API_ID`, sender, low balance threshold)
 - `CLIENT_BOT_TOKEN` (если нужен клиентский бот)
 
 Секреты из `.env` не коммитить.
