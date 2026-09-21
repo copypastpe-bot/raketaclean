@@ -376,6 +376,24 @@ async def fetch_actions(own_pool: asyncpg.Pool, order_id: int,
     return [dict(row) for row in rows]
 
 
+async def fetch_touched_order_ids(own_pool: asyncpg.Pool, since: datetime,
+                                  *, table: str = ACTIONS_TABLE) -> frozenset[int]:
+    """Номера работ, которые упоминались в журнале действий не раньше `since`.
+
+    Вечерняя сводка (задача 2, ТЗ 2026-09-21) считает «Провёл из бота» за сутки,
+    а не за всё время. Поля связок для этого не годятся — `updated_at` двигает
+    любая правка (например, напоминание про адрес у пути C), а по журналу видно
+    именно то, что робот СДЕЛАЛ. Одно проведение работы пишет несколько строк
+    (`move_lead`, `update_lead`, `add_note`, `complete_task` — по одной на шаг),
+    поэтому строки сразу сворачиваются в множество номеров, а не отдаются как есть.
+    """
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT DISTINCT order_id FROM {table} WHERE created_at >= $1", since,
+        )
+    return frozenset(row["order_id"] for row in rows)
+
+
 # Страховка от сирот (ТЗ 2026-09-17, задача 6): связка, у которой заказа больше
 # нет, не должна считаться действующей нигде, где её читают как «работа идёт».
 # Событие об удалении может не дойти (служба стояла, запись потерялась) — эта
@@ -972,6 +990,23 @@ async def log_calendar_action(
             VALUES ($1, $2, $3, $4, $5, $6)
             """,
             event_id, action, amo_entity, amo_id, dry_run, payload,
+        )
+
+
+async def count_calendar_created(own_pool: asyncpg.Pool, since: datetime) -> int:
+    """Сколько сделок робот завёл из записей календаря не раньше `since` (задача 2).
+
+    «Завёл» — запись в журнале действий с действием `create_lead`: ровно момент,
+    когда движок создаёт первичный лид или сделку теплохода в амо
+    (`adminbot/gcal/engine.py`, `_step_create_primary_lead` и `_step_create_boat_lead`).
+    Статусы самой записи (`gcal_events.status`) для этого не годятся — «доведено
+    до done» означает «заказ оформлен полностью», а не «сделка заведена», и
+    таких записей за сутки может не быть вовсе, пока «завести» уже случилось.
+    """
+    async with own_pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT count(DISTINCT event_id) FROM adminbot.gcal_actions "
+            "WHERE action = 'create_lead' AND created_at >= $1", since,
         )
 
 

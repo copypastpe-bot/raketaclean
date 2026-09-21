@@ -18,9 +18,11 @@ from adminbot.sync.reconcile import (
 NOW = datetime(2026, 8, 25, 21, 0, tzinfo=MOSCOW_TZ)
 
 
-def link(order_id, status, *, path=None, real=None, primary=None, minutes_ago=5, error=None):
+def link(order_id, status, *, path=None, real=None, primary=None, minutes_ago=5, error=None,
+        deal_address=None):
     return AmoLink(order_id=order_id, phone10="9601861067", status=status, path=path,
                    real_lead_id=real, primary_lead_id=primary, last_error=error,
+                   deal_address=deal_address,
                    created_at=NOW - timedelta(minutes=minutes_ago),
                    updated_at=NOW - timedelta(minutes=minutes_ago))
 
@@ -98,6 +100,90 @@ def test_summary_of_an_empty_day():
     assert summary.total_orders == 0
     assert summary.is_quiet is True
     assert isinstance(summary, DailySummary)
+
+
+# --- четыре числа (задача 2, ТЗ 2026-09-21-evening-summary-rework.md) ---
+#
+# «Провёл из бота» и «Ждут адрес» считаются по-разному: первое — только то, что
+# журнал действий подтверждает за окно суток (`Snapshot.touched_order_ids`),
+# второе — весь накопленный хвост без окна, прямо по полям связки.
+
+def test_order_processed_today_counts_toward_processed_today():
+    snapshot = Snapshot(
+        links=(link(596, "done", path="A", real=41400001),),
+        orders=(OrderBrief(596, '9601945325', NOW),),
+        touched_order_ids=frozenset({596}),
+    )
+
+    summary = build_summary(snapshot, now=NOW)
+
+    assert summary.processed_today == 1
+
+
+def test_order_finished_long_ago_and_untouched_today_counts_nowhere():
+    old = link(597, "done", path="A", real=41400002, minutes_ago=60 * 24 * 30)
+
+    summary = build_summary(Snapshot(links=(old,), orders=(OrderBrief(597, '9601945325', NOW),)),
+                            now=NOW)
+
+    assert summary.processed_today == 0
+    assert summary.waiting_address == 0
+
+
+def test_order_finished_long_ago_touched_today_only_by_address_reminder():
+    """Ловушка ТЗ: тронут сегодня только напоминанием про адрес — не «провёл»."""
+    scratch_lead = link(598, "done", path="C", real=41400003,
+                        minutes_ago=60 * 24 * 30, deal_address=None)
+    snapshot = Snapshot(
+        links=(scratch_lead,),
+        orders=(OrderBrief(598, '9601945325', NOW),),
+        # Журнал тронут сегодня (седьмое, «замолкающее» напоминание про адрес
+        # тоже пишет строку) — но это не значит, что заказ провели.
+        touched_order_ids=frozenset({598}),
+    )
+
+    summary = build_summary(snapshot, now=NOW)
+
+    assert summary.processed_today == 0          # путь C не входит в «Провёл из бота»
+    assert summary.waiting_address == 1           # а адреса всё ещё нет
+
+
+def test_order_linked_long_ago_and_finished_today_counts_as_processed():
+    old_link = link(599, "done", path="B", primary=41400004, minutes_ago=60 * 24 * 30)
+    snapshot = Snapshot(
+        links=(old_link,), orders=(OrderBrief(599, '9601945325', NOW),),
+        touched_order_ids=frozenset({599}),
+    )
+
+    summary = build_summary(snapshot, now=NOW)
+
+    assert summary.processed_today == 1
+
+
+def test_waiting_address_does_not_depend_on_the_day_window():
+    three_weeks_old = link(600, "done", path="C", real=41400005,
+                           minutes_ago=60 * 24 * 21, deal_address=None)
+    snapshot = Snapshot(links=(three_weeks_old,), orders=(OrderBrief(600, '9601945325', NOW),),
+                        touched_order_ids=frozenset())          # ничего не тронуто сегодня
+
+    summary = build_summary(snapshot, now=NOW)
+
+    assert summary.waiting_address == 1
+
+
+def test_waiting_address_ignores_filled_addresses_and_other_paths():
+    filled = link(601, "done", path="C", real=41400006, deal_address="ул. Ленина, 5")
+    owner_kept = link(602, "done", path="done", real=41400007, deal_address=None)
+    in_progress = link(603, "in_progress", path="C", real=41400008, deal_address=None)
+    snapshot = Snapshot(
+        links=(filled, owner_kept, in_progress),
+        orders=(OrderBrief(601, '9601945325', NOW), OrderBrief(602, '9601945325', NOW),
+               OrderBrief(603, '9601945325', NOW)),
+    )
+
+    summary = build_summary(snapshot, now=NOW)
+
+    assert summary.waiting_address == 0
 
 
 # --- порядок действий вечером ---

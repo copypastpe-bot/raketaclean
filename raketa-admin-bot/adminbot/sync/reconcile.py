@@ -28,6 +28,10 @@ log = logging.getLogger(__name__)
 # Сколько заказ может «висеть» в работе, прежде чем это станет поводом для отчёта.
 STALE_AFTER_SEC = 3600
 
+# Окно суток для «Провёл из бота» (задача 2, ТЗ 2026-09-21): параметром, а не
+# константой в теле запроса, — чтобы тест мог его подменить, не подделывая часы.
+TOUCHED_WINDOW_HOURS = 24
+
 # Пути, по которым робот довёл существующую сделку, и путь «создали с нуля».
 _PROCESSED_PATHS = ("A", "B")
 _CREATED_PATH = "C"
@@ -49,6 +53,11 @@ class Snapshot:
 
     links: tuple[AmoLink, ...]
     orders: tuple[OrderBrief, ...] = ()
+    # Номера работ, упомянутых в журнале действий за окно суток (задача 2, ТЗ
+    # 2026-09-21): уже свёрнуто в множество, несколько строк журнала на одно
+    # проведение работы здесь не считаются отдельно. Поля связок для этого не
+    # годятся — `updated_at` двигает любая правка, а не только завершение работы.
+    touched_order_ids: frozenset[int] = frozenset()
 
     @property
     def order_ids(self) -> tuple[int, ...]:
@@ -85,6 +94,15 @@ class DailySummary:
     in_flight: tuple[int, ...] = ()             # в работе прямо сейчас — это норма
     missed: tuple[SummaryRow, ...] = ()         # заказы, до которых робот не добрался
     total_orders: int = 0
+    # Четыре числа вечерней сводки (задача 2, ТЗ 2026-09-21-evening-summary-rework.md).
+    # «Завёл из календаря» сюда не входит: это не про amo_links/cleaning_links,
+    # а про отдельную таблицу adminbot.gcal_events — собирается отдельно
+    # (db.count_calendar_created) и подмешивается снаружи, не этой функцией.
+    # «Передано администратору» тоже сюда пока не входит — см. AGENT_STATE.md
+    # и отчёт исполнителя задачи 2: для amosync/amoclean нажатие «Сам разберусь»
+    # неотличимо от автоматического already_done, вопрос к владельцу.
+    processed_today: int = 0    # «Провёл из бота»: путь A/B, довели за окно суток
+    waiting_address: int = 0    # «Ждут адрес»: путь C без адреса, накопленным итогом
     # Уборки клининг-контура за тот же день. Отдельная сводка, но внутри той же:
     # владелец должен получить одну картину дня, а не два сообщения подряд.
     # None — функция уборок выключена, и раздела в сообщении нет вовсе.
@@ -145,6 +163,19 @@ def build_summary(snapshot: Snapshot, *, now: datetime,
     missed = tuple(_row_from_order(order) for order in snapshot.orders
                    if order.order_id not in linked_ids)
 
+    # «Провёл из бота»: из уже доведённых (путь A/B) — только те, что журнал
+    # действий подтверждает за окно суток. Путь C (создание с нуля) сюда
+    # не входит по решению владельца — это отдельная, не показываемая строка.
+    processed_today = sum(1 for row in processed if row.order_id in snapshot.touched_order_ids)
+
+    # «Ждут адрес»: весь накопленный хвост, без окна суток — то же условие,
+    # по которому робот шлёт напоминания (sync/address_reminder.py,
+    # db.fetch_links_needing_address_reminder): путь C, статус done, адреса нет.
+    waiting_address = sum(
+        1 for link in snapshot.links
+        if link.status == "done" and link.path == _CREATED_PATH and link.deal_address is None
+    )
+
     return DailySummary(
         processed=tuple(processed),
         created=tuple(created),
@@ -155,6 +186,8 @@ def build_summary(snapshot: Snapshot, *, now: datetime,
         in_flight=tuple(sorted(in_flight)),
         missed=missed,
         total_orders=len(set(snapshot.order_ids) | linked_ids),
+        processed_today=processed_today,
+        waiting_address=waiting_address,
     )
 
 
@@ -246,41 +279,61 @@ class Reconciler:
 
 
 class PgSummarySource:
-    """Боевой срез: заказы бота с начала хвоста и всё, что робот по ним записал."""
+    """Боевой срез: заказы бота с начала хвоста и всё, что робот по ним записал.
 
-    def __init__(self, bot_pool: asyncpg.Pool, own_pool: asyncpg.Pool, backlog_from: date) -> None:
+    `touched_window_hours`/`now` — окно суток для «Провёл из бота» (задача 2):
+    свои, а не общие с `Reconciler`, чтобы источник среза был самодостаточен
+    и тест мог подменить и час, и окно, не трогая ничего вокруг.
+    """
+
+    def __init__(self, bot_pool: asyncpg.Pool, own_pool: asyncpg.Pool, backlog_from: date, *,
+                 touched_window_hours: int = TOUCHED_WINDOW_HOURS,
+                 now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ)) -> None:
         self.bot_pool = bot_pool
         self.own_pool = own_pool
         self.backlog_from = backlog_from
+        self.touched_window_hours = touched_window_hours
+        self.now = now
 
     async def collect(self) -> Snapshot:
         orders = await db.fetch_orders_since(self.bot_pool, self.backlog_from)
         links = await db.fetch_links_for_orders(
             self.own_pool, [order.order_id for order in orders])
+        touched = await db.fetch_touched_order_ids(
+            self.own_pool, self.now() - timedelta(hours=self.touched_window_hours))
         return Snapshot(
             links=tuple(links),
             orders=tuple(OrderBrief(order.order_id, order.phone10, order.created_at)
                          for order in orders),
+            touched_order_ids=touched,
         )
 
 
 class PgCleaningSummarySource:
     """Тот же срез, но по уборкам: своя таблица бота и своя таблица связок."""
 
-    def __init__(self, bot_pool: asyncpg.Pool, own_pool: asyncpg.Pool, backlog_from: date) -> None:
+    def __init__(self, bot_pool: asyncpg.Pool, own_pool: asyncpg.Pool, backlog_from: date, *,
+                 touched_window_hours: int = TOUCHED_WINDOW_HOURS,
+                 now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ)) -> None:
         self.bot_pool = bot_pool
         self.own_pool = own_pool
         self.backlog_from = backlog_from
+        self.touched_window_hours = touched_window_hours
+        self.now = now
 
     async def collect(self) -> Snapshot:
         orders = await db.fetch_cleaning_orders_since(self.bot_pool, self.backlog_from)
         links = await db.fetch_links_for_orders(
             self.own_pool, [order.order_id for order in orders],
             table=db.CLEANING_LINKS_TABLE)
+        touched = await db.fetch_touched_order_ids(
+            self.own_pool, self.now() - timedelta(hours=self.touched_window_hours),
+            table=db.CLEANING_ACTIONS_TABLE)
         return Snapshot(
             links=tuple(links),
             orders=tuple(OrderBrief(order.order_id, order.phone10, order.created_at)
                          for order in orders),
+            touched_order_ids=touched,
         )
 
 

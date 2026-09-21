@@ -234,6 +234,36 @@ async def test_actions_journal(pool):
     assert actions[0]["payload"] == {"price": 5950}
 
 
+async def test_touched_order_ids_fold_the_journal_into_a_set(pool):
+    """Задача 2 (ТЗ 2026-09-21): «Провёл из бота» считаем по журналу, не по updated_at.
+
+    Одно проведение работы пишет несколько строк журнала (move_lead, update_lead,
+    add_note, complete_task) — свёртка должна отдать один номер заказа, а не
+    четыре записи.
+    """
+    real_now = datetime.now(timezone.utc)
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    for action in ("move_lead", "update_lead", "add_note", "complete_task"):
+        await db.log_action(pool, order_id=596, action=action, dry_run=False)
+    await db.create_link(pool, order_id=597, phone10="9159496642")
+    await db.log_action(pool, order_id=597, action="update_lead", dry_run=False)
+
+    touched = await db.fetch_touched_order_ids(pool, real_now - timedelta(minutes=1))
+    assert touched == frozenset({596, 597})
+
+    # Окно суток реально режет: то, что было до него, не попадает.
+    old_since = real_now + timedelta(hours=1)
+    assert await db.fetch_touched_order_ids(pool, old_since) == frozenset()
+
+    # Своя таблица журнала — своя выборка, заказы и уборки не путаются.
+    await db.create_link(pool, order_id=5, phone10="9601861067", table=db.CLEANING_LINKS_TABLE)
+    await db.log_action(pool, order_id=5, action="update_lead", dry_run=False,
+                        table=db.CLEANING_ACTIONS_TABLE)
+    cleaning_touched = await db.fetch_touched_order_ids(
+        pool, real_now - timedelta(minutes=1), table=db.CLEANING_ACTIONS_TABLE)
+    assert cleaning_touched == frozenset({5})
+
+
 async def test_fetch_orders_by_ids_returns_only_requested(pool):
     """Наблюдателю нужно вернуться к конкретным заказам, а не перебирать весь хвост."""
     orders = await db.fetch_orders_by_ids(pool, [596, 500])
@@ -290,6 +320,37 @@ async def test_summary_source_sees_orders_robot_never_touched(pool):
     assert summary.missed[0].order_date is not None
     assert summary.total_orders == 2
     assert summary.is_quiet is False
+
+
+async def test_summary_source_counts_processed_today_from_the_journal(pool):
+    """Задача 2 (ТЗ 2026-09-21): «Провёл из бота» — сквозь весь источник среза.
+
+    596 доведён и журнал тронут сегодня — считается. 597 доведён давно и сегодня
+    журнал молчит по нему — не считается, хотя связка тоже «done»/путь A.
+    """
+    from adminbot.sync.reconcile import PgSummarySource, build_summary
+
+    real_now = datetime.now(timezone.utc)
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link(pool, 596, status="done", path="A", real_lead_id=41400001)
+    await db.log_action(pool, order_id=596, action="complete_task", dry_run=False)
+
+    await db.create_link(pool, order_id=597, phone10="9159496642")
+    await db.update_link(pool, 597, status="done", path="A", real_lead_id=41400002)
+    # у 597 в журнале ничего сегодня — только сама связка
+
+    source = PgSummarySource(pool, pool, NOW.date() - timedelta(days=3), now=lambda: real_now)
+    summary = build_summary(await source.collect(), now=NOW)
+
+    assert summary.processed_today == 1
+    assert sorted(row.order_id for row in summary.processed) == [596, 597]
+
+    # Окно можно сузить — тест не должен зависеть от реальных часов. «Сейчас»
+    # сдвинуто на два часа вперёд, окно — час: действие, записанное только что,
+    # оказывается за пределами окна.
+    narrow = PgSummarySource(pool, pool, NOW.date() - timedelta(days=3), touched_window_hours=1,
+                             now=lambda: real_now + timedelta(hours=2))
+    assert (await narrow.collect()).touched_order_ids == frozenset()
 
 
 async def test_pause_survives_a_restart(pool):
@@ -486,6 +547,23 @@ async def test_calendar_progress_and_bookmark_are_stored(pool):
     assert "fill_primary" in link.checklist
     assert [row.event_id for row in await store.pending()] == ["evt-1"]
     assert await store.cursor("main@gmail.com") == ("TOKEN-1", date(2026, 8, 27))
+
+
+async def test_calendar_created_counts_distinct_events_since(pool):
+    """Задача 2 (ТЗ 2026-09-21): «Завёл из календаря» — свёртка create_lead по журналу."""
+    from adminbot.gcal.store import PgCalendarStore
+
+    store = PgCalendarStore(pool)
+    real_now = datetime.now(timezone.utc)
+    await store.create("evt-1", kind="order", phone10="9601861067")
+    await store.log("evt-1", "create_contact", dry_run=False)
+    await store.log("evt-1", "create_lead", dry_run=False, entity="lead", amo_id=41400001)
+    await store.create("evt-2", kind="boat", phone10=None)
+    await store.log("evt-2", "create_lead", dry_run=False, entity="lead", amo_id=41400002)
+
+    assert await db.count_calendar_created(pool, real_now - timedelta(minutes=1)) == 2
+    # Окно суток режет реально.
+    assert await db.count_calendar_created(pool, real_now + timedelta(hours=1)) == 0
 
 
 # --- закладки, когда календарей несколько (2026-09-01) ---
