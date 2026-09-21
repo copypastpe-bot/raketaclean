@@ -221,9 +221,10 @@ class Reconciler:
     ) -> None:
         self.watcher = watcher
         self.source = source
-        # Вызывается как on_summary(summary, calendar_created=.., calendar_handled=..)
-        # (задача 6, ТЗ 2026-09-21-evening-summary-rework.md) — числа календарного
-        # контура подмешиваются в ту же сводку, вторым сообщением больше не уходят.
+        # Вызывается как on_summary(summary, calendar_created=.., calendar_handled=..,
+        # calendar_failed=..) (задачи 6 и 9, ТЗ 2026-09-21-evening-summary-rework.md) —
+        # числа календарного контура и признак его сбоя подмешиваются в ту же
+        # сводку, вторым сообщением больше не уходят.
         self.on_summary = on_summary
         # Считает «Завёл из календаря» и календарную часть «Передано администратору»
         # (db.count_calendar_created, db.count_calendar_owner_handled) — своим
@@ -250,9 +251,10 @@ class Reconciler:
         snapshot = await self.source.collect()
         summary = build_summary(snapshot, now=self.now(), stale_after_sec=self.stale_after_sec)
         summary = replace(summary, cleaning=await self._cleaning_summary())
-        calendar_created, calendar_handled = await self._calendar_counts()
+        calendar_created, calendar_handled, calendar_failed = await self._calendar_counts()
         await self.on_summary(summary, calendar_created=calendar_created,
-                              calendar_handled=calendar_handled)
+                              calendar_handled=calendar_handled,
+                              calendar_failed=calendar_failed)
         return summary
 
     async def _cleaning_summary(self) -> Optional[DailySummary]:
@@ -272,22 +274,29 @@ class Reconciler:
             log.exception("Вечерний проход по уборкам не удался")
             return None
 
-    async def _calendar_counts(self) -> tuple[int, int]:
+    async def _calendar_counts(self) -> tuple[int, int, bool]:
         """Числа календарного контура — «Завёл из календаря» и календарная часть
-        «Передано администратору» — если функция вообще включена.
+        «Передано администратору» — если функция вообще включена, и признак,
+        упал ли сам проход (третье число, задача 9, ТЗ
+        2026-09-21-evening-summary-rework.md).
 
         Раньше сбой здесь не должен был съесть отдельное сообщение «📅 Календарь»;
         теперь по тому же правилу он не должен съесть единую сводку по заказам —
-        при сбое числа уходят нулями, а не блокируют отправку (задача 6, ТЗ
-        2026-09-21-evening-summary-rework.md).
+        при сбое числа уходят нулями, а не блокируют отправку (задача 6). Но ноль
+        здесь получается тремя разными путями, и владельцу их важно различать:
+        календарь выключен вовсе (`calendar_counts is None`) — это не сбой;
+        проход отработал и посчитал честный ноль — тоже не сбой; проход упал —
+        это сбой, и он идёт третьим элементом, чтобы cards.py мог показать его
+        в хвостах, а не только в журнале сервера.
         """
         if self.calendar_counts is None:
-            return 0, 0
+            return 0, 0, False
         try:
-            return await self.calendar_counts()
+            created, handled = await self.calendar_counts()
+            return created, handled, False
         except Exception:                              # noqa: BLE001
             log.exception("Вечерний проход по календарю не удался")
-            return 0, 0
+            return 0, 0, True
 
     async def run_forever(self, stop: Optional[asyncio.Event] = None) -> None:
         while stop is None or not stop.is_set():

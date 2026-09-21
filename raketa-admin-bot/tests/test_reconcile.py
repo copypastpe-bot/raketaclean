@@ -307,12 +307,15 @@ async def test_evening_check_covers_the_calendar():
     assert ticks["count"] == 1
     assert len(sent) == 1                       # одно сообщение, не два
     _, numbers = sent[0]
-    assert numbers == {"calendar_created": 3, "calendar_handled": 1}
+    assert numbers == {"calendar_created": 3, "calendar_handled": 1,
+                       "calendar_failed": False}
 
 
 async def test_calendar_failure_does_not_eat_the_summary():
     """Сбой календарного прохода не должен лишить владельца сводки по заказам:
-    числа календаря уходят нулями, а сводка всё равно уходит одним сообщением."""
+    числа календаря уходят нулями, а сводка всё равно уходит одним сообщением.
+    `calendar_failed=True` (задача 9, ТЗ 2026-09-21-evening-summary-rework.md) —
+    признак сбоя доезжает до сводки, а не тонет в `except`."""
     async def broken_calendar_counts():
         raise RuntimeError("Google недоступен")
 
@@ -330,7 +333,27 @@ async def test_calendar_failure_does_not_eat_the_summary():
 
     assert len(sent) == 1                       # сводка по заказам всё равно ушла
     _, numbers = sent[0]
-    assert numbers == {"calendar_created": 0, "calendar_handled": 0}
+    assert numbers == {"calendar_created": 0, "calendar_handled": 0,
+                       "calendar_failed": True}
+
+
+async def test_calendar_disabled_is_not_a_failure():
+    """Календарь выключен вовсе (`calendar_counts=None`, значение по умолчанию)
+    — это не сбой прохода, числа нулевые и `calendar_failed` остаётся False
+    (задача 9: три разных случая, ноль — не всегда сбой)."""
+    sent: list = []
+
+    async def on_summary(summary, **numbers):
+        sent.append((summary, numbers))
+
+    reconciler = Reconciler(watcher=_SilentWatcher(), source=_EmptySource(),
+                            on_summary=on_summary)
+
+    await reconciler.run_once()
+
+    _, numbers = sent[0]
+    assert numbers == {"calendar_created": 0, "calendar_handled": 0,
+                       "calendar_failed": False}
 
 
 class _SilentWatcher:
