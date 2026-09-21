@@ -264,6 +264,27 @@ async def test_touched_order_ids_fold_the_journal_into_a_set(pool):
     assert cleaning_touched == frozenset({5})
 
 
+async def test_touched_order_ids_ignore_the_address_reminder_going_silent(pool):
+    """Ловушка задачи 2: седьмое напоминание про адрес — не «провёл из бота».
+
+    `address_reminder_capped` — единственное действие, которое журнал пишет
+    заказу уже после `done` (`sync/address_reminder.py`, седьмое, замолкающее
+    напоминание пути C; первые шесть в журнал вовсе не пишут). Свёртка должна
+    его игнорировать, иначе заказ, завершённый месяц назад и получивший
+    сегодня только это напоминание, ложно попал бы в «Провёл из бота» —
+    в отличие от пути A/B/C, доведённого настоящим действием.
+    """
+    real_now = datetime.now(timezone.utc)
+    await db.create_link(pool, order_id=598, phone10="9601861067")
+    await db.log_action(pool, order_id=598, action="address_reminder_capped", dry_run=False,
+                        payload={"count": 7})
+    await db.create_link(pool, order_id=599, phone10="9159496642")
+    await db.log_action(pool, order_id=599, action="update_lead", dry_run=False)
+
+    touched = await db.fetch_touched_order_ids(pool, real_now - timedelta(minutes=1))
+    assert touched == frozenset({599})
+
+
 async def test_fetch_orders_by_ids_returns_only_requested(pool):
     """Наблюдателю нужно вернуться к конкретным заказам, а не перебирать весь хвост."""
     orders = await db.fetch_orders_by_ids(pool, [596, 500])

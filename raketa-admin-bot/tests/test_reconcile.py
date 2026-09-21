@@ -130,21 +130,40 @@ def test_order_finished_long_ago_and_untouched_today_counts_nowhere():
     assert summary.waiting_address == 0
 
 
-def test_order_finished_long_ago_touched_today_only_by_address_reminder():
-    """Ловушка ТЗ: тронут сегодня только напоминанием про адрес — не «провёл»."""
-    scratch_lead = link(598, "done", path="C", real=41400003,
-                        minutes_ago=60 * 24 * 30, deal_address=None)
+def test_scratch_lead_processed_today_counts_too():
+    """Пути A, B и C не различаются (решение владельца) — считаем и путь C."""
+    scratch_lead = link(598, "done", path="C", real=41400003, deal_address="ул. Ленина, 5")
     snapshot = Snapshot(
         links=(scratch_lead,),
         orders=(OrderBrief(598, '9601945325', NOW),),
-        # Журнал тронут сегодня (седьмое, «замолкающее» напоминание про адрес
-        # тоже пишет строку) — но это не значит, что заказ провели.
         touched_order_ids=frozenset({598}),
     )
 
     summary = build_summary(snapshot, now=NOW)
 
-    assert summary.processed_today == 0          # путь C не входит в «Провёл из бота»
+    assert summary.processed_today == 1
+
+
+def test_order_finished_long_ago_touched_today_only_by_address_reminder():
+    """Ловушка ТЗ: тронут сегодня только напоминанием про адрес — не «провёл».
+
+    Седьмое (замолкающее) напоминание пишет строку в журнал, но
+    `db.fetch_touched_order_ids` её отфильтровывает у самого источника —
+    поэтому здесь заказ уже не значится тронутым (пустое множество имитирует
+    реальный результат такого запроса), хотя связка «done»/путь C дожила
+    до сих пор и адреса так и не получила.
+    """
+    scratch_lead = link(598, "done", path="C", real=41400003,
+                        minutes_ago=60 * 24 * 30, deal_address=None)
+    snapshot = Snapshot(
+        links=(scratch_lead,),
+        orders=(OrderBrief(598, '9601945325', NOW),),
+        touched_order_ids=frozenset(),
+    )
+
+    summary = build_summary(snapshot, now=NOW)
+
+    assert summary.processed_today == 0          # тронуто не было — только помолчали
     assert summary.waiting_address == 1           # а адреса всё ещё нет
 
 
