@@ -6210,12 +6210,9 @@ async def send_daily_reports() -> None:
     try:
         cash_text = await build_daily_cash_summary_text()
         profit_text = await build_profit_summary_text()
+        # Что робот делает в amoCRM, в рабочий чат не идёт: мастерам это не нужно
+        # (решение владельца 21.09). Отчёт роботов живёт в админ-боте, в вечерней сверке.
         orders_text = await build_daily_orders_admin_summary_text()
-        if AMOCRM_EXCHANGE_ENABLED:
-            orders_text = f"{orders_text}\n\n{await build_exchange_daily_summary_text()}"
-        if CLIENT_MESSAGING_ENABLED:
-            orders_text = (f"{orders_text}\n\n"
-                           f"{await build_client_messaging_daily_summary_text()}")
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to build daily reports: %s", exc)
         return
