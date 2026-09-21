@@ -125,9 +125,9 @@ Common rules for python projects (Rules 4.1):
 
 - At 300k tokens of memory the coordinator or the executor runs `/compact` stating what to keep, or closes the session by the closing rules.
 - Tests during work are targeted: only the affected file or a selection (`pytest tests/x.py -q --tb=short`), output through `tail`. A full run once before commit and once before deploy. TDD stays: this project has a standard `pytest`.
-- `ssh` only through the project's runbook scripts, output trimmed to the useful part. No manual step-by-step diagnosis on the server from the main session: write a script and run it once.
+- `ssh` output is trimmed to the useful part. Long or repeated work on the server still goes into a script run once, but step-by-step diagnosis from the main session is allowed (owner decision 2026-09-21, see «Server work» below).
 - Files longer than 500 lines are read in parts; the function map lives next to the file (owner decision 2026-09-10).
-- `.claude/settings.json` of this project holds the permissions its own work needs: `pytest`, `git status/diff/log`, file reads (`cat`, `sed -n`, `grep`, `rg`), `python -m`, project scripts. `ssh`, `scp`, `rsync` stay a question for the owner.
+- `.claude/settings.json` of this project holds the permissions its own work needs: `pytest`, `git status/diff/log`, file reads (`cat`, `sed -n`, `grep`, `rg`), `python -m`, project scripts. `ssh` to the bots' server is allowed (see «Server work»); `scp` and `rsync` stay a question for the owner.
 - Subagent worktrees are removed after merge (`git worktree prune` plus branch deletion). No leftovers between sessions.
 - Images and screenshots do not go into working-session memory, unless the task is about the interface and the owner chose to show the screen.
 
@@ -141,6 +141,24 @@ Files longer than 500 lines and their function maps:
 - `raketa-admin-bot/adminbot/db.py` (1200 lines) -> `raketa-admin-bot/adminbot/db.py.map.md`
 - `cleaning/handlers.py` (1487 lines) -> `cleaning/handlers.py.map.md`
 - `raketa-notify/notifyd/db.py` (548 lines) -> `raketa-notify/notifyd/db.py.map.md`
+
+## Server work (owner decision 2026-09-21)
+
+The coordinator works on `admin@91.200.150.68` directly: reads journals and service
+state, inspects the database, restarts `raketa-notify.service`, and performs the
+staged rollout steps of that service. Two bots serving live clients run on the same
+host, so:
+
+- **Secrets stay with the owner.** Tokens, passwords and connection strings are
+  never searched for, printed or typed by the agent. Every `.env` on the server is
+  edited by the owner. To check that a value is filled in, count it without printing
+  it (`grep -cE '^NAME=.+' file`), never `cat` the file.
+- **`telegram-bot.service` and `raketa-admin-bot.service` are not restarted without
+  the owner's word** — they take live orders. `raketa-notify.service` may be
+  restarted freely while it is still switched off.
+- **Migrations, permission changes, deletions and anything else hard to undo** are
+  done only on an explicit go-ahead, and the plan is stated first.
+- Output is still trimmed to the useful part; repeated work becomes a script.
 
 ## Deploy Rules
 
