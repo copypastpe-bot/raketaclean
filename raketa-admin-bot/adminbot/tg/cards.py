@@ -218,9 +218,10 @@ def _summary_block(summary: Any) -> list[str]:
     if summary.waiting_owner:
         lines += ["", f"❓ Ждут вашего ответа: {len(summary.waiting_owner)}"]
         lines += _rows_block(summary.waiting_owner, with_lead=False)
-    if summary.stuck:
-        lines += ["", f"⚠️ Зависли: {len(summary.stuck)}"]
-        lines += _rows_block(summary.stuck)
+    stuck = summary.failed + summary.stale
+    if stuck:
+        lines += ["", f"⚠️ Зависли: {len(stuck)}"]
+        lines += _rows_block(stuck)
     if summary.missed:
         lines += ["", f"🕳 Не разобрано: {len(summary.missed)}"]
         lines += _rows_block(summary.missed, with_lead=False)

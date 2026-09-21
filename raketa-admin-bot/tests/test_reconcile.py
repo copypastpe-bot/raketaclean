@@ -67,7 +67,7 @@ def test_summary_splits_orders_by_outcome():
     assert summary.is_quiet is True                          # разбираться владельцу не с чем
 
 
-def test_summary_collects_questions_stuck_and_missed():
+def test_summary_splits_failed_and_stale_and_collects_missed():
     snapshot = Snapshot(
         links=(
             link(600, "waiting_owner", path=None),
@@ -82,9 +82,10 @@ def test_summary_collects_questions_stuck_and_missed():
     summary = build_summary(snapshot, now=NOW, stale_after_sec=3600)
 
     assert [row.order_id for row in summary.waiting_owner] == [600]
-    # зависшие: ошибка, ожидание автосделки дольше часа и застрявшая работа
-    assert [row.order_id for row in summary.stuck] == [601, 602, 604]
-    assert summary.stuck[0].detail == "AmoError: 502"
+    # сбой робота — отдельно от зависших дольше часа
+    assert [row.order_id for row in summary.failed] == [601]
+    assert summary.failed[0].detail == "AmoError: 502"
+    assert [row.order_id for row in summary.stale] == [602, 604]
     assert [row.order_id for row in summary.missed] == [605]
     assert summary.missed[0].phone10        # телефон для владельца на месте
     assert summary.in_flight == (603,)                       # свежее ожидание — это норма

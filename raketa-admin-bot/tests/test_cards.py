@@ -192,7 +192,7 @@ def test_summary_puts_owner_business_first():
     summary = summary_with(
         processed=(SummaryRow(581, "done", "A", 41400001),),
         waiting_owner=(SummaryRow(596, "waiting_owner"),),
-        stuck=(SummaryRow(593, "error", "A", 41400005, "AmoError: 502"),),
+        failed=(SummaryRow(593, "error", "A", 41400005, "AmoError: 502"),),
         missed=(SummaryRow(598, "missed", phone10="9601861067"),),
         total_orders=4,
     )

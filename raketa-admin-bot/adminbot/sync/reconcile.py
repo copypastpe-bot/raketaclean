@@ -80,7 +80,8 @@ class DailySummary:
     created: tuple[SummaryRow, ...] = ()        # робот создал сделку с нуля
     already_done: tuple[SummaryRow, ...] = ()   # было проведено владельцем вручную
     waiting_owner: tuple[SummaryRow, ...] = ()  # ждут решения владельца
-    stuck: tuple[SummaryRow, ...] = ()          # ошибки и зависшие дольше часа
+    failed: tuple[SummaryRow, ...] = ()         # сбой робота (статус error)
+    stale: tuple[SummaryRow, ...] = ()          # зависли дольше stale_after_sec
     in_flight: tuple[int, ...] = ()             # в работе прямо сейчас — это норма
     missed: tuple[SummaryRow, ...] = ()         # заказы, до которых робот не добрался
     total_orders: int = 0
@@ -92,7 +93,7 @@ class DailySummary:
     @property
     def is_quiet(self) -> bool:
         """День без хвостов: владельцу делать нечего."""
-        return not (self.waiting_owner or self.stuck or self.missed)
+        return not (self.waiting_owner or self.failed or self.stale or self.missed)
 
 
 class SummarySource(Protocol):
@@ -117,7 +118,8 @@ def build_summary(snapshot: Snapshot, *, now: datetime,
     created: list[SummaryRow] = []
     already_done: list[SummaryRow] = []
     waiting_owner: list[SummaryRow] = []
-    stuck: list[SummaryRow] = []
+    failed: list[SummaryRow] = []
+    stale: list[SummaryRow] = []
     in_flight: list[int] = []
 
     by_id = {order.order_id: order for order in snapshot.orders}
@@ -133,9 +135,9 @@ def build_summary(snapshot: Snapshot, *, now: datetime,
         elif link.status == "waiting_owner":
             waiting_owner.append(row)
         elif link.status == "error":
-            stuck.append(row)
+            failed.append(row)
         elif _is_stale(link, now, stale_after_sec):
-            stuck.append(row)
+            stale.append(row)
         else:
             in_flight.append(link.order_id)
 
@@ -148,7 +150,8 @@ def build_summary(snapshot: Snapshot, *, now: datetime,
         created=tuple(created),
         already_done=tuple(already_done),
         waiting_owner=tuple(waiting_owner),
-        stuck=tuple(stuck),
+        failed=tuple(failed),
+        stale=tuple(stale),
         in_flight=tuple(sorted(in_flight)),
         missed=missed,
         total_orders=len(set(snapshot.order_ids) | linked_ids),
