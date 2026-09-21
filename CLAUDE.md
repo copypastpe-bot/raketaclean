@@ -107,7 +107,6 @@ on schema `public` (since 2026-08-26).
 - Project context state lives in `./AGENT_STATE.md` inside this repository.
 - Project session log lives in `./SESSION_LOG.md` inside this repository.
 - If required facts are missing, ask the user directly.
-- Do not enumerate speculative options by default.
 - Use detective mode only when the user explicitly asks to find a solution or process.
 - Prefer real code and config over documentation when facts conflict.
 - Keep changes aligned with the current project direction in AGENT_STATE.md.
