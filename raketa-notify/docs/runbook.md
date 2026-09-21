@@ -29,28 +29,45 @@
 
 ## 2. Установка
 
+Своего репозитория у службы нет: она лежит в том же монорепозитории, в папке
+`raketa-notify/`. Значит код едет на сервер тем же путём, что код рабочего
+бота, — через `git pull` в его рабочую копию, а оттуда копируется к себе.
+Ничего пересылать с ноутбука не нужно.
+
 ```bash
-# 0. Пользователь, под которым работает служба (без него она не запустится).
+# 0. Свежий код в рабочей копии рабочего бота — там же лежит и служба.
+#    Код самого бота при этом не меняется, перезапускать его не нужно.
+cd /opt/telegram-bot
+git pull --ff-only origin main
+
+# 1. Пользователь, под которым работает служба (без него она не запустится).
 #    Тот же приём, что у админ-бота: системный, без входа в систему.
 sudo useradd --system --shell /usr/sbin/nologin --home /opt/raketa-notify notify || true
 
-# 1. Код
+# 2. Код службы
 sudo mkdir -p /opt/raketa-notify
-sudo rsync -a --delete ~/raketa-notify/ /opt/raketa-notify/app/
+sudo rsync -a --delete /opt/telegram-bot/raketa-notify/ /opt/raketa-notify/app/
 
-# 2. Окружение
-python3 -m venv /opt/raketa-notify/.venv
-/opt/raketa-notify/.venv/bin/pip install -r /opt/raketa-notify/app/requirements.txt
+# 3. Окружение. Каталог принадлежит root, поэтому обе команды под sudo.
+sudo python3 -m venv /opt/raketa-notify/.venv
+sudo /opt/raketa-notify/.venv/bin/pip install -r /opt/raketa-notify/app/requirements.txt
 
-# 3. Настройки (заполняются по разделу 1)
+# 4. Настройки (заполняются по разделу 1). В файле токены и пароль базы,
+#    поэтому читать его может только служба.
 sudo cp /opt/raketa-notify/app/.env.example /opt/raketa-notify/.env
+sudo chown root:notify /opt/raketa-notify/.env
+sudo chmod 640 /opt/raketa-notify/.env
 sudo nano /opt/raketa-notify/.env
 
-# 4. Служба
+# 5. Служба
 sudo cp /opt/raketa-notify/app/deploy/raketa-notify.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable raketa-notify.service
 ```
+
+**Если `git pull` ругается на неотслеживаемый файл** — значит на сервере лежит
+что-то, положенное руками (так было 17.09 со скриптом разведки). Сдвинуть его
+в сторону, не удаляя, и повторить.
 
 ## 3. Миграции — до запуска кода
 
@@ -172,8 +189,13 @@ cd /opt/raketa-notify/app
 ## 8. Обновление
 
 ```bash
-sudo rsync -a --delete ~/raketa-notify/ /opt/raketa-notify/app/
+cd /opt/telegram-bot && git pull --ff-only origin main
+sudo rsync -a --delete /opt/telegram-bot/raketa-notify/ /opt/raketa-notify/app/
+sudo /opt/raketa-notify/.venv/bin/pip install -r /opt/raketa-notify/app/requirements.txt
 sudo systemctl restart raketa-notify.service
 ```
+
+Строка с `pip` нужна, только если менялся `requirements.txt`; лишней она
+не будет — уже установленное переставлять не станет.
 
 Появились новые миграции — применять по разделу 3 **до** перезапуска.
