@@ -285,6 +285,79 @@ async def test_touched_order_ids_ignore_the_address_reminder_going_silent(pool):
     assert touched == frozenset({599})
 
 
+async def test_update_link_and_log_writes_both_in_one_go(pool):
+    """Задача 8 (ТЗ 2026-09-21): решение владельца и запись в журнал — вместе.
+
+    `update_link_and_log` заменяет отдельные вызовы `update_link`+`log_action`
+    для кнопок-ответов владельца: если связка обновилась, строка в журнале
+    появляется тоже, одним и тем же вызовом.
+    """
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+
+    link = await db.update_link_and_log(
+        pool, 596, action="answer_owner", dry_run=False,
+        payload={"choice": "manual"}, status="done", path="done")
+
+    assert link.status == "done" and link.path == "done"
+    actions = await db.fetch_actions(pool, 596)
+    assert len(actions) == 1
+    assert actions[0]["action"] == "answer_owner"
+    assert actions[0]["payload"] == {"choice": "manual"}
+
+    # Своя таблица журнала — для уборок, как и у update_link/log_action.
+    await db.create_link(pool, order_id=5, phone10="9601861067", table=db.CLEANING_LINKS_TABLE)
+    await db.update_link_and_log(
+        pool, 5, table=db.CLEANING_LINKS_TABLE, actions_table=db.CLEANING_ACTIONS_TABLE,
+        action="answer_owner", dry_run=False, payload={"choice": "new"},
+        status="new", path="C")
+    cleaning_actions = await db.fetch_actions(pool, 5, table=db.CLEANING_ACTIONS_TABLE)
+    assert len(cleaning_actions) == 1 and cleaning_actions[0]["payload"] == {"choice": "new"}
+
+
+async def test_update_link_and_log_skips_the_journal_when_nothing_was_saved(pool):
+    """Работы уже нет — обновлять нечего, и запись в журнале не должна появиться."""
+    result = await db.update_link_and_log(
+        pool, 999999, action="answer_owner", dry_run=False,
+        payload={"choice": "manual"}, status="done", path="done")
+
+    assert result is None
+    assert await db.fetch_actions(pool, 999999) == []
+
+
+async def test_count_owner_handled_counts_only_manual_choice_in_window(pool):
+    """Задача 8: «Передано администратору» — только «Сам разберусь», и только за сутки.
+
+    Связка не различает нажатие «Сам разберусь» от автоматического
+    `already_done` (обе пишут status="done", path="done") — считаем по журналу.
+    """
+    real_now = datetime.now(timezone.utc)
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link_and_log(pool, 596, action="answer_owner", dry_run=False,
+                                 payload={"choice": "manual"}, status="done", path="done")
+    await db.create_link(pool, order_id=597, phone10="9159496642")
+    # «Заводи новую» тоже пишется в журнал (часть 1 задачи 8), но в счётчик не входит.
+    await db.update_link_and_log(pool, 597, action="answer_owner", dry_run=False,
+                                 payload={"choice": "new"}, status="new", path="C")
+    # Автоматическое already_done журнал вообще не пишет — считать нечего.
+    await db.update_link(pool, 597, status="done", path="done")
+
+    count = await db.count_owner_handled(pool, real_now - timedelta(minutes=1))
+    assert count == 1
+
+    # Окно суток режет реально.
+    assert await db.count_owner_handled(pool, real_now + timedelta(hours=1)) == 0
+
+    # Своя таблица журнала — для уборок.
+    await db.create_link(pool, order_id=5, phone10="9601861067", table=db.CLEANING_LINKS_TABLE)
+    await db.update_link_and_log(
+        pool, 5, table=db.CLEANING_LINKS_TABLE, actions_table=db.CLEANING_ACTIONS_TABLE,
+        action="answer_owner", dry_run=False, payload={"choice": "manual"},
+        status="done", path="done")
+    cleaning_count = await db.count_owner_handled(
+        pool, real_now - timedelta(minutes=1), table=db.CLEANING_ACTIONS_TABLE)
+    assert cleaning_count == 1
+
+
 async def test_fetch_orders_by_ids_returns_only_requested(pool):
     """Наблюдателю нужно вернуться к конкретным заказам, а не перебирать весь хвост."""
     orders = await db.fetch_orders_by_ids(pool, [596, 500])
@@ -374,6 +447,28 @@ async def test_summary_source_counts_processed_today_from_the_journal(pool):
     assert (await narrow.collect()).touched_order_ids == frozenset()
 
 
+async def test_summary_source_counts_handed_to_owner_from_the_journal(pool):
+    """Задача 8: «Передано администратору» — сквозь весь источник среза заказов.
+
+    596 — владелец нажал «Сам разберусь» сегодня, считается. 597 — «заводи
+    новую» тоже в журнале, но choice другой, в счётчик не входит.
+    """
+    from adminbot.sync.reconcile import PgSummarySource, build_summary
+
+    real_now = datetime.now(timezone.utc)
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link_and_log(pool, 596, action="answer_owner", dry_run=False,
+                                 payload={"choice": "manual"}, status="done", path="done")
+    await db.create_link(pool, order_id=597, phone10="9159496642")
+    await db.update_link_and_log(pool, 597, action="answer_owner", dry_run=False,
+                                 payload={"choice": "new"}, status="new", path="C")
+
+    source = PgSummarySource(pool, pool, NOW.date() - timedelta(days=3), now=lambda: real_now)
+    summary = build_summary(await source.collect(), now=NOW)
+
+    assert summary.handed_to_owner == 1
+
+
 async def test_pause_survives_a_restart(pool):
     """Пауза владельца лежит в базе, а не в памяти сервиса."""
     from adminbot.control import PgControlPanel
@@ -456,6 +551,37 @@ async def test_carpet_link_lifecycle(pool):
     # тот же заказ приходит второй раз — строка одна, отметки на месте
     again = await db.create_carpet_link(pool, 44426, "9601945325")
     assert again.lead_id == 31516051 and len(again.checklist) == 2
+
+
+async def test_update_carpet_link_and_log_writes_both_in_one_go(pool):
+    """Задача 8: то же самое, что у заказов, но для ковровой связки."""
+    await db.create_carpet_link(pool, 44426, "9601945325")
+
+    link = await db.update_carpet_link_and_log(
+        pool, 44426, action="answer_owner", dry_run=False,
+        payload={"choice": "manual"}, status="done", path=None)
+
+    assert link.status == "done"
+    rows = await _fetch_carpet_actions(pool, 44426)
+    assert len(rows) == 1 and rows[0]["payload"] == {"choice": "manual"}
+
+
+async def test_update_carpet_link_and_log_skips_the_journal_when_nothing_was_saved(pool):
+    result = await db.update_carpet_link_and_log(
+        pool, 999999, action="answer_owner", dry_run=False,
+        payload={"choice": "manual"}, status="done")
+
+    assert result is None
+    assert await _fetch_carpet_actions(pool, 999999) == []
+
+
+async def _fetch_carpet_actions(pool, partner_id: int) -> list[dict]:
+    """Журнал ковровой связки: своей `fetch_actions` у неё, в отличие от заказов, нет."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM adminbot.carpet_actions WHERE partner_id = $1 ORDER BY id",
+            partner_id)
+    return [dict(row) for row in rows]
 
 
 async def test_carpet_question_survives_restart(pool):
@@ -585,6 +711,48 @@ async def test_calendar_created_counts_distinct_events_since(pool):
     assert await db.count_calendar_created(pool, real_now - timedelta(minutes=1)) == 2
     # Окно суток режет реально.
     assert await db.count_calendar_created(pool, real_now + timedelta(hours=1)) == 0
+
+
+async def test_update_calendar_link_and_log_writes_both_in_one_go(pool):
+    """Задача 8: то же самое, что у заказов, но для записи календаря."""
+    await db.create_calendar_link(pool, "evt-1", kind="order", phone10="9605379757")
+
+    link = await db.update_calendar_link_and_log(
+        pool, "evt-1", action="answer_owner", dry_run=False,
+        payload={"choice": "manual"}, status="skipped", skip_reason="владелец разбирается сам")
+
+    assert link.status == "skipped"
+    rows = await db.fetch_calendar_actions(pool, "evt-1")
+    assert len(rows) == 1
+    assert rows[0]["action"] == "answer_owner"
+    assert rows[0]["payload"] == {"choice": "manual"}
+
+
+async def test_update_calendar_link_and_log_skips_the_journal_when_nothing_was_saved(pool):
+    result = await db.update_calendar_link_and_log(
+        pool, "evt-missing", action="answer_owner", dry_run=False,
+        payload={"choice": "manual"}, status="skipped")
+
+    assert result is None
+    assert await db.fetch_calendar_actions(pool, "evt-missing") == []
+
+
+async def test_count_calendar_owner_handled_counts_only_manual_choice_in_window(pool):
+    """Задача 8: та же логика счётчика, что у заказов, но по журналу календаря."""
+    real_now = datetime.now(timezone.utc)
+    await db.create_calendar_link(pool, "evt-1", kind="order", phone10="9605379757")
+    await db.update_calendar_link_and_log(
+        pool, "evt-1", action="answer_owner", dry_run=False,
+        payload={"choice": "manual"}, status="skipped", skip_reason="владелец разбирается сам")
+    await db.create_calendar_link(pool, "evt-2", kind="order", phone10="9159496642")
+    # «Оставить как есть» — другой choice, в счётчик не входит.
+    await db.update_calendar_link_and_log(
+        pool, "evt-2", action="answer_owner", dry_run=False,
+        payload={"choice": "keep"}, status="cancelled", skip_reason="владелец оставил как есть")
+
+    count = await db.count_calendar_owner_handled(pool, real_now - timedelta(minutes=1))
+    assert count == 1
+    assert await db.count_calendar_owner_handled(pool, real_now + timedelta(hours=1)) == 0
 
 
 # --- закладки, когда календарей несколько (2026-09-01) ---
@@ -961,3 +1129,21 @@ async def test_evening_summary_sees_cleanings_separately(pool):
     assert [row.order_id for row in summary.processed] == [596]
     assert sorted(row.order_id for row in summary.missed) == [3, 5]
     assert summary.total_orders == 3
+
+
+async def test_evening_summary_of_cleanings_counts_handed_to_owner(pool):
+    """Задача 8: «Передано администратору» считается и по уборкам — своя таблица."""
+    from adminbot.sync.reconcile import PgCleaningSummarySource, build_summary
+
+    await db.create_link(pool, order_id=5, phone10="9601861067",
+                         table=db.CLEANING_LINKS_TABLE)
+    await db.update_link_and_log(
+        pool, 5, table=db.CLEANING_LINKS_TABLE, actions_table=db.CLEANING_ACTIONS_TABLE,
+        action="answer_owner", dry_run=False, payload={"choice": "manual"},
+        status="done", path="done")
+
+    snapshot = await PgCleaningSummarySource(
+        pool, pool, NOW.date() - timedelta(days=60)).collect()
+    summary = build_summary(snapshot, now=NOW)
+
+    assert summary.handed_to_owner == 1

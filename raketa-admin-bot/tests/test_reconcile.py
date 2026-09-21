@@ -190,6 +190,23 @@ def test_waiting_address_does_not_depend_on_the_day_window():
     assert summary.waiting_address == 1
 
 
+def test_handled_count_passes_through_to_handed_to_owner():
+    """Задача 8: «Передано администратору» считается по журналу вне build_summary
+    (там нет чем отличить «Сам разберусь» от автоматического already_done — оба
+    пишут связку одинаково), поэтому число приходит уже готовым в срезе."""
+    snapshot = Snapshot(links=(), orders=(), handled_count=3)
+
+    summary = build_summary(snapshot, now=NOW)
+
+    assert summary.handed_to_owner == 3
+
+
+def test_handled_count_defaults_to_zero_on_a_quiet_day():
+    summary = build_summary(Snapshot(links=(), orders=()), now=NOW)
+
+    assert summary.handed_to_owner == 0
+
+
 def test_waiting_address_ignores_filled_addresses_and_other_paths():
     filled = link(601, "done", path="C", real=41400006, deal_address="ул. Ленина, 5")
     owner_kept = link(602, "done", path="done", real=41400007, deal_address=None)

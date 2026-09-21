@@ -31,6 +31,11 @@ class LinkStore(Protocol):
                   entity: Optional[str] = None, amo_id: Optional[int] = None,
                   payload: Optional[Any] = None) -> None: ...
 
+    async def update_and_log(self, order_id: int, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None,
+                             **fields: Any) -> Optional[AmoLink]: ...
+
     async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]: ...
 
 
@@ -75,6 +80,21 @@ class MemoryLinkStore:
         self.actions.append({"order_id": order_id, "action": action, "dry_run": dry_run,
                              "entity": entity, "amo_id": amo_id, "payload": payload})
 
+    async def update_and_log(self, order_id: int, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None, **fields: Any) -> Optional[AmoLink]:
+        """Обновить связку и записать решение в журнал — одним вызовом.
+
+        В памяти настоящей транзакции нет, но порядок соблюдён: если работы
+        уже нет и обновление не удалось, строки в журнале тоже не будет
+        (задача 8, ТЗ 2026-09-21-evening-summary-rework.md).
+        """
+        updated = await self.update(order_id, **fields)
+        if updated is not None:
+            await self.log(order_id, action, dry_run=dry_run, entity=entity,
+                           amo_id=amo_id, payload=payload)
+        return updated
+
     async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]:
         taken: set[int] = set()
         for link in self.links.values():
@@ -116,6 +136,14 @@ class PgLinkStore:
         await db.log_action(self._pool, order_id=order_id, action=action, dry_run=dry_run,
                             amo_entity=entity, amo_id=amo_id, payload=payload,
                             table=self._actions)
+
+    async def update_and_log(self, order_id: int, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None, **fields: Any) -> Optional[AmoLink]:
+        return await db.update_link_and_log(
+            self._pool, order_id, table=self._links, actions_table=self._actions,
+            action=action, dry_run=dry_run, entity=entity, amo_id=amo_id,
+            payload=payload, **fields)
 
     async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]:
         return await db.fetch_taken_lead_ids(self._pool, phone10, exclude_order_id,

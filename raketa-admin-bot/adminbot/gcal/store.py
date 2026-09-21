@@ -45,6 +45,11 @@ class CalendarStore(Protocol):
                   entity: Optional[str] = None, amo_id: Optional[int] = None,
                   payload: Optional[Any] = None) -> None: ...
 
+    async def update_and_log(self, event_id: str, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None,
+                             **fields: Any) -> Optional[CalendarLink]: ...
+
     async def taken_leads(self, phone10: str, exclude_event_id: str) -> set[int]: ...
 
     async def pending(self) -> list[CalendarLink]: ...
@@ -106,6 +111,17 @@ class MemoryCalendarStore:
                   payload: Optional[Any] = None) -> None:
         self.actions.append({"event_id": event_id, "action": action, "dry_run": dry_run,
                              "entity": entity, "amo_id": amo_id, "payload": payload})
+
+    async def update_and_log(self, event_id: str, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None,
+                             **fields: Any) -> Optional[CalendarLink]:
+        """Обновить запись и записать решение в журнал — одним вызовом (задача 8)."""
+        updated = await self.update(event_id, **fields)
+        if updated is not None:
+            await self.log(event_id, action, dry_run=dry_run, entity=entity,
+                           amo_id=amo_id, payload=payload)
+        return updated
 
     async def taken_leads(self, phone10: str, exclude_event_id: str) -> set[int]:
         """Сделки, занятые ДРУГИМИ записями календаря.
@@ -185,6 +201,14 @@ class PgCalendarStore:
         await db.log_calendar_action(self._pool, event_id=event_id, action=action,
                                      dry_run=dry_run, amo_entity=entity, amo_id=amo_id,
                                      payload=payload)
+
+    async def update_and_log(self, event_id: str, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None,
+                             **fields: Any) -> Optional[CalendarLink]:
+        return await db.update_calendar_link_and_log(
+            self._pool, event_id, action=action, dry_run=dry_run, entity=entity,
+            amo_id=amo_id, payload=payload, **fields)
 
     async def taken_leads(self, phone10: str, exclude_event_id: str) -> set[int]:
         return await db.fetch_calendar_taken_leads(self._pool, phone10, exclude_event_id)

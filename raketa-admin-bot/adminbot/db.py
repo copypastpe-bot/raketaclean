@@ -367,6 +367,47 @@ async def log_action(
         )
 
 
+async def update_link_and_log(
+    own_pool: asyncpg.Pool, order_id: int, *, action: str, dry_run: bool,
+    entity: Optional[str] = None, amo_id: Optional[int] = None,
+    payload: Optional[dict] = None, table: str = LINKS_TABLE,
+    actions_table: str = ACTIONS_TABLE, **fields: Any,
+) -> Optional[AmoLink]:
+    """Обновить связку и одной транзакцией записать решение владельца в журнал.
+
+    Задача 8 (ТЗ 2026-09-21-evening-summary-rework.md): нажатие кнопки-ответа
+    владельца должно попасть в журнал действий, но если сама связка не
+    обновилась (работы уже нет), строки в журнале тоже быть не должно —
+    `update_link`/`log_action` порознь такой гарантии не дают, каждый берёт
+    своё соединение из пула отдельно.
+    """
+    unknown = set(fields) - _UPDATABLE_LINK_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля привязки: {sorted(unknown)}")
+    if not fields:
+        raise ValueError("update_link_and_log требует хотя бы одно поле связки")
+
+    names = list(fields)
+    assignments = ", ".join(f"{name} = ${i + 2}" for i, name in enumerate(names))
+    async with own_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                f"UPDATE {table} SET {assignments}, updated_at = now() "
+                f"WHERE order_id = $1 RETURNING *",
+                order_id, *[fields[name] for name in names],
+            )
+            if row is not None:
+                await conn.execute(
+                    f"""
+                    INSERT INTO {actions_table}
+                        (order_id, action, amo_entity, amo_id, dry_run, payload)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    order_id, action, entity, amo_id, dry_run, payload,
+                )
+    return _link_from_row(row)
+
+
 async def fetch_actions(own_pool: asyncpg.Pool, order_id: int,
                         *, table: str = ACTIONS_TABLE) -> list[dict]:
     async with own_pool.acquire() as conn:
@@ -374,6 +415,27 @@ async def fetch_actions(own_pool: asyncpg.Pool, order_id: int,
             f"SELECT * FROM {table} WHERE order_id = $1 ORDER BY id", order_id
         )
     return [dict(row) for row in rows]
+
+
+async def count_owner_handled(own_pool: asyncpg.Pool, since: datetime,
+                              *, table: str = ACTIONS_TABLE) -> int:
+    """Сколько раз владелец нажал «Сам разберусь» не раньше `since` (задача 8).
+
+    Нажатие «Сам разберусь» и автоматическое `already_done` пишут связку
+    ОДИНАКОВО (status="done", path="done") — отличить их по ней нельзя.
+    Различимо только по журналу: кнопка сама пишет туда `answer_owner` с
+    `payload->>'choice' = 'manual'` в момент нажатия (`update_link_and_log`,
+    вызывается из `adminbot/tg/bot.py`), поэтому считаем оттуда, а не по связке.
+    Вторая кнопка контура, «оставить как есть», в это число не входит — у неё
+    другое значение `choice` (владелец 21.09: считаем только «Сам разберусь»).
+    """
+    async with own_pool.acquire() as conn:
+        return await conn.fetchval(
+            f"SELECT count(*) FROM {table} "
+            f"WHERE action = 'answer_owner' AND payload->>'choice' = 'manual' "
+            f"AND created_at >= $1",
+            since,
+        )
 
 
 async def fetch_touched_order_ids(own_pool: asyncpg.Pool, since: datetime,
@@ -720,6 +782,39 @@ async def log_carpet_action(
         )
 
 
+async def update_carpet_link_and_log(
+    own_pool: asyncpg.Pool, partner_id: int, *, action: str, dry_run: bool,
+    entity: Optional[str] = None, amo_id: Optional[int] = None,
+    payload: Optional[dict] = None, **fields: Any,
+) -> Optional[CarpetLink]:
+    """То же самое для ковровой связки (задача 8) — см. `update_link_and_log`."""
+    unknown = set(fields) - _UPDATABLE_CARPET_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля ковровой привязки: {sorted(unknown)}")
+    if not fields:
+        raise ValueError("update_carpet_link_and_log требует хотя бы одно поле")
+
+    names = list(fields)
+    assignments = ", ".join(f"{name} = ${i + 2}" for i, name in enumerate(names))
+    async with own_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                f"UPDATE adminbot.carpet_links SET {assignments}, updated_at = now() "
+                f"WHERE partner_id = $1 RETURNING *",
+                partner_id, *[fields[name] for name in names],
+            )
+            if row is not None:
+                await conn.execute(
+                    """
+                    INSERT INTO adminbot.carpet_actions
+                        (partner_id, action, amo_entity, amo_id, dry_run, payload)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    partner_id, action, entity, amo_id, dry_run, payload,
+                )
+    return _carpet_from_row(row)
+
+
 async def fetch_carpet_taken_leads(own_pool: asyncpg.Pool, phone10: str,
                                    exclude_partner_id: int) -> set[int]:
     """Ковровые сделки, уже закреплённые за другими заказами того же клиента."""
@@ -1002,6 +1097,39 @@ async def log_calendar_action(
         )
 
 
+async def update_calendar_link_and_log(
+    own_pool: asyncpg.Pool, event_id: str, *, action: str, dry_run: bool,
+    entity: Optional[str] = None, amo_id: Optional[int] = None,
+    payload: Optional[dict] = None, **fields: Any,
+) -> Optional[CalendarLink]:
+    """То же самое для записи календаря (задача 8) — см. `update_link_and_log`."""
+    unknown = set(fields) - _UPDATABLE_GCAL_FIELDS
+    if unknown:
+        raise ValueError(f"Недопустимые поля записи календаря: {sorted(unknown)}")
+    if not fields:
+        raise ValueError("update_calendar_link_and_log требует хотя бы одно поле")
+
+    names = list(fields)
+    assignments = ", ".join(f"{name} = ${i + 2}" for i, name in enumerate(names))
+    async with own_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                f"UPDATE adminbot.gcal_events SET {assignments}, updated_at = now() "
+                f"WHERE event_id = $1 RETURNING *",
+                event_id, *[_gcal_value(name, fields[name]) for name in names],
+            )
+            if row is not None:
+                await conn.execute(
+                    """
+                    INSERT INTO adminbot.gcal_actions
+                        (event_id, action, amo_entity, amo_id, dry_run, payload)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    event_id, action, entity, amo_id, dry_run, payload,
+                )
+    return _calendar_from_row(row)
+
+
 async def count_calendar_created(own_pool: asyncpg.Pool, since: datetime) -> int:
     """Сколько сделок робот завёл из записей календаря не раньше `since` (задача 2).
 
@@ -1016,6 +1144,22 @@ async def count_calendar_created(own_pool: asyncpg.Pool, since: datetime) -> int
         return await conn.fetchval(
             "SELECT count(DISTINCT event_id) FROM adminbot.gcal_actions "
             "WHERE action = 'create_lead' AND created_at >= $1", since,
+        )
+
+
+async def count_calendar_owner_handled(own_pool: asyncpg.Pool, since: datetime) -> int:
+    """То же самое для календарного контура, что и `count_owner_handled` (задача 8).
+
+    Подготовлено для сборки текста сводки (задача 4): «Передано администратору»
+    суммирует это число с `count_owner_handled` заказов и уборок — собирается
+    отдельно, не этой функцией, тем же приёмом, что и `count_calendar_created`.
+    """
+    async with own_pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT count(*) FROM adminbot.gcal_actions "
+            "WHERE action = 'answer_owner' AND payload->>'choice' = 'manual' "
+            "AND created_at >= $1",
+            since,
         )
 
 

@@ -436,6 +436,77 @@ async def test_owner_confirms_the_closed_deal(answered):
     assert link.path == "done"                   # работать по ней робот не будет
 
 
+# --- решения владельца пишутся в журнал (задача 8, ТЗ 2026-09-21) ---
+
+async def test_owner_takes_it_over_is_logged_as_manual(answered):
+    store, answers = answered
+
+    await answers.on_choice(FakeCallback("gcal:manual"))
+
+    assert store.actions_of("answer_owner") == [
+        {"event_id": "evt-1", "action": "answer_owner", "dry_run": False,
+         "entity": None, "amo_id": None, "payload": {"choice": "manual"}}]
+
+
+async def test_owner_keeps_the_deal_is_logged_with_a_different_choice(answered):
+    """«Оставить как есть» тоже попадает в журнал — но не как «manual»."""
+    store, answers = answered
+
+    await answers.on_choice(FakeCallback("gcal:keep"))
+
+    assert store.actions_of("answer_owner") == [
+        {"event_id": "evt-1", "action": "answer_owner", "dry_run": False,
+         "entity": None, "amo_id": None, "payload": {"choice": "keep"}}]
+
+
+async def test_confirming_the_closed_deal_logs_its_lead_id(answered):
+    store, answers = answered
+    await store.update("evt-1", status="waiting_owner", real_lead_id=None,
+                       question={"reason": "ask_owner_closed",
+                                 "options": [{"lead_id": 31570357,
+                                              "pipeline_id": 4482787}]})
+
+    await answers.on_choice(FakeCallback("gcal:linked_31570357"))
+
+    assert store.actions_of("answer_owner") == [
+        {"event_id": "evt-1", "action": "answer_owner", "dry_run": False,
+         "entity": "lead", "amo_id": 31570357, "payload": {"choice": "linked_31570357"}}]
+
+
+async def test_stranger_writes_nothing_to_the_journal(answered):
+    store, answers = answered
+
+    await answers.on_choice(FakeCallback("gcal:manual", user_id=1))
+
+    assert store.actions == []
+
+
+async def test_owner_choice_does_not_duplicate_the_calendar_journal_entry():
+    """Кнопка пишет `answer_owner`, движок отдельно — `update_lead»: проверяем,
+    что решение владельца не задваивается и не путается с записью движка."""
+    from adminbot.amo import ids
+    from adminbot.gcal.engine import CalendarEngine
+    from adminbot.gcal.event import EventKind, ParsedEvent
+    from tests.fakes import FakeAmo
+
+    amo = FakeAmo()
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore()
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="waiting_owner", real_lead_id=41400001,
+                       question_msg_id=555,
+                       question={"reason": "заказ отменён — закрыть сделку?"})
+    answers = CalendarAnswers(owner_tg_id=190933209, store=store)
+
+    await answers.on_choice(FakeCallback("gcal:manual"))
+
+    engine = CalendarEngine(amo=amo, store=store, dry_run=False)
+    await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert len(store.actions_of("answer_owner")) == 1
+    assert len(store.actions_of("update_lead")) == 1
+
+
 # --- пометка репетиции (задача 3, 16.09) ---
 
 def test_calendar_question_cards_mark_rehearsal():

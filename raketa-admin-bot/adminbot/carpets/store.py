@@ -35,6 +35,11 @@ class CarpetStore(Protocol):
                   entity: Optional[str] = None, amo_id: Optional[int] = None,
                   payload: Optional[Any] = None) -> None: ...
 
+    async def update_and_log(self, partner_id: int, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None,
+                             **fields: Any) -> Optional[CarpetLink]: ...
+
     async def taken_leads(self, phone10: str, exclude_partner_id: int) -> set[int]: ...
 
 
@@ -99,6 +104,16 @@ class MemoryCarpetStore:
                   payload: Optional[Any] = None) -> None:
         self.actions.append({"partner_id": partner_id, "action": action, "dry_run": dry_run,
                              "entity": entity, "amo_id": amo_id, "payload": payload})
+
+    async def update_and_log(self, partner_id: int, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None, **fields: Any) -> Optional[CarpetLink]:
+        """Обновить связку и записать решение в журнал — одним вызовом (задача 8)."""
+        updated = await self.update(partner_id, **fields)
+        if updated is not None:
+            await self.log(partner_id, action, dry_run=dry_run, entity=entity,
+                           amo_id=amo_id, payload=payload)
+        return updated
 
     async def taken_leads(self, phone10: str, exclude_partner_id: int) -> set[int]:
         return {link.lead_id for link in self.links.values()
@@ -189,6 +204,13 @@ class PgCarpetStore:
         await db.log_carpet_action(self._pool, partner_id=partner_id, action=action,
                                    dry_run=dry_run, amo_entity=entity, amo_id=amo_id,
                                    payload=payload)
+
+    async def update_and_log(self, partner_id: int, *, action: str, dry_run: bool,
+                             entity: Optional[str] = None, amo_id: Optional[int] = None,
+                             payload: Optional[Any] = None, **fields: Any) -> Optional[CarpetLink]:
+        return await db.update_carpet_link_and_log(
+            self._pool, partner_id, action=action, dry_run=dry_run, entity=entity,
+            amo_id=amo_id, payload=payload, **fields)
 
     async def taken_leads(self, phone10: str, exclude_partner_id: int) -> set[int]:
         return await db.fetch_carpet_taken_leads(self._pool, phone10, exclude_partner_id)

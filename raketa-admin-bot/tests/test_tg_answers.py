@@ -6,8 +6,9 @@
 """
 
 from adminbot.amo import ids
+from adminbot.carpets.store import MemoryCarpetStore
 from adminbot.models import AmoLink
-from adminbot.tg.bot import AddressAnswers, BACKLOG_GO, BACKLOG_HOLD, OwnerAnswers
+from adminbot.tg.bot import AddressAnswers, BACKLOG_GO, BACKLOG_HOLD, CarpetAnswers, OwnerAnswers
 from adminbot.tg.cards import ADDR_PREFIX
 from tests.test_tg_guard import OWNER_ID, STRANGER_ID, FakeUser
 
@@ -58,6 +59,14 @@ class FakeStore:
     async def log(self, order_id, action, *, dry_run, entity=None, amo_id=None, payload=None):
         self.actions.append({"order_id": order_id, "action": action, "dry_run": dry_run,
                              "entity": entity, "amo_id": amo_id, "payload": payload})
+
+    async def update_and_log(self, order_id, *, action, dry_run, entity=None, amo_id=None,
+                             payload=None, **fields):
+        updated = await self.update(order_id, **fields)
+        if updated is not None:
+            await self.log(order_id, action, dry_run=dry_run, entity=entity,
+                           amo_id=amo_id, payload=payload)
+        return updated
 
 
 def waiting_link(order_id=596, question=QUESTION, path=None):
@@ -151,6 +160,66 @@ async def test_answer_for_a_forgotten_order_does_not_crash():
     await answers.on_choice(FakeCallback("amosync:596:new"))
 
     assert answers.store.updates == []
+
+
+# --- решения владельца пишутся в журнал (задача 8, ТЗ 2026-09-21) ---
+
+async def test_owner_takes_it_over_is_logged_as_manual():
+    """«Сам разберусь» пишется в журнал так, чтобы его можно было отличить и посчитать."""
+    answers = make_answers()
+
+    await answers.on_choice(FakeCallback("amosync:596:manual"))
+
+    assert answers.store.actions == [
+        {"order_id": 596, "action": "answer_owner", "dry_run": False,
+         "entity": None, "amo_id": None, "payload": {"choice": "manual"}}]
+
+
+async def test_create_new_is_logged_but_not_as_manual():
+    """«Заводи новую» тоже попадает в журнал — но с другим значением choice."""
+    answers = make_answers()
+
+    await answers.on_choice(FakeCallback("amosync:596:new"))
+
+    assert answers.store.actions == [
+        {"order_id": 596, "action": "answer_owner", "dry_run": False,
+         "entity": None, "amo_id": None, "payload": {"choice": "new"}}]
+
+
+async def test_retry_is_logged():
+    answers = make_answers(waiting_link(path="B"))
+
+    await answers.on_choice(FakeCallback("amosync:596:retry"))
+
+    assert answers.store.actions == [
+        {"order_id": 596, "action": "answer_owner", "dry_run": False,
+         "entity": None, "amo_id": None, "payload": {"choice": "retry"}}]
+
+
+async def test_picking_a_deal_logs_its_lead_id():
+    answers = make_answers()
+
+    await answers.on_choice(FakeCallback("amosync:596:41400001"))
+
+    assert answers.store.actions == [
+        {"order_id": 596, "action": "answer_owner", "dry_run": False,
+         "entity": "lead", "amo_id": 41400001, "payload": {"choice": "lead"}}]
+
+
+async def test_stranger_writes_nothing_to_the_journal():
+    answers = make_answers()
+
+    await answers.on_choice(FakeCallback("amosync:596:manual", user_id=STRANGER_ID))
+
+    assert answers.store.actions == []
+
+
+async def test_answer_for_a_forgotten_order_writes_nothing_to_the_journal():
+    answers = OwnerAnswers(owner_tg_id=OWNER_ID, store=FakeStore(None))
+
+    await answers.on_choice(FakeCallback("amosync:596:manual"))
+
+    assert answers.store.actions == []
 
 
 # --- кнопки хвоста ---
@@ -291,3 +360,49 @@ async def test_stranger_cannot_mute_reminders():
 
     assert store.links[596].address_reminder_muted is False
     assert amo.calls == []
+
+
+# --- карточка ковров: решения владельца тоже пишутся в журнал (задача 8) ---
+
+async def make_carpet_answers():
+    store = MemoryCarpetStore()
+    await store.create(44426, "9601945325")
+    return CarpetAnswers(owner_tg_id=OWNER_ID, store=store), store
+
+
+async def test_carpet_owner_takes_it_over_is_logged_as_manual():
+    answers, store = await make_carpet_answers()
+
+    await answers.on_choice(FakeCallback("carpet:44426:manual"))
+
+    assert store.actions_of("answer_owner") == [
+        {"partner_id": 44426, "action": "answer_owner", "dry_run": False,
+         "entity": None, "amo_id": None, "payload": {"choice": "manual"}}]
+
+
+async def test_carpet_create_new_is_logged_but_not_as_manual():
+    answers, store = await make_carpet_answers()
+
+    await answers.on_choice(FakeCallback("carpet:44426:new"))
+
+    assert store.actions_of("answer_owner") == [
+        {"partner_id": 44426, "action": "answer_owner", "dry_run": False,
+         "entity": None, "amo_id": None, "payload": {"choice": "new"}}]
+
+
+async def test_carpet_picking_a_deal_logs_its_lead_id():
+    answers, store = await make_carpet_answers()
+
+    await answers.on_choice(FakeCallback("carpet:44426:31516051"))
+
+    assert store.actions_of("answer_owner") == [
+        {"partner_id": 44426, "action": "answer_owner", "dry_run": False,
+         "entity": "lead", "amo_id": 31516051, "payload": {"choice": "lead"}}]
+
+
+async def test_carpet_stranger_writes_nothing_to_the_journal():
+    answers, store = await make_carpet_answers()
+
+    await answers.on_choice(FakeCallback("carpet:44426:manual", user_id=STRANGER_ID))
+
+    assert store.actions == []

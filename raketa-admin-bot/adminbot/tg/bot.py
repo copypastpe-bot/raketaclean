@@ -271,7 +271,14 @@ class CarpetAnswers:
             fields = {"status": "new", "path": None, "lead_id": lead_id, "question": None}
             reply = f"беру сделку #{lead_id}."
 
-        await self.store.update(partner_id, **fields)
+        # Решение владельца — в журнал того же контура (задача 8, ТЗ
+        # 2026-09-21-evening-summary-rework.md): без этого «Сам разберусь»
+        # неотличимо от автоматического already_done, и посчитать «Передано
+        # администратору» не по чему.
+        await self.store.update_and_log(
+            partner_id, action="answer_owner", dry_run=False,
+            entity=("lead" if kind == "lead" else None), amo_id=lead_id,
+            payload={"choice": kind}, **fields)
         log.info("Ковры, заказ партнёра №%s: владелец выбрал %s", partner_id, kind)
         await callback.answer()
         await callback.message.edit_text(f"Ковры, заказ №{partner_id}: {reply}")
@@ -328,10 +335,26 @@ class CalendarAnswers:
             return
 
         fields, reply = self._apply(choice, link)
-        await self.store.update(link.event_id, question=None, **fields)
+        # Решение владельца — в журнал (задача 8, ТЗ 2026-09-21-evening-
+        # summary-rework.md): та же причина, что и у заказов и ковров — без
+        # этого «Сам разберусь» неотличимо от автоматического already_done.
+        lead_id = self._lead_id_of(choice)
+        await self.store.update_and_log(
+            link.event_id, action="answer_owner", dry_run=False,
+            entity=("lead" if lead_id is not None else None), amo_id=lead_id,
+            payload={"choice": choice}, question=None, **fields)
         log.info("Календарь, запись %s: владелец выбрал %s", link.event_id, choice)
         await callback.answer()
         await callback.message.edit_text(f"Запись календаря: {reply}")
+
+    @staticmethod
+    def _lead_id_of(choice: str) -> Optional[int]:
+        """Сделка, которую выбрал владелец — для отметки в журнале (задача 8)."""
+        if choice.startswith("linked_"):
+            return int(choice.removeprefix("linked_"))
+        if choice.startswith("lead_"):
+            return int(choice.removeprefix("lead_"))
+        return None
 
     def _apply(self, choice: str, link: Any) -> tuple[dict, str]:
         if choice in self.CHOICES:
@@ -394,7 +417,14 @@ class OwnerAnswers:
             return
 
         fields, reply = self._apply_choice(link, kind, lead_id)
-        await self.store.update(order_id, **fields)
+        # Решение владельца — в журнал (задача 8, ТЗ 2026-09-21-evening-
+        # summary-rework.md): без этого «Сам разберусь» неотличимо от
+        # автоматического already_done, и «Передано администратору» не
+        # посчитать.
+        await self.store.update_and_log(
+            order_id, action="answer_owner", dry_run=False,
+            entity=("lead" if kind == "lead" else None), amo_id=lead_id,
+            payload={"choice": kind}, **fields)
         log.info("%s №%s: владелец выбрал %s", self.label, order_id, kind)
         await callback.answer()
         await callback.message.edit_text(f"{self.label} №{order_id}: {reply}")

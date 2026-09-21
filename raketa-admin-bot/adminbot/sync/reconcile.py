@@ -58,6 +58,12 @@ class Snapshot:
     # проведение работы здесь не считаются отдельно. Поля связок для этого не
     # годятся — `updated_at` двигает любая правка, а не только завершение работы.
     touched_order_ids: frozenset[int] = frozenset()
+    # Сколько раз владелец нажал «Сам разберусь» за окно суток (задача 8, ТЗ
+    # 2026-09-21-evening-summary-rework.md) — уже готовое число из журнала
+    # действий (`db.count_owner_handled`), а не множество: связка не различает
+    # это нажатие и автоматическое already_done, свернуть их в build_summary
+    # не из чего.
+    handled_count: int = 0
 
     @property
     def order_ids(self) -> tuple[int, ...]:
@@ -98,10 +104,12 @@ class DailySummary:
     # «Завёл из календаря» сюда не входит: это не про amo_links/cleaning_links,
     # а про отдельную таблицу adminbot.gcal_events — собирается отдельно
     # (db.count_calendar_created) и подмешивается снаружи, не этой функцией.
-    # «Передано администратору» тоже сюда пока не входит — см. AGENT_STATE.md
-    # и отчёт исполнителя задачи 2: для amosync/amoclean нажатие «Сам разберусь»
-    # неотличимо от автоматического already_done, вопрос к владельцу.
     processed_today: int = 0    # «Провёл из бота»: путь A/B/C (не различаем — решение владельца), довели за окно суток
+    # «Передано администратору» (задача 8): только amosync/amoclean — свой кусок
+    # числа из этого потока, calendar-контур считается отдельно
+    # (db.count_calendar_owner_handled) и суммируется снаружи, тем же приёмом,
+    # что и «Завёл из календаря».
+    handed_to_owner: int = 0
     waiting_address: int = 0    # «Ждут адрес»: путь C без адреса, накопленным итогом
     # Уборки клининг-контура за тот же день. Отдельная сводка, но внутри той же:
     # владелец должен получить одну картину дня, а не два сообщения подряд.
@@ -189,6 +197,7 @@ def build_summary(snapshot: Snapshot, *, now: datetime,
         missed=missed,
         total_orders=len(set(snapshot.order_ids) | linked_ids),
         processed_today=processed_today,
+        handed_to_owner=snapshot.handled_count,
         waiting_address=waiting_address,
     )
 
@@ -301,13 +310,17 @@ class PgSummarySource:
         orders = await db.fetch_orders_since(self.bot_pool, self.backlog_from)
         links = await db.fetch_links_for_orders(
             self.own_pool, [order.order_id for order in orders])
-        touched = await db.fetch_touched_order_ids(
-            self.own_pool, self.now() - timedelta(hours=self.touched_window_hours))
+        since = self.now() - timedelta(hours=self.touched_window_hours)
+        touched = await db.fetch_touched_order_ids(self.own_pool, since)
+        # «Передано администратору» (задача 8): то же окно суток, что и у
+        # «Провёл из бота» — владелец 21.09 решил считать одним приёмом.
+        handled = await db.count_owner_handled(self.own_pool, since)
         return Snapshot(
             links=tuple(links),
             orders=tuple(OrderBrief(order.order_id, order.phone10, order.created_at)
                          for order in orders),
             touched_order_ids=touched,
+            handled_count=handled,
         )
 
 
@@ -328,14 +341,17 @@ class PgCleaningSummarySource:
         links = await db.fetch_links_for_orders(
             self.own_pool, [order.order_id for order in orders],
             table=db.CLEANING_LINKS_TABLE)
+        since = self.now() - timedelta(hours=self.touched_window_hours)
         touched = await db.fetch_touched_order_ids(
-            self.own_pool, self.now() - timedelta(hours=self.touched_window_hours),
-            table=db.CLEANING_ACTIONS_TABLE)
+            self.own_pool, since, table=db.CLEANING_ACTIONS_TABLE)
+        handled = await db.count_owner_handled(
+            self.own_pool, since, table=db.CLEANING_ACTIONS_TABLE)
         return Snapshot(
             links=tuple(links),
             orders=tuple(OrderBrief(order.order_id, order.phone10, order.created_at)
                          for order in orders),
             touched_order_ids=touched,
+            handled_count=handled,
         )
 
 
