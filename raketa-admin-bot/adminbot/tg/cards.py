@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from datetime import date
+from html import escape
 from typing import Any, Optional, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -206,8 +207,15 @@ _TAIL_CATEGORIES = (
 # владелец не возражал — меняется одной строкой).
 TAIL_CAP = 10
 
+# Признак «календарный проход не отработал» (задача 9, ТЗ
+# 2026-09-21-evening-summary-rework.md): число в «Завёл из календаря» и так
+# остаётся честным нулём, но сам сбой владелец должен увидеть там, где он
+# и так ищет проблемы, — строкой в хвостах, а не только в журнале сервера.
+CALENDAR_FAILURE_LINE = "⛔ Сбой: календарный проход не отработал"
 
-def summary_text(summary: Any, *, calendar_created: int = 0, calendar_handled: int = 0) -> str:
+
+def summary_text(summary: Any, *, calendar_created: int = 0, calendar_handled: int = 0,
+                 calendar_failed: bool = False, base_url: Optional[str] = None) -> str:
     """Отчёт за день: сверху четыре числа — что сделал робот, — снизу хвосты —
     что требует вмешательства владельца.
 
@@ -221,6 +229,17 @@ def summary_text(summary: Any, *, calendar_created: int = 0, calendar_handled: i
     отдельно от `amo_links`/`cleaning_links` (`db.count_calendar_created`,
     `db.count_calendar_owner_handled`, задачи 2 и 8 того же ТЗ) и подмешивается
     сюда вызывающей стороной, а не собирается этой функцией.
+
+    `calendar_failed` (задача 9) — календарный проход упал, число выше честный
+    ноль, но день из-за этого не тихий: `CALENDAR_FAILURE_LINE` идёт первой
+    строкой хвостов.
+
+    `base_url` (задача 5) — адрес CRM (`AMO_BASE_URL`), если он известен
+    вызывающей стороне: номер сделки в строках хвостов становится кликабельной
+    ссылкой `#<номер>` на карточку в amoCRM. `OwnerMail` включает HTML-разметку
+    для этого сообщения той же связкой (`Purpose.parse_mode`, `tg/outbox.py`),
+    поэтому текст ошибки в хвосте «Сбой робота» экранируется — без адреса
+    ссылка не строится, и строка выглядит как раньше.
     """
     cleaning = getattr(summary, "cleaning", None)
 
@@ -231,8 +250,10 @@ def summary_text(summary: Any, *, calendar_created: int = 0, calendar_handled: i
         lines += ["", "🧹 Уборки"] + _numbers_block(cleaning)
 
     lines.append("")
-    quiet = summary.is_quiet and (cleaning is None or cleaning.is_quiet)
-    lines += ["Хвостов нет — разбираться не с чем."] if quiet else _tails_block(summary)
+    quiet = (summary.is_quiet and (cleaning is None or cleaning.is_quiet)
+            and not calendar_failed)
+    lines += (["Хвостов нет — разбираться не с чем."] if quiet
+             else _tails_block(summary, calendar_failed=calendar_failed, base_url=base_url))
     return "\n".join(lines)
 
 
@@ -252,27 +273,37 @@ def _numbers_block(summary: Any, *, calendar_created: int = 0, calendar_handled:
     return [f"{label}: {count}" for label, count in numbers]
 
 
-def _tails_block(summary: Any) -> list[str]:
+def _tails_block(summary: Any, *, calendar_failed: bool = False,
+                 base_url: Optional[str] = None) -> list[str]:
     """Что требует вмешательства владельца — заказы и уборки вместе, одной
     картиной: владельцу нужен один список хвостов, а не два по потокам
     (то же правило, что уже держит `DailySummary.is_quiet`)."""
     cleaning = getattr(summary, "cleaning", None)
     lines = ["⚠️ Хвосты"]
+    if calendar_failed:
+        lines.append("")
+        lines.append(CALENDAR_FAILURE_LINE)
     for field, label in _TAIL_CATEGORIES:
         rows = list(getattr(summary, field))
         if cleaning is not None:
             rows += list(getattr(cleaning, field))
         lines.append("")
         lines.append(f"{label}: {len(rows)}")
-        lines += _tail_rows(rows, with_detail=(field == "failed"))
+        lines += _tail_rows(rows, with_detail=(field == "failed"), base_url=base_url)
     return lines
 
 
-def _tail_rows(rows: Sequence[Any], *, with_detail: bool) -> list[str]:
+def _tail_rows(rows: Sequence[Any], *, with_detail: bool,
+               base_url: Optional[str] = None) -> list[str]:
     """Строки одной категории хвостов: заказ, телефон, дата, сделка.
 
     У сбоя (`with_detail`) следующей строкой идёт текст ошибки — остальные
     категории его не показывают, макет утверждён без него.
+
+    `base_url` (задача 5) — известный адрес CRM превращает номер сделки
+    в кликабельную ссылку; заодно включается HTML-экранирование текста ошибки
+    (без него ссылка не строится, и всё выглядит как раньше — символ вроде
+    `<` в тексте ошибки иначе сломал бы разбор сообщения в Telegram).
     """
     lines: list[str] = []
     for row in rows[:TAIL_CAP]:
@@ -285,15 +316,25 @@ def _tail_rows(rows: Sequence[Any], *, with_detail: bool) -> list[str]:
             parts.append(f"{when:%d.%m}")
         lead_id = getattr(row, "lead_id", None)
         if lead_id:
-            parts.append(f"#{lead_id}")
+            parts.append(_lead_ref(lead_id, base_url))
         lines.append("   • " + " · ".join(parts))
         if with_detail:
             detail = getattr(row, "detail", None)
             if detail:
-                lines.append(f"     {detail}")
+                lines.append(f"     {escape(detail, quote=False) if base_url else detail}")
     if len(rows) > TAIL_CAP:
         lines.append(f"   …и ещё {len(rows) - TAIL_CAP}")
     return lines
+
+
+def _lead_ref(lead_id: int, base_url: Optional[str]) -> str:
+    """Номер сделки в строке хвоста: `#<номер>`, а если известен адрес CRM —
+    тот же текст кликабельной ссылкой на карточку в amoCRM (задача 5)."""
+    text = f"#{lead_id}"
+    if not base_url:
+        return text
+    url = f"{base_url.rstrip('/')}/leads/detail/{lead_id}"
+    return f'<a href="{url}">{text}</a>'
 
 
 # --- предпросмотр хвоста ---

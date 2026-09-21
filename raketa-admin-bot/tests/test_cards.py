@@ -281,6 +281,80 @@ def test_tails_block_caps_a_category_at_ten_and_counts_the_rest():
     assert "…и ещё 2" in text
 
 
+# --- ссылки на сделки в хвостах (задача 5, ТЗ 2026-09-21-evening-summary-rework.md) ---
+
+def test_tail_row_lead_number_becomes_a_link_when_base_url_is_known():
+    """Вид строки не меняется — меняется только то, что номер сделки становится
+    кликабельным (уточнение координатора). Текст ссылки — `#<номер сделки>`."""
+    summary = summary_with(waiting_owner=(
+        SummaryRow(601, "waiting_owner", phone10="9519069162",
+                  order_date=datetime(2026, 8, 31), lead_id=31570357),
+    ))
+
+    text = summary_text(summary, base_url="https://example.amocrm.ru")
+
+    assert ('   • №601 · +79519069162 · 31.08 · '
+           '<a href="https://example.amocrm.ru/leads/detail/31570357">#31570357</a>'
+           in text)
+
+
+def test_tail_row_stays_plain_without_a_base_url():
+    """Без адреса CRM строка выглядит ровно как раньше — задача 5 ничего не ломает."""
+    summary = summary_with(waiting_owner=(
+        SummaryRow(601, "waiting_owner", phone10="9519069162",
+                  order_date=datetime(2026, 8, 31), lead_id=31570357),
+    ))
+
+    text = summary_text(summary)
+
+    assert "   • №601 · +79519069162 · 31.08 · #31570357" in text
+    assert "<a href" not in text
+
+
+def test_tail_detail_is_escaped_for_html_so_a_broken_pass_still_sends():
+    """Разметка HTML включена для всего сообщения — текст ошибки экранируется,
+    иначе символ вроде `<` сломал бы разбор сообщения в Telegram."""
+    summary = summary_with(failed=(
+        SummaryRow(612, "error", lead_id=31587009, detail="таймаут <5 сек>, амо & прокси"),
+    ))
+
+    text = summary_text(summary, base_url="https://example.amocrm.ru")
+
+    assert "таймаут &lt;5 сек&gt;, амо &amp; прокси" in text
+
+
+# --- сбой календарного прохода (задача 9, ТЗ 2026-09-21-evening-summary-rework.md) ---
+
+def test_calendar_pass_failure_shows_up_as_a_tail_line():
+    """Решение владельца 21.09: сбой календарного прохода — строка в хвостах,
+    а не только запись в журнале сервера, которую он не видит."""
+    summary = summary_with()
+
+    text = summary_text(summary, calendar_failed=True)
+
+    assert "⛔ Сбой: календарный проход не отработал" in text
+    assert "Хвостов нет — разбираться не с чем." not in text    # день не тихий
+
+
+def test_calendar_pass_success_shows_no_failure_line():
+    summary = summary_with()
+
+    text = summary_text(summary, calendar_created=3, calendar_failed=False)
+
+    assert "Сбой: календарный проход" not in text
+
+
+def test_calendar_disabled_is_not_a_failure():
+    """Календарь выключен вовсе (умолчание calendar_failed=False) — не сбой,
+    строки нет, а тихий день остаётся тихим."""
+    summary = summary_with()
+
+    text = summary_text(summary)
+
+    assert "Сбой: календарный проход" not in text
+    assert "Хвостов нет — разбираться не с чем." in text
+
+
 # --- предпросмотр хвоста ---
 
 def test_preview_lists_planned_actions_and_asks_for_a_go():
