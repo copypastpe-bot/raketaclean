@@ -64,6 +64,12 @@ class Purpose:
     still_needed: Optional[Callable[[str], Awaitable[bool]]] = None
     on_delivered: Optional[Callable[[str, int], Awaitable[None]]] = None
     ttl_sec: int = DEFAULT_TTL_SEC
+    # Разметка сообщения (задача 5, ТЗ 2026-09-21-evening-summary-rework.md):
+    # None — как раньше, обычный текст. По назначению, а не по вызову `send`,
+    # чтобы первая попытка и досылка после сбоя (`_settle`) несли одну и ту же
+    # разметку — иначе долг, доставленный со второй попытки, показал бы
+    # владельцу сырые HTML-теги вместо ссылки.
+    parse_mode: Optional[str] = None
 
 
 class MailStore(Protocol):
@@ -204,7 +210,8 @@ class OwnerMail:
         """
         try:
             sent = await self.bot.send_message(self.chat_id, text,
-                                               reply_markup=reply_markup)
+                                               reply_markup=reply_markup,
+                                               **self._send_kwargs(kind))
         except Exception as exc:                       # noqa: BLE001 — Telegram падает
             await self._remember(text, kind=kind, ref=ref,
                                  reply_markup=reply_markup, error=exc)
@@ -252,7 +259,8 @@ class OwnerMail:
 
         try:
             sent = await self.bot.send_message(letter["chat_id"], letter["text"],
-                                               reply_markup=letter.get("reply_markup"))
+                                               reply_markup=letter.get("reply_markup"),
+                                               **self._send_kwargs(letter["kind"]))
         except Exception as exc:                       # noqa: BLE001
             await self.store.postpone(letter_id, self._next_try(letter, now),
                                       f"{type(exc).__name__}: {exc}")
@@ -264,6 +272,17 @@ class OwnerMail:
                  letter_id, letter["kind"], letter.get("attempts", 0) + 1)
         await self._after_delivery(purpose, letter, message_id)
         return True
+
+    def _send_kwargs(self, kind: str) -> dict:
+        """Разметка сообщения — по назначению (`Purpose.parse_mode`), а не по
+        месту вызова: тогда первая попытка и досылка после сбоя (`_settle`)
+        отправляются одинаково (задача 5, ТЗ
+        2026-09-21-evening-summary-rework.md). По умолчанию `parse_mode` не
+        передаётся вовсе — поведение всех остальных писем не меняется ни в чём.
+        """
+        purpose = self.purposes.get(kind)
+        parse_mode = purpose.parse_mode if purpose else None
+        return {"parse_mode": parse_mode} if parse_mode else {}
 
     async def _still_needed(self, purpose: Optional[Purpose], letter: dict) -> bool:
         """Не отпала ли нужда в сообщении. Сомнение решается в пользу отправки."""

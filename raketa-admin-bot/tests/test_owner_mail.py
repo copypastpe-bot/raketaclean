@@ -22,14 +22,16 @@ class FakeBot:
 
     def __init__(self) -> None:
         self.sent: list[tuple[int, str, object]] = []
+        self.parse_modes: list[object] = []
         self.fail = False
         self._next_id = 500
 
-    async def send_message(self, chat_id, text, reply_markup=None):
+    async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
         if self.fail:
             raise TimeoutError("Request timeout error")
         self._next_id += 1
         self.sent.append((chat_id, text, reply_markup))
+        self.parse_modes.append(parse_mode)
         return type("Sent", (), {"message_id": self._next_id})()
 
 
@@ -207,6 +209,42 @@ async def test_buttons_survive_the_wait(bot, clock):
     await mail.deliver_debts()
 
     assert bot.sent[0][2] == keyboard
+
+
+async def test_parse_mode_comes_from_the_purpose_not_the_call(bot, clock):
+    """Задача 5 (ТЗ 2026-09-21-evening-summary-rework.md): у вечерней сводки
+    появляются ссылки на сделки — их видно только с HTML-разметкой. Разметка
+    решается по назначению (`Purpose`), а не по вызову `send`: так первая
+    попытка и досылка после сбоя выглядят одинаково."""
+    mail = build(bot, clock, summary=Purpose(parse_mode="HTML"))
+
+    await mail.send("📊 Вечерняя сверка", kind="summary")
+
+    assert bot.parse_modes == ["HTML"]
+
+
+async def test_parse_mode_survives_a_retry_after_a_debt(bot, clock):
+    """Сообщение не ушло с первой попытки и стало долгом — досылка должна нести
+    ту же разметку, иначе владелец увидит сырые HTML-теги вместо ссылки."""
+    mail = build(bot, clock, summary=Purpose(parse_mode="HTML"))
+    bot.fail = True
+    await mail.send("📊 Вечерняя сверка", kind="summary")
+
+    bot.fail = False
+    clock.forward(BACKOFF_SEC[0])
+    await mail.deliver_debts()
+
+    assert bot.parse_modes == ["HTML"]
+
+
+async def test_other_kinds_keep_sending_without_any_parse_mode(bot, clock):
+    """Остальные виды писем не задевает: разметка включена точечно, по одному
+    назначению, а не для всей почты владельца."""
+    mail = build(bot, clock, gcal_done=Purpose())
+
+    await mail.send("Сделка заведена", kind="gcal_done", ref="evt-1")
+
+    assert bot.parse_modes == [None]
 
 
 async def test_a_broken_store_does_not_break_the_pass(bot, clock):
