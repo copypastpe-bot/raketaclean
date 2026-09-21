@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -30,26 +31,43 @@ ADDRESSES = ("work_chat", "ops_feed", "tech_journal", "my_assistant", "my_admin"
 LEVELS = ("red", "yellow", "grey")
 
 
+# systemd читает EnvironmentFile буквально: всё после «=» и до конца строки —
+# это значение, вместе с нашим поясняющим комментарием. python-dotenv, на
+# котором живут оба бота, хвостовой комментарий срезает сам, поэтому привычка
+# копировать строки из настроек ботов («60   # как часто заглядывать…»)
+# роняла службу на старте — поймано на боевой установке 21.09.
+# Срезаем сами. Перед решёткой обязателен пробел, поэтому пароль, токен или
+# URL с «#» внутри не пострадают: пробелов в них не бывает.
+_INLINE_COMMENT_RE = re.compile(r"\s+#.*$")
+
+
+def _clean(raw: Optional[str]) -> str:
+    """Значение переменной без хвостового комментария и внешних пробелов."""
+    if raw is None:
+        return ""
+    return _INLINE_COMMENT_RE.sub("", raw).strip()
+
+
 def _require(name: str) -> str:
-    value = os.environ.get(name, "").strip()
+    value = _clean(os.environ.get(name))
     if not value:
         raise RuntimeError(f"Не задана обязательная переменная окружения: {name}")
     return value
 
 
 def _flag(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
+    raw = _clean(os.environ.get(name))
+    if not raw:
         return default
-    return raw.strip().lower() in _TRUE_VALUES
+    return raw.lower() in _TRUE_VALUES
 
 
 def _int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
+    raw = _clean(os.environ.get(name))
+    if not raw:
         return default
     try:
-        return int(raw.strip())
+        return int(raw)
     except ValueError as exc:
         raise RuntimeError(
             f"Переменная {name} должна быть целым числом, получено: {raw!r}"
@@ -57,11 +75,11 @@ def _int(name: str, default: int) -> int:
 
 
 def _float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
+    raw = _clean(os.environ.get(name))
+    if not raw:
         return default
     try:
-        return float(raw.strip())
+        return float(raw)
     except ValueError as exc:
         raise RuntimeError(
             f"Переменная {name} должна быть числом, получено: {raw!r}"
@@ -75,7 +93,7 @@ def _chat_id(name: str) -> Optional[int]:
     не при старте, а только если справочник и правда сослался на пустой адрес
     (тогда событие откладывается, а не отправляется в пустоту).
     """
-    raw = os.environ.get(name, "").strip()
+    raw = _clean(os.environ.get(name))
     if not raw:
         return None
     try:
@@ -203,6 +221,6 @@ class Settings:
             my_assistant_chat_id=_chat_id("MY_ASSISTANT_CHAT_ID"),
             my_admin_chat_id=_chat_id("MY_ADMIN_CHAT_ID"),
             manager_chat_id=_chat_id("MANAGER_CHAT_ID"),
-            telegram_api_ips=tuple(parse_ip_pool(os.environ.get("TELEGRAM_API_IPS"))),
-            telegram_proxy_url=(os.environ.get("TELEGRAM_PROXY_URL") or "").strip(),
+            telegram_api_ips=tuple(parse_ip_pool(_clean(os.environ.get("TELEGRAM_API_IPS")))),
+            telegram_proxy_url=_clean(os.environ.get("TELEGRAM_PROXY_URL")),
         )
