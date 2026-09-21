@@ -261,9 +261,13 @@ async def build_app(settings: Settings) -> App:
     # Единственная дверь, через которую робот пишет владельцу. Telegram здесь
     # отвечает через раз, и сообщение, не ушедшее с первой попытки, раньше
     # пропадало навсегда (решение владельца 2026-09-02: доотправлять).
+    # parse_mode="HTML" — вечерняя сводка несёт кликабельные ссылки на сделки
+    # в хвостах (задача 5, ТЗ 2026-09-21-evening-summary-rework.md); остальные
+    # письма это не задевает — разметка включена точечно, по назначению.
     mail = OwnerMail(bot=bot, chat_id=settings.owner_tg_id,
                      store=PgMailStore(own_pool),
-                     purposes={MAIL_SUMMARY: Purpose(ttl_sec=SUMMARY_TTL_SEC)})
+                     purposes={MAIL_SUMMARY: Purpose(ttl_sec=SUMMARY_TTL_SEC,
+                                                     parse_mode="HTML")})
 
     # Удаление заказа освобождает сделку (задача 5, ТЗ 2026-09-17): свой
     # выключатель (задача 7). Не отдельный цикл — первый шаг тика наблюдателя
@@ -321,7 +325,7 @@ async def build_app(settings: Settings) -> App:
     reconciler = Reconciler(
         watcher=watcher,
         source=PgSummarySource(bot_pool, own_pool, settings.backlog_from),
-        on_summary=_make_summary_sender(mail),
+        on_summary=_make_summary_sender(mail, settings.amo_base_url),
         hour_msk=settings.reconcile_hour_msk,
         cleaning_watcher=cleaning_watcher,
         cleaning_source=(PgCleaningSummarySource(bot_pool, own_pool, cleaning_backlog_from)
@@ -1044,13 +1048,20 @@ def _make_autocall_no_phone_sender(mail: OwnerMail, amo_base_url: str):
     return send
 
 
-def _make_summary_sender(mail: OwnerMail):
+def _make_summary_sender(mail: OwnerMail, amo_base_url: str):
     """Вечерняя сводка владельцу — одним сообщением, включая числа календарного
-    контура (задача 6, ТЗ 2026-09-21-evening-summary-rework.md)."""
+    контура (задача 6) и признак его сбоя (задача 9), ТЗ
+    2026-09-21-evening-summary-rework.md. `amo_base_url` — номера сделок
+    в хвостах становятся ссылками на карточку в amoCRM (задача 5); почта
+    отправляет это сообщение с HTML-разметкой (`Purpose.parse_mode`, собран
+    в `build_app`)."""
 
-    async def send(summary, *, calendar_created: int = 0, calendar_handled: int = 0) -> None:
+    async def send(summary, *, calendar_created: int = 0, calendar_handled: int = 0,
+                   calendar_failed: bool = False) -> None:
         await mail.send(summary_text(summary, calendar_created=calendar_created,
-                                     calendar_handled=calendar_handled), kind=MAIL_SUMMARY)
+                                     calendar_handled=calendar_handled,
+                                     calendar_failed=calendar_failed,
+                                     base_url=amo_base_url), kind=MAIL_SUMMARY)
 
     return send
 
