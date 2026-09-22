@@ -10,7 +10,7 @@ import pytest
 
 from adminbot.amo import ids
 from adminbot.amo.fields import MOSCOW_TZ
-from adminbot.models import Order
+from adminbot.models import AmoLink, Order
 from adminbot.sync.engine import Engine
 from adminbot.sync.specialists import SpecialistIndex
 from tests.fakes import FakeAmo, FakeStore
@@ -292,6 +292,33 @@ async def test_path_b_asks_owner_when_salesbot_is_silent_too_long():
     await make_engine(amo, store).process_order(order)
     late = make_engine(amo, store, now=lambda: ORDER_MOMENT + timedelta(minutes=45))
     link = await late.process_order(order)
+
+    assert link.status == "waiting_owner"
+    assert store.actions_of("salesbot_timeout")
+
+
+async def test_wait_salesbot_timer_counts_from_move_primary_success_not_updated_at():
+    """Дефект 22.09 (задача 2 ТЗ `order-chain`): `_run_checklist` перед каждым
+    `StepResult(wait=True)` зовёт `store.update(status="waiting_salesbot")` —
+    это двигает `updated_at`, даже когда статус не поменялся. Считать ожидание
+    от него нельзя: `updated_at` обнуляется на каждом опросе, и вопрос
+    владельцу не пришёл бы никогда. Отсчёт — от отметки шага
+    `move_primary_success` в чек-листе.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    moved_at = ORDER_MOMENT - timedelta(minutes=20)
+    order = make_order()
+    store.links[order.order_id] = AmoLink(
+        order_id=order.order_id, phone10=order.phone10, status="waiting_salesbot",
+        path="B", primary_lead_id=700,
+        checklist={"fill_primary": moved_at.isoformat(),
+                  "move_primary_success": moved_at.isoformat()},
+        created_at=moved_at, updated_at=ORDER_MOMENT - timedelta(minutes=1),
+    )
+    engine = make_engine(amo, store, now=lambda: ORDER_MOMENT)
+    engine.salesbot_wait_sec = 600
+
+    link = await engine.process_order(order)
 
     assert link.status == "waiting_owner"
     assert store.actions_of("salesbot_timeout")
