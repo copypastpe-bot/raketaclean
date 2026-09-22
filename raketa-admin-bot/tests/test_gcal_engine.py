@@ -530,6 +530,26 @@ async def test_cancellation_asks_the_owner_blind_when_the_note_lookup_fails(amo)
     assert amo.leads[41400001]["status_id"] == ids.STATUS_SUCCESS    # лид воронки 1 не тронут
 
 
+async def test_cancellation_asks_the_owner_blind_when_the_status_check_fails(amo):
+    """CRM не ответила уже после того, как дочка найдена — на проверке статуса
+    (ревью 22.09, второй круг): та же защита, что на поиске дочки — весь ход
+    `_handle_cancelled` под одним перехватом `AmoError`.
+    """
+    amo.add_lead(41400100, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.fail_on = "get_lead"
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", real_lead_id=41400100)   # дочка уже известна
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert link.status == "waiting_owner"
+    assert link.question["child_lookup_failed"] is True
+    assert link.last_error and "AmoError" in link.last_error
+    assert amo.calls_of("move_lead") == []
+
+
 async def test_close_deal_without_a_child_and_without_a_note_touches_nothing(amo):
     """Старая запись: `closing` с `primary_lead_id`, без дочки, без примечания.
 
