@@ -72,6 +72,20 @@ def cancellation_card(link: Any, *, dry_run: bool = False) -> tuple[str, InlineK
     return text, keyboard
 
 
+def no_realization_text(link: Any) -> str:
+    """Запись удалили, а сделки реализации у неё нет — ни своей, ни по примечанию.
+
+    Короткий отчёт по образцу остальных писем календаря (задача 4 ТЗ 2026-09-22):
+    робот ничего не потрогал в CRM, закрывать было нечего. Лид воронки 1 в счёт
+    не идёт — его робот не закрывает никогда, даже когда дочки нет.
+    """
+    return "\n".join([
+        "📅 Календарь · запись удалена",
+        _client_line(link),
+        "Сделки реализации нет — в CRM ничего не трогал.",
+    ])
+
+
 def boat_card(link: Any, *, dry_run: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     """Теплоход: ни телефона, ни цены — заводим только по кнопке (решение 7)."""
     question = link.question or {}

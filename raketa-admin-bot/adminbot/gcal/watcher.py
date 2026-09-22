@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from adminbot.amo import ids
-from adminbot.gcal.engine import KEPT_OUT_REASON
+from adminbot.gcal.engine import KEPT_OUT_REASON, NO_REALIZATION_REASON
 from adminbot.gcal.event import EventKind, ParsedEvent, parse_event
 
 log = logging.getLogger(__name__)
@@ -80,6 +80,7 @@ class CalendarWatcher:
         on_rehearsal: Optional[Callable[[Any, list], Awaitable[None]]] = None,
         on_done: Optional[Callable[[Any, list], Awaitable[Optional[int]]]] = None,
         on_updated: Optional[Callable[[Any, tuple], Awaitable[None]]] = None,
+        on_no_deal: Optional[Callable[[Any, None], Awaitable[None]]] = None,
         dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         now: Optional[Callable[[], datetime]] = None,
@@ -104,6 +105,10 @@ class CalendarWatcher:
         # Выключается снятием обработчика, без правки логики.
         self.on_done = on_done
         self.on_updated = on_updated
+        # Удаление без дочки воронки 2 (задача 4 ТЗ 2026-09-22): короткий отчёт
+        # «сделки реализации нет», в бою — один раз, в репетиции о том же самом
+        # уже сказано в общем отчёте репетиции, второе письмо было бы дублем.
+        self.on_no_deal = on_no_deal
         self.dry_run = dry_run
         self.sleep = sleep
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -290,6 +295,12 @@ class CalendarWatcher:
             await self._report_rehearsal(link)
         elif not self.dry_run and link.status == "done" and not edits:
             await self._maybe_report_done(link)
+        elif (not self.dry_run and link.status == "cancelled"
+                and link.skip_reason == NO_REALIZATION_REASON):
+            # Задача 4 ТЗ 2026-09-22: сделки реализации нет — короткий отчёт
+            # владельцу, а не тишина. В репетиции про это же сказано в общем
+            # отчёте репетиции (`rehearsal_text`), второе письмо было бы дублем.
+            await self._notify(self.on_no_deal, link, None)
 
     async def _save_event_data(self, parsed: ParsedEvent, link: Any) -> None:
         """Держать разбор рядом с записью: им продолжают незаконченную цепочку."""

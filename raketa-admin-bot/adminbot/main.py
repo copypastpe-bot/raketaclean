@@ -64,7 +64,7 @@ from adminbot.tg.bot import (
     AddressAnswers, CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router)
 from adminbot.tg.calendar_cards import (
     boat_card, calendar_question_card, cancellation_card,
-    done_text, rehearsal_text, updated_text)
+    done_text, no_realization_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
     carpet_held_text, carpet_question_card, carpet_report_text, mark_rehearsal,
@@ -89,6 +89,7 @@ MAIL_GCAL_DONE = "gcal_done"
 MAIL_GCAL_QUESTION = "gcal_question"
 MAIL_GCAL_UPDATED = "gcal_updated"
 MAIL_GCAL_REHEARSAL = "gcal_rehearsal"
+MAIL_GCAL_NO_DEAL = "gcal_no_deal"
 MAIL_CARPET_QUESTION = "carpet_question"
 MAIL_CARPET_REPORT = "carpet_report"
 MAIL_CARPET_HELD = "carpet_held"
@@ -648,6 +649,7 @@ def _build_calendar(settings: Settings, own_pool: Any, mail: OwnerMail,
         on_done=_make_calendar_done_sender(mail, settings.amo_base_url),
         on_updated=_make_calendar_updated_sender(mail, settings.amo_base_url,
                                                  dry_run=settings.gcal_dry_run),
+        on_no_deal=_make_calendar_no_deal_sender(mail),
         dry_run=settings.gcal_dry_run,
     )
     log.info("Календарь: включён, режим %s, календарь %s, читаю с %s",
@@ -919,6 +921,15 @@ def _make_calendar_updated_sender(mail: OwnerMail, amo_base_url: str, dry_run: b
     async def send(link, changed) -> None:
         await mail.send(updated_text(link, changed, base_url=amo_base_url, dry_run=dry_run),
                         kind=MAIL_GCAL_UPDATED, ref=link.event_id)
+
+    return send
+
+
+def _make_calendar_no_deal_sender(mail: OwnerMail):
+    """Запись удалили, а сделки реализации нет — короткий отчёт (задача 4 ТЗ 2026-09-22)."""
+
+    async def send(link, _payload=None) -> None:
+        await mail.send(no_realization_text(link), kind=MAIL_GCAL_NO_DEAL, ref=link.event_id)
 
     return send
 
