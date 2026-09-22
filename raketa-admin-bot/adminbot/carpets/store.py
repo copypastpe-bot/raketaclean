@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Optional, Protocol
+from typing import Any, Collection, Optional, Protocol
 
 from adminbot import db
 from adminbot.models import CarpetLink
@@ -40,7 +40,8 @@ class CarpetStore(Protocol):
                              payload: Optional[Any] = None,
                              **fields: Any) -> Optional[CarpetLink]: ...
 
-    async def taken_leads(self, phone10: str, exclude_partner_id: int) -> set[int]: ...
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_partner_id: int) -> set[int]: ...
 
 
 class MemoryCarpetStore:
@@ -115,10 +116,12 @@ class MemoryCarpetStore:
                            amo_id=amo_id, payload=payload)
         return updated
 
-    async def taken_leads(self, phone10: str, exclude_partner_id: int) -> set[int]:
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_partner_id: int) -> set[int]:
+        wanted = set(lead_ids)
         return {link.lead_id for link in self.links.values()
-                if link.phone10 == phone10 and link.partner_id != exclude_partner_id
-                and link.lead_id}
+                if link.partner_id != exclude_partner_id
+                and link.lead_id and link.lead_id in wanted}
 
     def actions_of(self, action: str) -> list[dict]:
         return [row for row in self.actions if row["action"] == action]
@@ -212,5 +215,6 @@ class PgCarpetStore:
             self._pool, partner_id, action=action, dry_run=dry_run, entity=entity,
             amo_id=amo_id, payload=payload, **fields)
 
-    async def taken_leads(self, phone10: str, exclude_partner_id: int) -> set[int]:
-        return await db.fetch_carpet_taken_leads(self._pool, phone10, exclude_partner_id)
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_partner_id: int) -> set[int]:
+        return await db.fetch_carpet_taken_leads(self._pool, lead_ids, exclude_partner_id)

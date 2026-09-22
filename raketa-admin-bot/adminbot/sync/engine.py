@@ -145,7 +145,8 @@ class Engine:
         """Спросить матчер и записать выбранный путь."""
         raw_leads = await self.amo.find_leads_by_phone(order.phone10)
         candidates = [self._to_lead_info(lead) for lead in raw_leads]
-        taken = await self.store.taken_leads(order.phone10, order.order_id)
+        taken = await self.store.taken_leads(
+            [info.lead_id for info in candidates], exclude_order_id=order.order_id)
 
         decision = match(
             order_date=order.order_date,

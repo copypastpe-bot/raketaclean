@@ -466,7 +466,8 @@ class CalendarEngine:
     async def _decide(self, event: ParsedEvent, link: CalendarLink) -> CalendarLink:
         raw_leads = await self.amo.find_leads_by_phone(event.phone10)
         candidates = [_to_lead_info(lead) for lead in raw_leads]
-        taken = await self.store.taken_leads(event.phone10, exclude_event_id=event.event_id)
+        taken = await self.store.taken_leads(
+            [info.lead_id for info in candidates], exclude_event_id=event.event_id)
 
         decision = match_event(order_date=event.order_date, candidates=candidates,
                                taken_lead_ids=taken)
@@ -584,10 +585,11 @@ class CalendarEngine:
                     return StepResult(stop=True)
                 return StepResult()
         else:
-            taken = await self.store.taken_leads(event.phone10,
-                                                 exclude_event_id=event.event_id)
-            for lead in await self.amo.find_leads_by_phone(event.phone10):
-                info = _to_lead_info(lead)
+            raw_leads = await self.amo.find_leads_by_phone(event.phone10)
+            infos = [_to_lead_info(lead) for lead in raw_leads]
+            taken = await self.store.taken_leads(
+                [info.lead_id for info in infos], exclude_event_id=event.event_id)
+            for info in infos:
                 if (info.pipeline_id == ids.PIPELINE_REALIZATION and info.is_open
                         and info.lead_id not in taken):
                     await self.store.update(event.event_id, real_lead_id=info.lead_id,

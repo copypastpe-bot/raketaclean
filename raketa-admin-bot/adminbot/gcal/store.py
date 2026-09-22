@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timezone
-from typing import Any, Optional, Protocol
+from typing import Any, Collection, Optional, Protocol
 
 from adminbot import db
 from adminbot.models import CalendarLink
@@ -50,7 +50,8 @@ class CalendarStore(Protocol):
                              payload: Optional[Any] = None,
                              **fields: Any) -> Optional[CalendarLink]: ...
 
-    async def taken_leads(self, phone10: str, exclude_event_id: str) -> set[int]: ...
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_event_id: str) -> set[int]: ...
 
     async def pending(self) -> list[CalendarLink]: ...
 
@@ -123,18 +124,25 @@ class MemoryCalendarStore:
                            amo_id=amo_id, payload=payload)
         return updated
 
-    async def taken_leads(self, phone10: str, exclude_event_id: str) -> set[int]:
-        """Сделки, занятые ДРУГИМИ записями календаря.
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_event_id: str) -> set[int]:
+        """Из переданных кандидатов — сделки, занятые ДРУГИМИ записями календаря.
+
+        Занятость — по номеру сделки, не по телефону записи (задача 6, ТЗ
+        2026-09-22): один и тот же человек с двумя номерами не должен
+        выглядеть для робота как два разных клиента.
 
         Заказы бота здесь намеренно не учитываются: заказ из бота и запись
         календаря — обычно один и тот же заказ, и привязка к одной сделке
         как раз правильна.
         """
+        wanted = set(lead_ids)
         taken: set[int] = set()
         for link in self.links.values():
-            if link.phone10 != phone10 or link.event_id == exclude_event_id:
+            if link.event_id == exclude_event_id:
                 continue
-            taken.update(lead for lead in (link.real_lead_id, link.primary_lead_id) if lead)
+            taken.update(lead for lead in (link.real_lead_id, link.primary_lead_id)
+                         if lead and lead in wanted)
         return taken
 
     async def pending(self) -> list[CalendarLink]:
@@ -210,8 +218,9 @@ class PgCalendarStore:
             self._pool, event_id, action=action, dry_run=dry_run, entity=entity,
             amo_id=amo_id, payload=payload, **fields)
 
-    async def taken_leads(self, phone10: str, exclude_event_id: str) -> set[int]:
-        return await db.fetch_calendar_taken_leads(self._pool, phone10, exclude_event_id)
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_event_id: str) -> set[int]:
+        return await db.fetch_calendar_taken_leads(self._pool, lead_ids, exclude_event_id)
 
     async def pending(self) -> list[CalendarLink]:
         return await db.fetch_pending_calendar_links(self._pool, ACTIVE_STATUSES)

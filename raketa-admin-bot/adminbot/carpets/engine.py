@@ -133,7 +133,8 @@ class CarpetEngine:
     async def _decide(self, row: CarpetRow, link: CarpetLink) -> CarpetLink:
         raw_leads = await self.amo.find_leads_by_phone(row.phone10)
         candidates = [self._to_carpet_lead(lead) for lead in raw_leads]
-        taken = await self.store.taken_leads(row.phone10, row.partner_id)
+        taken = await self.store.taken_leads(
+            [info.lead_id for info in candidates], exclude_partner_id=row.partner_id)
 
         decision = match_carpet(row, candidates, taken_lead_ids=taken)
         log.info("Ковры, заказ партнёра №%s (%s): решение — %s",

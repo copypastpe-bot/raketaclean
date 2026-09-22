@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Optional, Protocol
+from typing import Any, Collection, Optional, Protocol
 
 import asyncpg
 
@@ -36,7 +36,8 @@ class LinkStore(Protocol):
                              payload: Optional[Any] = None,
                              **fields: Any) -> Optional[AmoLink]: ...
 
-    async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]: ...
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_order_id: int) -> set[int]: ...
 
 
 class MemoryLinkStore:
@@ -95,12 +96,15 @@ class MemoryLinkStore:
                            amo_id=amo_id, payload=payload)
         return updated
 
-    async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]:
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_order_id: int) -> set[int]:
+        wanted = set(lead_ids)
         taken: set[int] = set()
         for link in self.links.values():
-            if link.phone10 != phone10 or link.order_id == exclude_order_id:
+            if link.order_id == exclude_order_id:
                 continue
-            taken.update(value for value in (link.primary_lead_id, link.real_lead_id) if value)
+            taken.update(value for value in (link.primary_lead_id, link.real_lead_id)
+                         if value and value in wanted)
         return taken
 
 
@@ -145,8 +149,9 @@ class PgLinkStore:
             action=action, dry_run=dry_run, entity=entity, amo_id=amo_id,
             payload=payload, **fields)
 
-    async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]:
-        return await db.fetch_taken_lead_ids(self._pool, phone10, exclude_order_id,
+    async def taken_leads(self, lead_ids: Collection[int], *,
+                          exclude_order_id: int) -> set[int]:
+        return await db.fetch_taken_lead_ids(self._pool, lead_ids, exclude_order_id,
                                              table=self._links)
 
 

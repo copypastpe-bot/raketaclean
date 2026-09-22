@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Optional, Sequence
+from typing import Any, Collection, Optional, Sequence
 
 import asyncpg
 
@@ -491,40 +491,51 @@ def order_alive_clause(table: str) -> str:
     return "EXISTS (SELECT 1 FROM public.orders po WHERE po.id = order_id)"
 
 
-async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, phone10: str,
+async def fetch_taken_lead_ids(own_pool: asyncpg.Pool, lead_ids: Collection[int],
                                exclude_order_id: int,
                                *, table: str = LINKS_TABLE) -> set[int]:
-    """Сделки, уже закреплённые за другими работами этого клиента.
+    """Из переданных кандидатов — те, что уже закреплены за другими работами.
 
     Одна сделка не может закрывать две работы: у клиента бывает несколько работ
-    подряд, и каждой полагается своя сделка.
+    подряд (и не один номер телефона — задача 6, ТЗ 2026-09-22), и каждой
+    полагается своя сделка. Занятость смотрим по номеру сделки, не по телефону:
+    так один человек с двумя номерами не выглядит для робота двумя разными
+    клиентами.
 
     Смотрим ОБЕ таблицы связок. Уборка и химчистка одному клиенту в один день —
     это две сделки (памятка владельца 2026-09-02), и сделку, занятую химчисткой,
     уборка брать не должна, и наоборот. Номер работы исключается только в своей
     таблице: в чужой такой же номер — совсем другая работа.
 
-    Связка удалённого заказа сделку не держит (задача 6, `order_alive_clause`):
-    иначе повторное проведение того же клиента находило бы сделку «занятой»
-    призраком и заводило бы в CRM дубль вместо того, чтобы подхватить старую.
+    Связка удалённого заказа сделку не держит (задача 6 ТЗ 2026-09-17,
+    `order_alive_clause`): иначе повторное проведение того же клиента находило
+    бы сделку «занятой» призраком и заводило бы в CRM дубль вместо того, чтобы
+    подхватить старую.
     """
+    if not lead_ids:
+        return set()
+    wanted = set(lead_ids)
     other = CLEANING_LINKS_TABLE if table == LINKS_TABLE else LINKS_TABLE
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
             SELECT primary_lead_id, real_lead_id
             FROM {table}
-            WHERE phone10 = $1 AND order_id <> $2 AND {order_alive_clause(table)}
+            WHERE order_id <> $2 AND {order_alive_clause(table)}
+              AND (primary_lead_id = ANY($1::bigint[]) OR real_lead_id = ANY($1::bigint[]))
             UNION
             SELECT primary_lead_id, real_lead_id
             FROM {other}
-            WHERE phone10 = $1 AND {order_alive_clause(other)}
+            WHERE {order_alive_clause(other)}
+              AND (primary_lead_id = ANY($1::bigint[]) OR real_lead_id = ANY($1::bigint[]))
             """,
-            phone10, exclude_order_id,
+            list(wanted), exclude_order_id,
         )
     taken: set[int] = set()
     for row in rows:
-        taken.update(value for value in (row["primary_lead_id"], row["real_lead_id"]) if value)
+        for value in (row["primary_lead_id"], row["real_lead_id"]):
+            if value and value in wanted:
+                taken.add(value)
     return taken
 
 
@@ -815,16 +826,22 @@ async def update_carpet_link_and_log(
     return _carpet_from_row(row)
 
 
-async def fetch_carpet_taken_leads(own_pool: asyncpg.Pool, phone10: str,
+async def fetch_carpet_taken_leads(own_pool: asyncpg.Pool, lead_ids: Collection[int],
                                    exclude_partner_id: int) -> set[int]:
-    """Ковровые сделки, уже закреплённые за другими заказами того же клиента."""
+    """Из переданных кандидатов — ковровые сделки, занятые другими заказами.
+
+    Занятость — по номеру сделки, не по телефону (задача 6, ТЗ 2026-09-22):
+    один клиент с двумя номерами не должен выглядеть как два разных клиента.
+    """
+    if not lead_ids:
+        return set()
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT lead_id FROM adminbot.carpet_links
-            WHERE phone10 = $1 AND partner_id <> $2 AND lead_id IS NOT NULL
+            WHERE partner_id <> $2 AND lead_id = ANY($1::bigint[])
             """,
-            phone10, exclude_partner_id,
+            list(lead_ids), exclude_partner_id,
         )
     return {row["lead_id"] for row in rows}
 
@@ -1163,24 +1180,34 @@ async def count_calendar_owner_handled(own_pool: asyncpg.Pool, since: datetime) 
         )
 
 
-async def fetch_calendar_taken_leads(own_pool: asyncpg.Pool, phone10: str,
+async def fetch_calendar_taken_leads(own_pool: asyncpg.Pool, lead_ids: Collection[int],
                                      exclude_event_id: str) -> set[int]:
-    """Сделки, уже закреплённые за ДРУГИМИ записями календаря того же клиента.
+    """Из переданных кандидатов — сделки, закреплённые за ДРУГИМИ записями календаря.
+
+    Занятость — по номеру сделки, не по телефону записи (задача 6, ТЗ 2026-09-22):
+    один и тот же человек с двумя номерами сегодня не должен выглядеть для
+    робота как два разных клиента.
 
     Заказы бота здесь не учитываются намеренно: запись календаря и заказ из бота —
     обычно один и тот же заказ, и общая сделка у них правильная.
     """
+    if not lead_ids:
+        return set()
+    wanted = set(lead_ids)
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT real_lead_id, primary_lead_id FROM adminbot.gcal_events
-            WHERE phone10 = $1 AND event_id <> $2
+            WHERE event_id <> $2
+              AND (real_lead_id = ANY($1::bigint[]) OR primary_lead_id = ANY($1::bigint[]))
             """,
-            phone10, exclude_event_id,
+            list(wanted), exclude_event_id,
         )
     taken: set[int] = set()
     for row in rows:
-        taken.update(lead for lead in (row["real_lead_id"], row["primary_lead_id"]) if lead)
+        for lead in (row["real_lead_id"], row["primary_lead_id"]):
+            if lead and lead in wanted:
+                taken.add(lead)
     return taken
 
 
