@@ -18,7 +18,7 @@ import pytest
 
 from adminbot.amo import ids
 from adminbot.amo.fields import enum_field
-from adminbot.gcal.engine import CANCEL_TASK_RESULT, CalendarEngine
+from adminbot.gcal.engine import CANCEL_TASK_RESULT, NO_REALIZATION_REASON, CalendarEngine
 from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.store import MemoryCalendarStore
 from adminbot.models import CalendarLink
@@ -431,6 +431,75 @@ async def test_deal_closed_by_owner_before_the_answer(amo):
 
     assert link.status == "cancelled"
     assert amo.calls_of("move_lead") == []
+
+
+# --- задача 4 ТЗ 2026-09-22: удаление закрывает только дочку воронки 2 ---
+
+
+async def test_cancellation_without_a_child_never_touches_the_primary_lead(amo):
+    """Дочки нет и по примечанию не нашлась — закрывать нечего.
+
+    Раньше движок в этом случае предлагал закрыть `primary_lead_id` (лид
+    воронки 1) — решение владельца 5 это прямо запрещает: лид воронки 1 робот
+    не трогает никогда, даже когда дочки нет.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", primary_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    # Карточка с «Закрыть сделку» ни разу не появилась — кликнуть нечего было.
+    assert link.status == "cancelled"
+    assert link.skip_reason == NO_REALIZATION_REASON
+    assert amo.calls_of("move_lead") == []
+    assert amo.calls_of("get_lead") == []                       # лид воронки 1 не спрашивали
+    assert amo.leads[41400001]["status_id"] == ids.STATUS_SUCCESS
+
+
+async def test_cancellation_finds_the_child_by_note_even_with_the_switch_off(amo):
+    """Дочку при удалении ищут по примечанию всегда — решение координатора 22.09:
+    это чтение, а старое поведение «закрыть лид воронки 1» владелец запретил прямо.
+    Выключатель `child_by_note` здесь роли не играет.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    amo.add_lead(41400100, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.add_child_note(41400001, 41400100)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    assert engine.child_by_note is False                        # выключатель не включали
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", primary_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert link.real_lead_id == 41400100                        # дочку запомнили
+    assert link.status == "waiting_owner"
+    assert link.question["lead_id"] == 41400100
+    logged = [a for a in store.actions if a["action"] == "child_by_note"]
+    assert logged and logged[0]["payload"] == {"parent": 41400001, "child": 41400100}
+
+
+async def test_confirmed_cancellation_closes_only_the_child_with_the_order_date(amo):
+    """Закрытие по кнопке трогает только дочку; в комментарии — дата заказа."""
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    amo.add_lead(41400100, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757", order_date=ORDER_DAY)
+    await store.update("evt-1", status="closing",
+                       primary_lead_id=41400001, real_lead_id=41400100)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert amo.calls_of("move_lead") == [
+        (41400100, ids.PIPELINE_REALIZATION, ids.STATUS_CLOSED)]
+    assert amo.leads[41400001]["status_id"] == ids.STATUS_SUCCESS   # лид воронки 1 не тронут
+    _, note = amo.calls_of("add_note")[0]
+    assert f"Заказ был на {ORDER_DAY:%d.%m.%Y}." in note
+    assert link.status == "cancelled"
 
 
 async def test_editing_an_old_record_does_not_wake_it_up(amo):

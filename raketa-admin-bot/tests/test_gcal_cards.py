@@ -15,7 +15,8 @@ import pytest
 
 from adminbot.gcal.store import MemoryCalendarStore
 from adminbot.tg.calendar_cards import (
-    boat_card, calendar_question_card, cancellation_card, parse_calendar_choice,
+    boat_card, calendar_question_card, cancellation_card, no_realization_text,
+    parse_calendar_choice,
 )
 from adminbot.tg.bot import CalendarAnswers
 
@@ -47,6 +48,17 @@ def test_cancellation_card_says_what_happened():
     buttons = [b.text for row in keyboard.inline_keyboard for b in row]
     assert any("Закрыть" in b for b in buttons)
     assert any("Оставить" in b for b in buttons)
+
+
+def test_no_realization_text_reports_nothing_was_touched():
+    """Задача 4 ТЗ 2026-09-22: удаление без дочки — короткий отчёт, не тишина."""
+    link = a_link(status="cancelled", real_lead_id=None)
+
+    text = no_realization_text(link)
+
+    assert "+79605379757" in text
+    assert "27.08" in text
+    assert "ничего не трогал" in text.lower()
 
 
 def test_boat_card_offers_to_create():
