@@ -21,6 +21,7 @@ from adminbot.amo.fields import enum_field
 from adminbot.gcal.engine import CANCEL_TASK_RESULT, CalendarEngine
 from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.store import MemoryCalendarStore
+from adminbot.models import CalendarLink
 from tests.fakes import FakeAmo
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -224,6 +225,36 @@ async def test_missing_salesbot_deal_asks_the_owner(amo):
 
     engine.now = lambda: NOW + timedelta(minutes=45)
     link = await engine.process(an_order())
+
+    assert link.status == "waiting_owner"
+    assert link.question["reason"] == "сейлзбот не создал автосделку"
+
+
+async def test_wait_salesbot_timer_counts_from_move_primary_success_not_updated_at(amo):
+    """Дефект 22.09 (задача 2 ТЗ `order-chain`): `_run_checklist` перед каждым
+    `StepResult(wait=True)` зовёт `store.update(status="waiting_salesbot")` —
+    это двигает `updated_at`, даже когда статус не поменялся. Считать ожидание
+    от него нельзя: `updated_at` обнуляется на каждом опросе, и вопрос
+    владельцу не пришёл бы никогда. Отсчёт — от отметки шага
+    `move_primary_success` в чек-листе, а `updated_at` — недавний (как будто
+    только что «двинут» проходом).
+    """
+    order = an_order()
+    moved_at = NOW - timedelta(minutes=20)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    store.links[order.event_id] = CalendarLink(
+        event_id=order.event_id, kind=order.kind.value, status="waiting_salesbot",
+        phone10=order.phone10, order_date=order.order_date, client_name=order.client_name,
+        district=order.district, services=tuple(order.services),
+        event_data=order.to_dict(), path="B", primary_lead_id=41400099,
+        checklist={"fill_primary": moved_at.isoformat(),
+                  "move_primary_success": moved_at.isoformat()},
+        created_at=moved_at, updated_at=NOW - timedelta(minutes=1),
+    )
+    engine = CalendarEngine(amo=amo, store=store, dry_run=True,
+                            salesbot_wait_sec=600, now=lambda: NOW)
+
+    link = await engine.process(order)
 
     assert link.status == "waiting_owner"
     assert link.question["reason"] == "сейлзбот не создал автосделку"

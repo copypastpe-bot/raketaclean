@@ -40,6 +40,7 @@ from adminbot.gcal.store import CalendarStore
 from adminbot.models import CalendarLink
 from adminbot.phone import mask, normalize_phone
 from adminbot.sync.matcher import LeadInfo
+from adminbot.sync.waiting import waited_since
 
 log = logging.getLogger(__name__)
 
@@ -491,7 +492,11 @@ class CalendarEngine:
                                             status="in_progress")
                     return StepResult()
 
-        waited = (self.now() - _as_msk(link.updated_at)).total_seconds()
+        # Считаем от отметки «передано в работу», а не от updated_at: его
+        # двигает сам этот шаг на каждом проходе (задача 2 ТЗ 22.09).
+        waited = waited_since(link.checklist, "move_primary_success", self.now())
+        if waited is None:
+            waited = (self.now() - _as_msk(link.created_at)).total_seconds()
         if waited > self.salesbot_wait_sec:
             await self.store.log(event.event_id, "salesbot_timeout", dry_run=self.dry_run,
                                  payload={"waited_sec": int(waited)})
