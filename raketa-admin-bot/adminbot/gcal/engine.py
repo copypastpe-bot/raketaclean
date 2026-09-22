@@ -88,6 +88,11 @@ FINAL_AFTER_MARK: dict[str, str] = {
 # висящая задача по отменённому заказу требует внимания зря.
 CANCEL_TASK_RESULT = "🤖 Заказ отменён: запись удалена из календаря"
 
+# Удаление записи, а дочки воронки 2 нет и по примечанию не нашлась (задача 4
+# ТЗ 2026-09-22): закрывать нечего, а лид воронки 1 робот не закрывает никогда —
+# это решение владельца 5, а не выбор робота. Owner получает короткий отчёт.
+NO_REALIZATION_REASON = "сделки реализации нет, в CRM ничего не трогал"
+
 
 def _hands_off(link: CalendarLink) -> bool:
     """Робот в эту запись не лезет — так решил владелец или так вышло само."""
@@ -262,8 +267,19 @@ class CalendarEngine:
                                        status="skipped", skip_reason=reason)
 
     async def _close_deal(self, link: CalendarLink) -> CalendarLink:
-        """Закрыть сделку как несостоявшуюся — по прямому подтверждению владельца."""
-        lead_id = link.real_lead_id or link.primary_lead_id
+        """Закрыть сделку как несостоявшуюся — по прямому подтверждению владельца.
+
+        Закрываем только дочку воронки 2 — никогда лид воронки 1 (задача 4 ТЗ
+        2026-09-22, решение владельца 5): раньше при неизвестной дочке сюда
+        подставлялся `primary_lead_id`, и робот закрывал не ту сделку. До этого
+        места движок в норме доходит только с уже известной дочкой —
+        `_handle_cancelled` спрашивает владельца, только когда она есть;
+        `real_lead_id` пуст — отступаем молча, ничего не трогая.
+        """
+        lead_id = link.real_lead_id
+        if lead_id is None:
+            return await self.store.update(link.event_id, status="cancelled",
+                                           skip_reason=NO_REALIZATION_REASON)
         lead = await self._get_lead(lead_id)
         pipeline_id = int((lead or {}).get("pipeline_id") or ids.PIPELINE_REALIZATION)
 
@@ -300,9 +316,12 @@ class CalendarEngine:
                              entity="lead", amo_id=lead_id,
                              payload={"status_id": ids.STATUS_CLOSED})
         await self.amo.move_lead(lead_id, pipeline_id, ids.STATUS_CLOSED)
+        # Дата заказа — из записи (задача 4 ТЗ 2026-09-22): без неё в сделке не
+        # видно, о каком именно дне речь, если у клиента заказов было несколько.
+        order_line = f" Заказ был на {link.order_date:%d.%m.%Y}." if link.order_date else ""
         await self.amo.add_note(
             lead_id,
-            "🤖 Заказ отменён: запись удалена из календаря. "
+            f"🤖 Заказ отменён: запись удалена из календаря.{order_line} "
             "Закрыто по подтверждению владельца. "
             f"Закрыто задач: {closed_tasks}. {reason_note}")
         return await self.store.update(link.event_id, status="cancelled",
@@ -344,11 +363,25 @@ class CalendarEngine:
         Сделку робот сам не закрывает (решение владельца 2): удаление бывает и
         переносом, и случайностью, а закрытая сделка портит статистику. Спрашиваем
         только если есть что закрывать — иначе просто отмечаем отмену.
+
+        Сделка для вопроса — только дочка воронки 2, лид воронки 1 робот не
+        трогает никогда, даже когда дочки нет (задача 4 ТЗ 2026-09-22, решение
+        владельца 5). Дочку по примечанию сейлзбота ищем всегда, независимо от
+        выключателя `child_by_note`: здесь это чтение, а не решение, и старое
+        поведение — закрыть лид воронки 1 — владелец запретил прямо.
         """
-        lead_id = link.real_lead_id or link.primary_lead_id
+        lead_id = link.real_lead_id
+        if lead_id is None and link.primary_lead_id is not None:
+            found = await self.amo.get_child_lead_id(link.primary_lead_id)
+            if found is not None:
+                lead_id = found
+                link = await self.store.update(link.event_id, real_lead_id=found) or link
+                await self.store.log(link.event_id, "child_by_note", dry_run=self.dry_run,
+                                     payload={"parent": link.primary_lead_id, "child": found})
+
         if lead_id is None:
             return await self.store.update(link.event_id, status="cancelled",
-                                           skip_reason="запись удалена, сделки не было")
+                                           skip_reason=NO_REALIZATION_REASON)
 
         lead = await self._get_lead(lead_id)
         if lead is not None and int(lead.get("status_id") or 0) in ids.STATUSES_FINAL:
