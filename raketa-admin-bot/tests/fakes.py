@@ -44,6 +44,10 @@ class FakeAmo:
         self.child_notes: dict[int, list[tuple[int, int]]] = {}
         self.calls: list[tuple[str, Any]] = []
         self.fail_on: Optional[str] = None       # имя метода, который должен упасть
+        # Задача 3 ТЗ 2026-09-22: правка обеих сделок — нужен способ уронить
+        # update_lead только для одной из них (лида воронки 1), не для другой.
+        # None — падает на любом lead_id, как раньше.
+        self.fail_lead_id: Optional[int] = None
         self._next_id = 90000
 
     # --- чтение ---
@@ -82,7 +86,7 @@ class FakeAmo:
         payload = {key: value for key, value in fields.items() if value is not None}
         if not payload:
             return None
-        self._maybe_fail("update_lead")
+        self._maybe_fail("update_lead", lead_id)
         self.calls.append(("update_lead", (lead_id, payload)))
         if not self.dry_run:
             lead = self.leads.setdefault(lead_id, {"id": lead_id})
@@ -175,9 +179,12 @@ class FakeAmo:
         self._next_id += 1
         return self._next_id
 
-    def _maybe_fail(self, name: str) -> None:
-        if self.fail_on == name:
-            raise AmoError(500, f"поддельный сбой в {name}")
+    def _maybe_fail(self, name: str, lead_id: Optional[int] = None) -> None:
+        if self.fail_on != name:
+            return
+        if self.fail_lead_id is not None and lead_id != self.fail_lead_id:
+            return                          # эта сделка падать не должна
+        raise AmoError(500, f"поддельный сбой в {name}")
 
 
 class FakeStore:

@@ -18,7 +18,9 @@ import pytest
 
 from adminbot.amo import ids
 from adminbot.amo.fields import enum_field
-from adminbot.gcal.engine import CANCEL_TASK_RESULT, NO_REALIZATION_REASON, CalendarEngine
+from adminbot.gcal.engine import (
+    CANCEL_TASK_RESULT, NO_REALIZATION_REASON, PRIMARY_LEAD_EDIT_FAILED_NOTE, CalendarEngine,
+)
 from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.store import MemoryCalendarStore
 from adminbot.models import CalendarLink
@@ -952,6 +954,72 @@ async def test_edited_record_updates_the_deal(amo):
     assert "два кресла" in only_value(fields[ids.FIELD_COMMENT])
     assert ids.FIELD_ORDER_DATETIME not in fields     # дату не правим
     assert changed.status == "done"
+
+
+# --- задача 3 ТЗ 2026-09-22: правка записи обновляет обе сделки ---
+
+async def _done_link(store: MemoryCalendarStore, order, *, primary_lead_id=None,
+                     real_lead_id=None) -> None:
+    """Запись уже проведена по обеим (или одной) сделкам — готова к правке."""
+    await store.create(order.event_id, kind=order.kind.value, phone10=order.phone10)
+    await store.update(order.event_id, status="done", event_data=order.to_dict(),
+                       primary_lead_id=primary_lead_id, real_lead_id=real_lead_id)
+
+
+async def test_edit_updates_the_primary_lead_before_the_child(amo):
+    """Обе сделки заведены — правка идёт сначала в лид воронки 1, потом в дочку."""
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    amo.add_lead(41400002, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    await _done_link(store, an_order(), primary_lead_id=41400001, real_lead_id=41400002)
+    engine = build(amo, store=store)
+
+    link = await engine.process(an_order(address="Другая улица, д 1"))
+
+    updates = amo.calls_of("update_lead")
+    assert [lead_id for lead_id, _ in updates] == [41400001, 41400002]
+    for _, payload in updates:
+        fields = {field["field_id"]: field for field in payload["custom_fields"]}
+        assert only_value(fields[ids.FIELD_ADDRESS]) == "Другая улица, д 1"
+    assert link.status == "done"
+    assert engine.last_edits == ("адрес",)
+
+
+async def test_edit_with_only_a_primary_lead_updates_it_alone(amo):
+    """Дочки в записи ещё нет — правит только лид воронки 1, одним вызовом."""
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    await _done_link(store, an_order(), primary_lead_id=41400001)
+    engine = build(amo, store=store)
+
+    link = await engine.process(an_order(address="Другая улица, д 1"))
+
+    updates = amo.calls_of("update_lead")
+    assert [lead_id for lead_id, _ in updates] == [41400001]
+    assert link.status == "done"
+
+
+async def test_primary_lead_failure_does_not_cancel_the_child_update(amo):
+    """AmoError на лиде воронки 1 не отменяет правку дочки.
+
+    Лид воронки 1 к этому моменту закрыт как успешный, и амо может не принять
+    правку закрытого лида (предположение, проверить на репетиции) — сбой
+    логируем и продолжаем: дочка важнее для владельца.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    amo.add_lead(41400002, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.fail_on = "update_lead"
+    amo.fail_lead_id = 41400001
+    store = MemoryCalendarStore(now=lambda: NOW)
+    await _done_link(store, an_order(), primary_lead_id=41400001, real_lead_id=41400002)
+    engine = build(amo, store=store)
+
+    link = await engine.process(an_order(address="Другая улица, д 1"))
+
+    updates = amo.calls_of("update_lead")
+    assert [lead_id for lead_id, _ in updates] == [41400002]   # дочка обновлена
+    assert link.last_error and "AmoError" in link.last_error
+    assert PRIMARY_LEAD_EDIT_FAILED_NOTE in engine.last_edits
 
 
 async def test_untouched_record_is_not_rewritten(amo):

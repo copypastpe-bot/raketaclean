@@ -117,6 +117,12 @@ CHANGEABLE_FIELDS: tuple[tuple[str, str], ...] = (
     ("order_date", "дата"),
 )
 
+# Отчёт владельцу о правке (задача 3 ТЗ 2026-09-22): если амо не приняла
+# правку лида воронки 1 (закрытого как успешный), дочку правим всё равно, а
+# эту строку добавляем к перечню того, что поменялось, — через тот же
+# `self.last_edits`, других путей уведомления не заводим.
+PRIMARY_LEAD_EDIT_FAILED_NOTE = "лид воронки 1 не обновился — ошибка амо"
+
 
 # Виды записей, по которым робот молчит, и почему.
 SILENT_KINDS: dict[EventKind, str] = {
@@ -246,6 +252,10 @@ class CalendarEngine:
             if link.status == "done" and not _hands_off(link):
                 # Запись поправили после проведения — доносим правку до сделки.
                 await self._apply_edits(event, link, before)
+                # Сбой на лиде воронки 1 внутри `_apply_edits` пишет `last_error`
+                # напрямую в хранилище — перечитываем, иначе вызывающий код
+                # его не увидит (задача 3 ТЗ 2026-09-22).
+                link = await self.store.get(event.event_id) or link
 
         if link.status in ("done", "waiting_owner", "cancelled"):
             return link                        # закончили или ждём ответа владельца
@@ -792,13 +802,24 @@ class CalendarEngine:
 
     async def _apply_edits(self, event: ParsedEvent, link: CalendarLink,
                            before: CalendarLink) -> None:
-        """Подтянуть правку записи в уже заведённую сделку.
+        """Подтянуть правку записи в уже заведённые сделки.
 
         Сравниваем с тем, что робот помнил о записи: так правка видна, даже
         если в самой сделке владелец успел что-то поменять.
+
+        Правим сначала лид воронки 1 (если есть), потом дочку воронки 2
+        (если есть) — оба одним и тем же расчётом полей, но каждый по
+        своему свежему состоянию в амо (решение владельца 22.09, задача 3
+        ТЗ: «менеджер изменил запись → робот меняет сначала лид воронки 1,
+        потом дочку»). К этому моменту лид воронки 1 обычно уже закрыт как
+        успешный; принимает ли амо правку поля закрытого лида — предположение,
+        проверить на репетиции. Если не принимает, сбой не должен отменить
+        правку дочки: логируем его в `last_error` и одной строкой сообщаем
+        владельцу через тот же отчёт, а дочку всё равно правим.
         """
-        lead_id = link.real_lead_id or link.primary_lead_id
-        if lead_id is None:
+        lead_ids = [lead_id for lead_id in (link.primary_lead_id, link.real_lead_id)
+                   if lead_id is not None]
+        if not lead_ids:
             return
 
         previous = before.event_data or {}
@@ -810,16 +831,35 @@ class CalendarEngine:
         if not changed:
             return
 
-        existing = await self._get_lead(lead_id)
-        fields = self._lead_fields(event, existing)
-        if not fields:
-            return
+        reported = list(changed)
+        attempted = False
+        primary_failed = False
+        for lead_id in lead_ids:
+            existing = await self._get_lead(lead_id)
+            fields = self._lead_fields(event, existing)
+            if not fields:
+                continue
+            attempted = True
+            try:
+                log.info("Календарь, запись %s: запись изменилась (%s) — обновляю сделку %s",
+                         event.event_id, ", ".join(changed), lead_id)
+                await self._write("update_lead", event, lead_id,
+                                  self.amo.update_lead(lead_id, custom_fields=fields))
+            except AmoError as exc:
+                if lead_id != link.primary_lead_id:
+                    raise                        # дочка не наша особая забота — как раньше
+                primary_failed = True
+                log.warning(
+                    "Календарь, запись %s: правка лида воронки 1 %s не задалась — %s",
+                    event.event_id, lead_id, exc)
+                await self.store.update(
+                    event.event_id, last_error=f"{type(exc).__name__}: {exc}")
 
-        log.info("Календарь, запись %s: запись изменилась (%s) — обновляю сделку %s",
-                 event.event_id, ", ".join(changed), lead_id)
-        await self._write("update_lead", event, lead_id,
-                          self.amo.update_lead(lead_id, custom_fields=fields))
-        self.last_edits = tuple(changed)       # наблюдателю — о чём сказать владельцу
+        if not attempted:
+            return
+        if primary_failed:
+            reported.append(PRIMARY_LEAD_EDIT_FAILED_NOTE)
+        self.last_edits = tuple(reported)       # наблюдателю — о чём сказать владельцу
 
     async def _ask_owner(self, link: CalendarLink, reason: str,
                          payload: Optional[dict] = None) -> CalendarLink:
