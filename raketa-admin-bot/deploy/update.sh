@@ -9,6 +9,9 @@
 #   sudo raketa-admin-bot-update --report      что робот записал (ничего не меняет)
 #   sudo raketa-admin-bot-update --address-reminder-on|--address-reminder-off
 #                                             напоминания «сделка без адреса»
+#   sudo raketa-admin-bot-update --child-by-note-on|--child-by-note-off
+#                                             дочка воронки 2 по примечанию сейлзбота
+#                                             (откат к «первая свободная», если амо поменяет формат)
 #   sudo raketa-admin-bot-update --deletions-on --deletions-rehearsal   удаления заказов: репетиция
 #   sudo raketa-admin-bot-update --deletions-live                      удаления заказов: боевой режим
 #   sudo raketa-admin-bot-update --deletions-off                       удаления заказов: выключить
@@ -57,6 +60,7 @@ CARPETS_REMEMBER_SET=""
 CARPETS_REMEMBER_LIVE=""
 CLEANING=""
 ADDRESS_REMINDER=""
+CHILD_BY_NOTE=""
 DELETIONS=""
 DELETIONS_DRY=""
 CLEANING_DRY=""
@@ -103,6 +107,8 @@ for arg in "$@"; do
         --cleaning-on)        CLEANING=1 ;;
         --address-reminder-on)  ADDRESS_REMINDER=1 ;;
         --address-reminder-off) ADDRESS_REMINDER=0 ;;
+        --child-by-note-on)  CHILD_BY_NOTE=1 ;;
+        --child-by-note-off) CHILD_BY_NOTE=0 ;;
         --deletions-on)        DELETIONS=1 ;;
         --deletions-off)       DELETIONS=0 ;;
         --deletions-live)      DELETIONS_DRY=0 ;;
@@ -286,6 +292,7 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$CARPETS_DRY" ] && set_flag CARPETS_DRY_RUN "$CARPETS_DRY"
 [ -n "$CLEANING" ] && set_flag CLEANING_SYNC_ENABLED "$CLEANING"
 [ -n "$ADDRESS_REMINDER" ] && set_flag ADDRESS_REMINDER_ENABLED "$ADDRESS_REMINDER"
+[ -n "$CHILD_BY_NOTE" ] && set_flag AMO_CHILD_BY_NOTE "$CHILD_BY_NOTE"
 [ -n "$DELETIONS" ] && set_flag ORDER_DELETIONS_ENABLED "$DELETIONS"
 [ -n "$DELETIONS_DRY" ] && set_flag ORDER_DELETIONS_DRY_RUN "$DELETIONS_DRY"
 [ -n "$CLEANING_DRY" ] && set_flag CLEANING_SYNC_DRY_RUN "$CLEANING_DRY"
