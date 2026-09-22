@@ -502,6 +502,90 @@ async def test_confirmed_cancellation_closes_only_the_child_with_the_order_date(
     assert link.status == "cancelled"
 
 
+# --- ревью 22.09: надёжность поиска дочки при сбое амо ---
+
+
+async def test_cancellation_asks_the_owner_blind_when_the_note_lookup_fails(amo):
+    """CRM не ответила на поиск дочки — не падаем и не зависаем молча.
+
+    Раньше `AmoError` из `get_child_lead_id` наружу ничем не гасился: проход
+    наблюдателя падал, статус записи не менялся, а курсор синка всё равно
+    уходил вперёд — Google второй раз про удаление не сообщит, и запись
+    зависла бы навсегда. Вместо этого спрашиваем владельца вслепую.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    amo.fail_on = "get_child_lead_id"
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", primary_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert link.status == "waiting_owner"
+    assert link.question["child_lookup_failed"] is True
+    assert link.last_error and "AmoError" in link.last_error
+    assert link.real_lead_id is None
+    assert amo.calls_of("move_lead") == []
+    assert amo.leads[41400001]["status_id"] == ids.STATUS_SUCCESS    # лид воронки 1 не тронут
+
+
+async def test_close_deal_without_a_child_and_without_a_note_touches_nothing(amo):
+    """Старая запись: `closing` с `primary_lead_id`, без дочки, без примечания.
+
+    Такие записи остаются от кода до задачи 4 (или от сбоя амо на вопросе —
+    предыдущий тест): клик «Закрыть» не должен провалиться в лид воронки 1.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="closing", primary_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert amo.calls_of("move_lead") == []
+    assert link.status == "cancelled"
+    assert link.skip_reason == NO_REALIZATION_REASON
+    assert amo.leads[41400001]["status_id"] == ids.STATUS_SUCCESS
+
+
+async def test_close_deal_without_a_child_finds_it_by_note(amo):
+    """Тот же случай, но примечание есть — `_close_deal` находит дочку сама
+    через `_resolve_child` и закрывает именно её."""
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    amo.add_lead(41400100, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.add_child_note(41400001, 41400100)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="closing", primary_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert amo.calls_of("move_lead") == [
+        (41400100, ids.PIPELINE_REALIZATION, ids.STATUS_CLOSED)]
+    assert amo.leads[41400001]["status_id"] == ids.STATUS_SUCCESS
+    assert link.status == "cancelled"
+    assert link.real_lead_id == 41400100
+
+
+async def test_close_deal_amo_failure_keeps_closing_for_the_next_pass(amo):
+    """Сбой амо при закрытии не роняет проход и не сбрасывает решение
+    владельца: статус остаётся `closing`, следующий проход повторит его же."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.fail_on = "move_lead"
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="closing", real_lead_id=41400001)
+
+    link = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert link.status == "closing"
+    assert link.last_error and "AmoError" in link.last_error
+
+
 async def test_editing_an_old_record_does_not_wake_it_up(amo):
     """Правка записи, лежавшей в календаре до включения, не заводит сделку.
 

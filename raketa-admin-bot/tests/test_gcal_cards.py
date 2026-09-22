@@ -50,6 +50,23 @@ def test_cancellation_card_says_what_happened():
     assert any("Оставить" in b for b in buttons)
 
 
+def test_cancellation_card_hides_the_lead_when_the_child_lookup_failed():
+    """Ревью 22.09, задача 4: сбой амо на поиске дочки — карточка не должна
+    показывать номер лида воронки 1 как «сделку на закрытие»."""
+    link = a_link(real_lead_id=None,
+                  question={"reason": "заказ отменён — закрыть сделку?",
+                            "lead_id": None, "child_lookup_failed": True})
+
+    text, keyboard = cancellation_card(link)
+
+    assert "#41400001" not in text                     # лид воронки 1 не назван
+    assert "не нашёл" in text.lower()
+    assert "закрытии" in text.lower()
+    buttons = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert any("Закрыть" in b for b in buttons)
+    assert any("Оставить" in b for b in buttons)
+
+
 def test_no_realization_text_reports_nothing_was_touched():
     """Задача 4 ТЗ 2026-09-22: удаление без дочки — короткий отчёт, не тишина."""
     link = a_link(status="cancelled", real_lead_id=None)
