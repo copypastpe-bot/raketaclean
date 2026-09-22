@@ -117,11 +117,16 @@ CHANGEABLE_FIELDS: tuple[tuple[str, str], ...] = (
     ("order_date", "дата"),
 )
 
-# Отчёт владельцу о правке (задача 3 ТЗ 2026-09-22): если амо не приняла
-# правку лида воронки 1 (закрытого как успешный), дочку правим всё равно, а
-# эту строку добавляем к перечню того, что поменялось, — через тот же
-# `self.last_edits`, других путей уведомления не заводим.
+# Отчёт владельцу о правке (задача 3 ТЗ 2026-09-22, правка по ревью 22.09):
+# сбой на любой из двух сделок не должен ронять весь проход и не должен
+# отменять правку другой — обе строки добавляются к перечню того, что
+# поменялось, через тот же `self.last_edits`, других путей уведомления не
+# заводим. Раньше `AmoError` на дочке улетала наружу из `_apply_edits`
+# необработанной, а `_refresh` к этому моменту уже переписал `event_data` —
+# следующий проход не видел бы правку вовсе, и дочка молча оставалась со
+# старым адресом.
 PRIMARY_LEAD_EDIT_FAILED_NOTE = "лид воронки 1 не обновился — ошибка амо"
+CHILD_LEAD_EDIT_FAILED_NOTE = "сделка реализации не обновилась — ошибка амо"
 
 
 # Виды записей, по которым робот молчит, и почему.
@@ -252,7 +257,7 @@ class CalendarEngine:
             if link.status == "done" and not _hands_off(link):
                 # Запись поправили после проведения — доносим правку до сделки.
                 await self._apply_edits(event, link, before)
-                # Сбой на лиде воронки 1 внутри `_apply_edits` пишет `last_error`
+                # Сбой на любой из сделок внутри `_apply_edits` пишет `last_error`
                 # напрямую в хранилище — перечитываем, иначе вызывающий код
                 # его не увидит (задача 3 ТЗ 2026-09-22).
                 link = await self.store.get(event.event_id) or link
@@ -813,9 +818,13 @@ class CalendarEngine:
         ТЗ: «менеджер изменил запись → робот меняет сначала лид воронки 1,
         потом дочку»). К этому моменту лид воронки 1 обычно уже закрыт как
         успешный; принимает ли амо правку поля закрытого лида — предположение,
-        проверить на репетиции. Если не принимает, сбой не должен отменить
-        правку дочки: логируем его в `last_error` и одной строкой сообщаем
-        владельцу через тот же отчёт, а дочку всё равно правим.
+        проверить на репетиции.
+
+        Сбой на одной сделке не отменяет правку другой и не должен вылетать
+        наружу необработанным (правка по ревью 22.09): обе сделки
+        независимы, и упавшая — не повод молчать о второй или ронять весь
+        проход. Причины всех сбоев складываются в `last_error` одной
+        строкой, а в отчёт владельцу — по строке на каждую упавшую сделку.
         """
         lead_ids = [lead_id for lead_id in (link.primary_lead_id, link.real_lead_id)
                    if lead_id is not None]
@@ -833,32 +842,30 @@ class CalendarEngine:
 
         reported = list(changed)
         attempted = False
-        primary_failed = False
+        errors: list[str] = []
         for lead_id in lead_ids:
             existing = await self._get_lead(lead_id)
             fields = self._lead_fields(event, existing)
             if not fields:
                 continue
             attempted = True
+            note = (PRIMARY_LEAD_EDIT_FAILED_NOTE if lead_id == link.primary_lead_id
+                   else CHILD_LEAD_EDIT_FAILED_NOTE)
             try:
                 log.info("Календарь, запись %s: запись изменилась (%s) — обновляю сделку %s",
                          event.event_id, ", ".join(changed), lead_id)
                 await self._write("update_lead", event, lead_id,
                                   self.amo.update_lead(lead_id, custom_fields=fields))
             except AmoError as exc:
-                if lead_id != link.primary_lead_id:
-                    raise                        # дочка не наша особая забота — как раньше
-                primary_failed = True
-                log.warning(
-                    "Календарь, запись %s: правка лида воронки 1 %s не задалась — %s",
-                    event.event_id, lead_id, exc)
-                await self.store.update(
-                    event.event_id, last_error=f"{type(exc).__name__}: {exc}")
+                log.warning("Календарь, запись %s: правка сделки %s не задалась — %s",
+                            event.event_id, lead_id, exc)
+                errors.append(f"{type(exc).__name__}: {exc}")
+                reported.append(note)
 
         if not attempted:
             return
-        if primary_failed:
-            reported.append(PRIMARY_LEAD_EDIT_FAILED_NOTE)
+        if errors:
+            await self.store.update(event.event_id, last_error="; ".join(errors))
         self.last_edits = tuple(reported)       # наблюдателю — о чём сказать владельцу
 
     async def _ask_owner(self, link: CalendarLink, reason: str,

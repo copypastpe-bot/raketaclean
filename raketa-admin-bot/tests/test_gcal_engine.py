@@ -19,7 +19,8 @@ import pytest
 from adminbot.amo import ids
 from adminbot.amo.fields import enum_field
 from adminbot.gcal.engine import (
-    CANCEL_TASK_RESULT, NO_REALIZATION_REASON, PRIMARY_LEAD_EDIT_FAILED_NOTE, CalendarEngine,
+    CANCEL_TASK_RESULT, CHILD_LEAD_EDIT_FAILED_NOTE, NO_REALIZATION_REASON,
+    PRIMARY_LEAD_EDIT_FAILED_NOTE, CalendarEngine,
 )
 from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.store import MemoryCalendarStore
@@ -1020,6 +1021,47 @@ async def test_primary_lead_failure_does_not_cancel_the_child_update(amo):
     assert [lead_id for lead_id, _ in updates] == [41400002]   # дочка обновлена
     assert link.last_error and "AmoError" in link.last_error
     assert PRIMARY_LEAD_EDIT_FAILED_NOTE in engine.last_edits
+
+
+async def test_child_lead_failure_does_not_raise_and_primary_stays_updated(amo):
+    """Ревью 22.09: AmoError на дочке не должен вылетать наружу необработанным.
+
+    Раньше исключение с дочки улетало из `_apply_edits` без перехвата,
+    а `_refresh` к этому моменту уже переписал `event_data` — следующий
+    проход видел бы разбор без изменений и повтора записи в дочку не было
+    бы никогда. Лид воронки 1 при этом успел обновиться правильно.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    amo.add_lead(41400002, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.fail_on = "update_lead"
+    amo.fail_lead_id = 41400002
+    store = MemoryCalendarStore(now=lambda: NOW)
+    await _done_link(store, an_order(), primary_lead_id=41400001, real_lead_id=41400002)
+    engine = build(amo, store=store)
+
+    link = await engine.process(an_order(address="Другая улица, д 1"))   # не должно бросить
+
+    updates = amo.calls_of("update_lead")
+    assert [lead_id for lead_id, _ in updates] == [41400001]   # лид воронки 1 обновлён
+    assert link.last_error and "AmoError" in link.last_error
+    assert CHILD_LEAD_EDIT_FAILED_NOTE in engine.last_edits
+
+
+async def test_both_leads_failing_reports_both_causes_and_does_not_raise(amo):
+    """Упали обе сделки — обе причины в `last_error`, обе строки в отчёте."""
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.STATUS_SUCCESS)
+    amo.add_lead(41400002, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.fail_on = "update_lead"                 # fail_lead_id не задан — падают обе
+    store = MemoryCalendarStore(now=lambda: NOW)
+    await _done_link(store, an_order(), primary_lead_id=41400001, real_lead_id=41400002)
+    engine = build(amo, store=store)
+
+    link = await engine.process(an_order(address="Другая улица, д 1"))   # не должно бросить
+
+    assert amo.calls_of("update_lead") == []
+    assert link.last_error and link.last_error.count("AmoError") == 2
+    assert PRIMARY_LEAD_EDIT_FAILED_NOTE in engine.last_edits
+    assert CHILD_LEAD_EDIT_FAILED_NOTE in engine.last_edits
 
 
 async def test_untouched_record_is_not_rewritten(amo):
