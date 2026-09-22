@@ -209,14 +209,30 @@ class CalendarEngine:
         # Владелец нажал «Закрыть сделку»: закрываем её здесь, а не из Telegram —
         # так решение не потеряется, даже если робота перезапустят сразу после
         # нажатия, и все обращения к амо идут одним путём.
+        #
+        # Сбой амо здесь не переводит запись в `error` (ревью 22.09, задача 4):
+        # решение владельца — не робота, и следующий проход обязан повторить
+        # именно `closing`/`marking`, а не спросить заново или промолчать.
         if link.status == "closing":
-            return await self._close_deal(link)
+            try:
+                return await self._close_deal(link)
+            except AmoError as exc:
+                log.warning("Календарь, запись %s: закрытие сделки не задалось — %s",
+                            event.event_id, exc)
+                return await self.store.update(
+                    event.event_id, last_error=f"{type(exc).__name__}: {exc}")
 
         # Владелец нажал «✋ Сам разберусь» или «✋ Оставить как есть»: ставим
         # галочку в самой сделке. Отсюда, а не из Telegram, по той же причине,
         # что и закрытие: решение переживёт перезапуск робота.
         if link.status == "marking":
-            return await self._mark_owner_handles(link)
+            try:
+                return await self._mark_owner_handles(link)
+            except AmoError as exc:
+                log.warning("Календарь, запись %s: пометка «ведёт владелец» не задалась — %s",
+                            event.event_id, exc)
+                return await self.store.update(
+                    event.event_id, last_error=f"{type(exc).__name__}: {exc}")
 
         if event.kind is EventKind.CANCELLED:
             return await self._handle_cancelled(link)
@@ -266,16 +282,43 @@ class CalendarEngine:
         return await self.store.update(event.event_id, kind=event.kind.value,
                                        status="skipped", skip_reason=reason)
 
+    async def _resolve_child(self, link: CalendarLink) -> CalendarLink:
+        """Дочка воронки 2 для вопроса и закрытия (задача 4 ТЗ 2026-09-22).
+
+        `real_lead_id` уже известен — он и есть ответ, второй раз не ищем.
+        Иначе ищем по примечанию сейлзбота **всегда**, независимо от
+        выключателя `child_by_note`: здесь это чтение, а не решение, и старое
+        поведение — закрыть лид воронки 1 вместо неизвестной дочки — владелец
+        запретил прямо (решение владельца 5). Найденное запоминаем в связке и
+        в журнале действий (`child_by_note`), чтобы закрытие уже не искало
+        заново, даже если пройдёт отдельным вызовом.
+
+        `AmoError` наружу не гасим: вызывающая сторона (`_handle_cancelled`,
+        `_close_deal`) сама решает, что делать со сбоем амо — падать здесь
+        значило бы то же самое молчаливое зависание записи, из-за которого
+        эту функцию и выделили (ревью 22.09).
+        """
+        if link.real_lead_id is not None or link.primary_lead_id is None:
+            return link
+        found = await self.amo.get_child_lead_id(link.primary_lead_id)
+        if found is None:
+            return link
+        link = await self.store.update(link.event_id, real_lead_id=found) or link
+        await self.store.log(link.event_id, "child_by_note", dry_run=self.dry_run,
+                             payload={"parent": link.primary_lead_id, "child": found})
+        return link
+
     async def _close_deal(self, link: CalendarLink) -> CalendarLink:
         """Закрыть сделку как несостоявшуюся — по прямому подтверждению владельца.
 
         Закрываем только дочку воронки 2 — никогда лид воронки 1 (задача 4 ТЗ
-        2026-09-22, решение владельца 5): раньше при неизвестной дочке сюда
-        подставлялся `primary_lead_id`, и робот закрывал не ту сделку. До этого
-        места движок в норме доходит только с уже известной дочкой —
-        `_handle_cancelled` спрашивает владельца, только когда она есть;
-        `real_lead_id` пуст — отступаем молча, ничего не трогая.
+        2026-09-22, решение владельца 5). Дочку ищем тем же помощником, что и
+        вопрос владельцу: старая запись, застрявшая в `waiting_owner` только
+        с `primary_lead_id` (до задачи 4, либо после сбоя амо на вопросе —
+        см. `_handle_cancelled`), находит дочку здесь же, а не проваливается
+        в лид воронки 1.
         """
+        link = await self._resolve_child(link)
         lead_id = link.real_lead_id
         if lead_id is None:
             return await self.store.update(link.event_id, status="cancelled",
@@ -366,19 +409,25 @@ class CalendarEngine:
 
         Сделка для вопроса — только дочка воронки 2, лид воронки 1 робот не
         трогает никогда, даже когда дочки нет (задача 4 ТЗ 2026-09-22, решение
-        владельца 5). Дочку по примечанию сейлзбота ищем всегда, независимо от
-        выключателя `child_by_note`: здесь это чтение, а не решение, и старое
-        поведение — закрыть лид воронки 1 — владелец запретил прямо.
+        владельца 5). Дочку ищет общий помощник `_resolve_child`.
         """
-        lead_id = link.real_lead_id
-        if lead_id is None and link.primary_lead_id is not None:
-            found = await self.amo.get_child_lead_id(link.primary_lead_id)
-            if found is not None:
-                lead_id = found
-                link = await self.store.update(link.event_id, real_lead_id=found) or link
-                await self.store.log(link.event_id, "child_by_note", dry_run=self.dry_run,
-                                     payload={"parent": link.primary_lead_id, "child": found})
+        try:
+            link = await self._resolve_child(link)
+        except AmoError as exc:
+            # CRM не ответила на поиск дочки (ревью 22.09, задача 4): раньше
+            # исключение гасило наблюдатель, статус записи не менялся, курсор
+            # синка уходил вперёд, и запись зависала навсегда без ответа
+            # владельцу. Вместо этого спрашиваем вслепую — точную дочку найдёт
+            # тот же помощник в `_close_deal`, когда владелец подтвердит закрытие.
+            log.warning("Календарь, запись %s: поиск дочки по примечанию не удался — %s",
+                        link.event_id, exc)
+            link = await self._ask_owner(
+                link, "заказ отменён — закрыть сделку?",
+                payload={"lead_id": None, "child_lookup_failed": True})
+            return await self.store.update(
+                link.event_id, last_error=f"{type(exc).__name__}: {exc}") or link
 
+        lead_id = link.real_lead_id
         if lead_id is None:
             return await self.store.update(link.event_id, status="cancelled",
                                            skip_reason=NO_REALIZATION_REASON)

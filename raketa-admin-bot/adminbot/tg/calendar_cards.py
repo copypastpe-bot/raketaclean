@@ -59,11 +59,19 @@ def cancellation_card(link: Any, *, dry_run: bool = False) -> tuple[str, InlineK
     Робот сам сделку не закрывает: удаление бывает переносом и случайностью,
     а закрытая сделка портит статистику.
     """
-    lead_id = link.real_lead_id or link.primary_lead_id
+    question = link.question or {}
+    if question.get("child_lookup_failed"):
+        # CRM не ответила на поиск дочки (ревью 22.09, задача 4): номера ещё
+        # нет — показывать вместо него лид воронки 1 нельзя, это его и увело
+        # бы в закрытие, найдём дочку при подтверждении.
+        confirm_line = ("Сделку реализации не нашёл: CRM не ответила, "
+                        "попробую при закрытии. Закрыть заказ как несостоявшийся?")
+    else:
+        confirm_line = f"Сделка #{link.real_lead_id} — закрыть её как несостоявшуюся?"
     text = mark_rehearsal("\n".join([
         "❌ Заказ отменён — запись удалена из календаря",
         _client_line(link),
-        f"Сделка #{lead_id} — закрыть её как несостоявшуюся?",
+        confirm_line,
     ]), dry_run)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔒 Закрыть сделку", callback_data=_choice("close")),
