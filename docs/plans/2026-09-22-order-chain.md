@@ -195,7 +195,8 @@
 **Хранение:** в `adminbot.gcal_events` колонки `contact_mismatch text` (что разошлось,
 человеческим языком, без ПД в логах), `contact_reminder_count int not null default 0`,
 `contact_reminder_sent_at timestamptz`, `contact_reminder_muted boolean not null default false`.
-Миграция `015_order_chain.sql` (общая с задачей 8 и 11).
+Миграция `016_contact_mismatch.sql` (у каждой задачи своя миграция, чтобы задачи не
+делили один файл: 015 — задача 8, 016 — задача 5, 017 — задача 11).
 
 **Напоминание:** цикл по образцу `sync/address_reminder.py`. Рекомендация: вынести общее
 ядро (потолок, отметка времени, «замолчать сам») в `sync/reminder.py`, и оба напоминания —
@@ -251,7 +252,7 @@
 
 ## Задача 8. Окно для рабочего бота: представление `adminbot.calendar_jobs`
 
-Миграция `015_order_chain.sql`:
+Миграция `015_calendar_jobs.sql`:
 
 ```sql
 CREATE OR REPLACE VIEW adminbot.calendar_jobs AS
@@ -342,7 +343,7 @@ ADD COLUMN IF NOT EXISTS deal_lead_id bigint;`
 
 ## Задача 11. Робот доводит сделку после поступления денег
 
-**Связка** (`015_order_chain.sql`): `adminbot.amo_links` + `payment_pending boolean`,
+**Связка** (`017_wire_payment.sql`): `adminbot.amo_links` + `payment_pending boolean`,
 `payment_synced_at timestamptz`. В `sync/engine.py` там, где `_final_stage` даёт «Заказ
 выполнен» из-за ожидания оплаты (`_payment_pending`), ставить `payment_pending = true`.
 
@@ -414,7 +415,7 @@ order by o.id;
    робот с задачей 10 читает эти колонки при каждом проходе и без них упадёт на первом
    запросе. Колонки добавляются без перезапуска рабочего бота; код рабочего бота на
    этом шаге не обновляется.
-1. Админ-бот: `rsync` → `sudo raketa-admin-bot-update` (миграция 015 применится сама).
+1. Админ-бот: `rsync` → `sudo raketa-admin-bot-update` (миграции 015–017 применятся сами).
    Проверить `raketa-admin-bot.service` активен, журнал без ошибок.
 2. `--child-by-note-on`. Дождаться ближайшей новой записи календаря, убедиться по
    журналу действий, что дочка взята из примечания (действие `child_by_note`, задача 1).
