@@ -469,6 +469,55 @@ async def test_salesbot_deal_taken_by_another_record_is_not_stolen(amo):
     assert link.real_lead_id == 41400012
 
 
+async def test_child_by_note_picks_the_linked_deal_over_a_free_one(amo):
+    """Дефект 20.09 (Гагарина/Малая Ямская): при AMO_CHILD_BY_NOTE дочка берётся
+    строго по служебному примечанию сейлзбота — даже когда у клиента есть
+    другая свободная открытая сделка воронки 2, которую забрала бы старая
+    логика «первая свободная».
+    """
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    engine.child_by_note = True
+
+    link = await engine.process(an_order())
+    assert link.status == "waiting_salesbot"
+    primary_lead_id = link.primary_lead_id
+    calls_before = len(amo.calls_of("find_leads_by_phone"))
+
+    # Другая свободная открытая сделка того же клиента — случай Натальи 20.09.
+    amo.add_lead(41400099, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    # Настоящая дочка — та, что названа в примечании у лида первичной.
+    amo.add_lead(41400100, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.add_child_note(primary_lead_id, 41400100)
+
+    link = await engine.process(an_order())
+
+    assert link.real_lead_id == 41400100
+    assert link.status == "done"
+    # Захват больше не ищет сделки по телефону — только по примечанию.
+    assert len(amo.calls_of("find_leads_by_phone")) == calls_before
+    logged = [a for a in store.actions if a["action"] == "child_by_note"]
+    assert logged and logged[0]["payload"] == {"parent": primary_lead_id, "child": 41400100}
+
+
+async def test_child_by_note_waits_when_there_is_no_note_yet(amo):
+    """Примечания ещё нет — робот ждёт, а не хватает первую попавшуюся сделку."""
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    engine.child_by_note = True
+
+    link = await engine.process(an_order())
+    assert link.status == "waiting_salesbot"
+
+    # Сделка появилась, но примечания о ней в лиде первичной ещё нет.
+    amo.add_lead(41400101, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+
+    link = await engine.process(an_order())
+
+    assert link.status == "waiting_salesbot"
+    assert link.real_lead_id is None
+
+
 async def test_finished_record_keeps_its_details_fresh(amo):
     """Владелец поправил телефон в проведённой записи — память робота обновляется.
 

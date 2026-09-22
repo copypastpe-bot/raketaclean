@@ -285,6 +285,31 @@ class AmoClient:
         """Сделка целиком. None — если сделки нет (удалена)."""
         return await self.get(f"/api/v4/leads/{lead_id}", params={"with": "contacts"})
 
+    async def get_child_lead_id(self, lead_id: int) -> Optional[int]:
+        """Дочерняя сделка воронки 2, которую завёл сейлзбот — по его примечанию.
+
+        Формат проверен на проде 22.09 (пары 31665057→31665059, 31670915→31671401):
+        примечание `note_type=lead_auto_created`, `params={"type": "child",
+        "link": {"id": <дочка>, "type": 2}, "lead_type": "child",
+        "lead_id": <дочка>}`. Это точная связь «родитель → дочка» из самой амо,
+        а не «первая свободная сделка по телефону» — вторая ломается, когда
+        у клиента в один день две записи (задача 1 ТЗ 2026-09-22).
+        Примечаний может быть несколько (правки, повторные попытки сейлзбота) —
+        берём самое свежее по `created_at`. Нет такого примечания — сделки ещё нет.
+        """
+        notes = await self.get_all(f"/api/v4/leads/{lead_id}/notes", "notes")
+        candidates = [
+            note for note in notes
+            if note.get("note_type") == "lead_auto_created"
+            and isinstance(note.get("params"), dict)
+            and note["params"].get("type") == "child"
+            and note["params"].get("lead_id")
+        ]
+        if not candidates:
+            return None
+        latest = max(candidates, key=lambda note: note.get("created_at") or 0)
+        return int(latest["params"]["lead_id"])
+
     async def get_lead_tasks(self, lead_id: int) -> list[dict]:
         """Открытые задачи сделки — их робот закрывает при проведении."""
         return await self.get_all(

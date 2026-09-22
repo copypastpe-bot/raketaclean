@@ -43,8 +43,9 @@ def open_carpet_lead(amo: FakeAmo, lead_id=31516051, **extra) -> int:
     return lead_id
 
 
-def make_engine(amo, store, *, dry_run=False) -> CarpetEngine:
-    return CarpetEngine(amo=amo, store=store, dry_run=dry_run, now=lambda: NOW)
+def make_engine(amo, store, *, dry_run=False, child_by_note=False) -> CarpetEngine:
+    return CarpetEngine(amo=amo, store=store, dry_run=dry_run,
+                        child_by_note=child_by_note, now=lambda: NOW)
 
 
 def fields_of(amo: FakeAmo) -> dict[int, dict]:
@@ -257,6 +258,49 @@ async def test_primary_lead_is_pushed_to_partner_and_finished():
 
     assert link.status == "done" and link.lead_id == 31567900
     assert (31567900, ids.PIPELINE_CARPETS, ids.CARPET_STAGE_DELIVERED) in amo.calls_of("move_lead")
+
+
+async def test_child_by_note_picks_the_linked_deal_over_an_open_one():
+    """Дефект 20.09 (Гагарина/Малая Ямская): при AMO_CHILD_BY_NOTE робот не
+    забирает первую открытую ковровую сделку клиента — дочка берётся строго
+    по служебному примечанию сейлзбота у лида первичной.
+    """
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    amo.add_lead(31532745, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(datetime(2026, 8, 17, tzinfo=MOSCOW_TZ).timestamp()))
+    engine = make_engine(amo, store, child_by_note=True)
+    order = row(partner_id=44535, phone10="9202994600", added_date=date(2026, 8, 17))
+
+    await engine.process_row(order)
+
+    # Другая открытая ковровая сделка того же клиента — не наша.
+    open_carpet_lead(amo, 31567800)
+    # Настоящая дочка — по примечанию у лида первичной (31532745).
+    open_carpet_lead(amo, 31567900)
+    amo.add_child_note(31532745, 31567900)
+
+    link = await engine.process_row(order)
+
+    assert link.status == "done" and link.lead_id == 31567900
+    logged = store.actions_of("child_by_note")
+    assert logged and logged[0]["payload"] == {"parent": 31532745, "child": 31567900}
+
+
+async def test_child_by_note_waits_when_there_is_no_note_yet():
+    """Примечания ещё нет — робот ждёт, а не хватает первую открытую сделку."""
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    amo.add_lead(31532745, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(datetime(2026, 8, 17, tzinfo=MOSCOW_TZ).timestamp()))
+    engine = make_engine(amo, store, child_by_note=True)
+    order = row(partner_id=44535, phone10="9202994600", added_date=date(2026, 8, 17))
+
+    await engine.process_row(order)
+    open_carpet_lead(amo, 31567900)
+
+    link = await engine.process_row(order)
+
+    assert link.status == "waiting_salesbot"
+    assert link.lead_id is None
 
 
 async def test_silent_salesbot_becomes_a_question():

@@ -187,6 +187,11 @@ class Settings:
     # запас вдвое: лишний вопрос владельцу дороже лишнего ожидания.
     salesbot_wait_sec: int = 2400
     poll_interval_sec: int = 60
+    # Дочка воронки 2 берётся по служебному примечанию сейлзбота, а не как
+    # «первая свободная» сделка по телефону (задача 1 ТЗ 2026-09-22): общий
+    # выключатель для календаря, заказов и ковров. По умолчанию выключен —
+    # если амо поменяет формат примечания, откат одной командой.
+    amo_child_by_note: bool = False
 
     # Напоминание владельцу про сделку без адреса (задача 7): свой выключатель,
     # по умолчанию выключен — выкатывается последним, когда задачи 3-6 уже
@@ -310,6 +315,7 @@ class Settings:
             reconcile_hour_msk=_int("AMO_SYNC_RECONCILE_HOUR_MSK", 21),
             salesbot_wait_sec=_int("AMO_SYNC_SALESBOT_WAIT_SEC", 600),
             poll_interval_sec=_int("AMO_SYNC_POLL_INTERVAL_SEC", 60),
+            amo_child_by_note=_flag("AMO_CHILD_BY_NOTE", False),
             address_reminder_enabled=_flag("ADDRESS_REMINDER_ENABLED", False),
             address_reminder_poll_interval_sec=_int("ADDRESS_REMINDER_POLL_INTERVAL_SEC", 3600),
             order_deletions_enabled=_flag("ORDER_DELETIONS_ENABLED", False),

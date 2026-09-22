@@ -87,6 +87,7 @@ class Engine:
         specialists: SpecialistIndex,
         dry_run: bool = True,
         salesbot_wait_sec: int = DEFAULT_SALESBOT_WAIT_SEC,
+        child_by_note: bool = False,
         service_by_master: Optional[dict[str, int]] = None,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
@@ -97,6 +98,10 @@ class Engine:
                                   else service_by_master)
         self.dry_run = dry_run
         self.salesbot_wait_sec = salesbot_wait_sec
+        # Дочку воронки 2 берём по служебному примечанию сейлзбота, а не как
+        # «первую свободную» сделку по телефону (задача 1 ТЗ 2026-09-22).
+        # Выключено — старое поведение (AMO_CHILD_BY_NOTE, откат одной командой).
+        self.child_by_note = child_by_note
         self.now = now
         # Черновые заметки в пределах одного заказа: лиды-дубли и найденный контакт.
         # У каждого движка свои — в сервисе их работает несколько сразу (наблюдатель,
@@ -281,13 +286,28 @@ class Engine:
         return StepResult()
 
     async def _step_wait_salesbot(self, order: Order, link: AmoLink) -> StepResult:
-        """Ждём автосделку, которую создаёт сейлзбот после «Передано в работу»."""
-        for lead in await self.amo.find_leads_by_phone(order.phone10):
-            info = self._to_lead_info(lead)
-            if info.pipeline_id == ids.PIPELINE_REALIZATION and info.is_open:
-                await self.store.update(order.order_id, real_lead_id=info.lead_id,
+        """Ждём автосделку, которую создаёт сейлзбот после «Передано в работу».
+
+        `child_by_note` включён: дочка — та, что названа в служебном примечании
+        сейлзбота у лида воронки 1 (задача 1 ТЗ 2026-09-22), а не «первая
+        свободная» сделка по телефону.
+        """
+        if self.child_by_note:
+            child_id = await self.amo.get_child_lead_id(link.primary_lead_id)
+            if child_id is not None:
+                await self.store.update(order.order_id, real_lead_id=child_id,
                                         status="in_progress")
+                await self.store.log(order.order_id, "child_by_note", dry_run=self.dry_run,
+                                     payload={"parent": link.primary_lead_id,
+                                              "child": child_id})
                 return StepResult()
+        else:
+            for lead in await self.amo.find_leads_by_phone(order.phone10):
+                info = self._to_lead_info(lead)
+                if info.pipeline_id == ids.PIPELINE_REALIZATION and info.is_open:
+                    await self.store.update(order.order_id, real_lead_id=info.lead_id,
+                                            status="in_progress")
+                    return StepResult()
 
         waited = (self.now() - _as_msk(link.updated_at)).total_seconds()
         if waited > self.salesbot_wait_sec:

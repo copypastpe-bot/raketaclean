@@ -168,12 +168,17 @@ class CalendarEngine:
         store: CalendarStore,
         dry_run: bool = True,
         salesbot_wait_sec: int = DEFAULT_SALESBOT_WAIT_SEC,
+        child_by_note: bool = False,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
         self.amo = amo
         self.store = store
         self.dry_run = dry_run
         self.salesbot_wait_sec = salesbot_wait_sec
+        # Дочку воронки 2 берём по служебному примечанию сейлзбота, а не как
+        # «первую свободную» сделку по телефону (задача 1 ТЗ 2026-09-22).
+        # Выключено — старое поведение (AMO_CHILD_BY_NOTE, откат одной командой).
+        self.child_by_note = child_by_note
         self.now = now
         # У каждого движка свои черновики: в сервисе их работает несколько сразу
         # (наблюдатель, репетиция), и путать их расчёты нельзя.
@@ -435,20 +440,34 @@ class CalendarEngine:
     async def _step_wait_salesbot(self, event: ParsedEvent, link: CalendarLink) -> StepResult:
         """Дождаться автосделки, которую сейлзбот создаёт после «Передано в работу».
 
-        Берём только СВОБОДНУЮ сделку. У клиента бывает два заказа подряд, и
-        сделка предыдущей записи открыта и видна по тому же телефону: без этой
-        проверки второй заказ прицепился бы к чужой сделке, а при отмене робот
-        предложил бы закрыть не ту.
+        `child_by_note` включён: дочка — та, что названа в служебном примечании
+        сейлзбота у лида воронки 1 (задача 1 ТЗ 2026-09-22). Примечание не может
+        быть чужим, поэтому отсев «занята другой записью» здесь не нужен.
+
+        Выключено (старое поведение): берём первую СВОБОДНУЮ сделку по телефону.
+        У клиента бывает два заказа подряд, и сделка предыдущей записи открыта
+        и видна по тому же телефону: без отсева второй заказ прицепился бы
+        к чужой сделке, а при отмене робот предложил бы закрыть не ту.
         """
-        taken = await self.store.taken_leads(event.phone10,
-                                             exclude_event_id=event.event_id)
-        for lead in await self.amo.find_leads_by_phone(event.phone10):
-            info = _to_lead_info(lead)
-            if (info.pipeline_id == ids.PIPELINE_REALIZATION and info.is_open
-                    and info.lead_id not in taken):
-                await self.store.update(event.event_id, real_lead_id=info.lead_id,
+        if self.child_by_note:
+            child_id = await self.amo.get_child_lead_id(link.primary_lead_id)
+            if child_id is not None:
+                await self.store.update(event.event_id, real_lead_id=child_id,
                                         status="in_progress")
+                await self.store.log(event.event_id, "child_by_note", dry_run=self.dry_run,
+                                     payload={"parent": link.primary_lead_id,
+                                              "child": child_id})
                 return StepResult()
+        else:
+            taken = await self.store.taken_leads(event.phone10,
+                                                 exclude_event_id=event.event_id)
+            for lead in await self.amo.find_leads_by_phone(event.phone10):
+                info = _to_lead_info(lead)
+                if (info.pipeline_id == ids.PIPELINE_REALIZATION and info.is_open
+                        and info.lead_id not in taken):
+                    await self.store.update(event.event_id, real_lead_id=info.lead_id,
+                                            status="in_progress")
+                    return StepResult()
 
         waited = (self.now() - _as_msk(link.updated_at)).total_seconds()
         if waited > self.salesbot_wait_sec:

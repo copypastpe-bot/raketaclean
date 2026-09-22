@@ -249,6 +249,43 @@ async def test_get_lead_tasks_filters_by_lead(amo):
     assert query["filter[is_completed]"] == "0"   # закрытые задачи нас не интересуют
 
 
+async def test_get_child_lead_id_reads_latest_note(amo):
+    """Формат проверен на проде 22.09: params.type == 'child', берём params.lead_id."""
+    client, fake = amo
+    fake.stub("/api/v4/leads/31665057/notes", {"_embedded": {"notes": [
+        {"note_type": "common", "created_at": 100, "params": {"text": "мимо"}},
+        {"note_type": "lead_auto_created", "created_at": 200,
+         "params": {"type": "child", "link": {"id": 31665058, "type": 2},
+                    "lead_type": "child", "lead_id": 31665058}},
+        {"note_type": "lead_auto_created", "created_at": 300,
+         "params": {"type": "child", "link": {"id": 31665059, "type": 2},
+                    "lead_type": "child", "lead_id": 31665059}},
+    ]}})
+
+    child_id = await client.get_child_lead_id(31665057)
+
+    assert child_id == 31665059          # самое свежее примечание, не первое попавшееся
+
+
+async def test_get_child_lead_id_ignores_unrelated_notes(amo):
+    client, fake = amo
+    fake.stub("/api/v4/leads/900/notes", {"_embedded": {"notes": [
+        {"note_type": "common", "created_at": 100, "params": {}},
+        {"note_type": "lead_auto_created", "created_at": 200,
+         "params": {"type": "parent", "lead_id": 901}},   # зеркальное примечание у дочки
+    ]}})
+
+    assert await client.get_child_lead_id(900) is None
+
+
+async def test_get_child_lead_id_no_notes(amo):
+    """Сейлзбот ещё не создал автосделку — 204 без тела, не авария."""
+    client, fake = amo
+    fake.stub("/api/v4/leads/900/notes", 204)
+
+    assert await client.get_child_lead_id(900) is None
+
+
 async def test_find_leads_created_since_sends_exact_filter(amo):
     """Наблюдатель autocall просит у амо новые сделки этапа — с контактами и по порядку."""
     client, fake = amo

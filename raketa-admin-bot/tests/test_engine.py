@@ -38,8 +38,9 @@ def make_order(order_id=596, amount="5950", rating=None, master=("Дмитрий
     )
 
 
-def make_engine(amo, store, *, dry_run=False, now=None):
+def make_engine(amo, store, *, dry_run=False, now=None, child_by_note=False):
     return Engine(amo=amo, store=store, specialists=SPECIALISTS, dry_run=dry_run,
+                  child_by_note=child_by_note,
                   now=now or (lambda: ORDER_MOMENT + timedelta(minutes=1)))
 
 
@@ -294,6 +295,51 @@ async def test_path_b_asks_owner_when_salesbot_is_silent_too_long():
 
     assert link.status == "waiting_owner"
     assert store.actions_of("salesbot_timeout")
+
+
+async def test_child_by_note_picks_the_linked_deal_over_a_free_one():
+    """Дефект 20.09 (Гагарина/Малая Ямская): при AMO_CHILD_BY_NOTE робот не
+    забирает чужую свободную сделку воронки 2 — дочка берётся строго
+    по служебному примечанию сейлзбота у лида воронки 1.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NEW_LEAD,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600)
+    order = make_order()
+
+    await make_engine(amo, store, child_by_note=True).process_order(order)
+
+    # Другая свободная открытая сделка того же клиента — случай Натальи 20.09.
+    amo.add_lead(701, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 created_at=int(ORDER_MOMENT.timestamp()))
+    # Настоящая дочка — по примечанию у лида первичной (700).
+    amo.add_lead(702, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 created_at=int(ORDER_MOMENT.timestamp()))
+    amo.add_child_note(700, 702)
+
+    link = await make_engine(amo, store, child_by_note=True).process_order(order)
+
+    assert link.real_lead_id == 702
+    assert link.status == "done"
+    logged = store.actions_of("child_by_note")
+    assert logged and logged[0]["payload"] == {"parent": 700, "child": 702}
+
+
+async def test_child_by_note_waits_when_there_is_no_note_yet():
+    """Примечания ещё нет — робот ждёт, а не хватает первую попавшуюся сделку."""
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NEW_LEAD,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600)
+    order = make_order()
+
+    await make_engine(amo, store, child_by_note=True).process_order(order)
+    amo.add_lead(701, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 created_at=int(ORDER_MOMENT.timestamp()))
+
+    link = await make_engine(amo, store, child_by_note=True).process_order(order)
+
+    assert link.status == "waiting_salesbot"
+    assert link.real_lead_id is None
 
 
 async def test_duplicate_leads_get_a_comment():

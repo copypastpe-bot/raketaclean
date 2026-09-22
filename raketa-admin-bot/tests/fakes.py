@@ -40,6 +40,8 @@ class FakeAmo:
         self.contacts: list[dict] = []
         self.tasks: dict[int, list[dict]] = {}
         self.task_results: dict[int, str] = {}   # чем закрыта задача
+        # Примечания сейлзбота «родитель → дочка»: parent_id -> [(created_at, child_id)].
+        self.child_notes: dict[int, list[tuple[int, int]]] = {}
         self.calls: list[tuple[str, Any]] = []
         self.fail_on: Optional[str] = None       # имя метода, который должен упасть
         self._next_id = 90000
@@ -50,6 +52,14 @@ class FakeAmo:
         self._maybe_fail("find_leads_by_phone")
         self.calls.append(("find_leads_by_phone", phone10))
         return list(self.leads.values())
+
+    async def get_child_lead_id(self, lead_id: int) -> Optional[int]:
+        self._maybe_fail("get_child_lead_id")
+        self.calls.append(("get_child_lead_id", lead_id))
+        notes = self.child_notes.get(lead_id) or []
+        if not notes:
+            return None
+        return max(notes, key=lambda item: item[0])[1]
 
     async def find_contacts_by_phone(self, phone10: str) -> list[dict]:
         self._maybe_fail("find_contacts_by_phone")
@@ -153,6 +163,10 @@ class FakeAmo:
     def add_task(self, lead_id: int, task_id: int, task_type_id: int) -> None:
         self.tasks.setdefault(lead_id, []).append(
             {"id": task_id, "task_type_id": task_type_id, "is_completed": False})
+
+    def add_child_note(self, parent_id: int, child_id: int, created_at: int = 0) -> None:
+        """Примечание сейлзбота «у лида parent_id есть дочка child_id»."""
+        self.child_notes.setdefault(parent_id, []).append((created_at, child_id))
 
     def calls_of(self, name: str) -> list[Any]:
         return [payload for called, payload in self.calls if called == name]
