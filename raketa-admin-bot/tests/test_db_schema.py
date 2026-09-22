@@ -618,6 +618,22 @@ async def test_carpet_taken_lead_is_found_regardless_of_phone(pool):
     assert taken == {31516051}
 
 
+async def test_carpet_taken_lead_is_found_via_primary_lead_id_too(pool):
+    """Круг правок по ревью 22.09: старая дыра в `fetch_carpet_taken_leads`.
+
+    Путь `use_primary` пишет лид первичной в `primary_lead_id`, а не в
+    `lead_id` — до этой правки функция смотрела только `lead_id`, и второй
+    заказ того же клиента с кандидатом-совпадением по `primary_lead_id` не
+    видел его занятым.
+    """
+    await db.create_carpet_link(pool, 44426, "9601945325")
+    await db.update_carpet_link(pool, 44426, primary_lead_id=41500001)
+    await db.create_carpet_link(pool, 44427, "9601945325")
+
+    taken = await db.fetch_carpet_taken_leads(pool, [41500001], exclude_partner_id=44427)
+    assert taken == {41500001}
+
+
 async def test_unfinished_carpet_rows_are_found(pool):
     await db.create_carpet_link(pool, 1, "9601945325")
     await db.create_carpet_link(pool, 2, "9601945325")

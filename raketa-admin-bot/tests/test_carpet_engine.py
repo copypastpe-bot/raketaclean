@@ -261,6 +261,32 @@ async def test_primary_lead_is_pushed_to_partner_and_finished():
     assert (31567900, ids.PIPELINE_CARPETS, ids.CARPET_STAGE_DELIVERED) in amo.calls_of("move_lead")
 
 
+async def test_primary_lead_taken_by_another_order_is_not_reused():
+    """Круг правок по ревью 22.09: старая дыра в занятости по коврам.
+
+    `fetch_carpet_taken_leads`/`MemoryCarpetStore.taken_leads` до этой правки
+    смотрели только `lead_id`, а путь `use_primary` пишет кандидата в
+    `primary_lead_id` — второй заказ того же клиента с тем же кандидатом не
+    видел его занятым и повёл бы цепочку с уже занятого лида ещё раз.
+    """
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    amo.add_lead(31532745, ids.PIPELINE_PRIMARY, ids.STATUS_UNSORTED_PRIMARY,
+                 created_at=int(datetime(2026, 8, 17, tzinfo=MOSCOW_TZ).timestamp()))
+    # первый заказ того же клиента уже ведёт цепочку с этого лида
+    store.links[44535] = CarpetLink(
+        partner_id=44535, phone10="9202994600", status="waiting_salesbot",
+        path="primary", primary_lead_id=31532745, checklist={},
+        created_at=NOW, updated_at=NOW,
+    )
+    engine = make_engine(amo, store)
+    order = row(partner_id=44536, phone10="9202994600", added_date=date(2026, 8, 17))
+
+    link = await engine.process_row(order)
+
+    assert link.primary_lead_id != 31532745       # занятый лид второй записи не достался
+    assert not any(call[0] == 31532745 for call in amo.calls_of("move_lead"))
+
+
 async def test_child_by_note_picks_the_linked_deal_over_an_open_one():
     """Дефект 20.09 (Гагарина/Малая Ямская): при AMO_CHILD_BY_NOTE робот не
     забирает первую открытую ковровую сделку клиента — дочка берётся строго
