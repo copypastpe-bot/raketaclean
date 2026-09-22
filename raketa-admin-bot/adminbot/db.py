@@ -832,18 +832,33 @@ async def fetch_carpet_taken_leads(own_pool: asyncpg.Pool, lead_ids: Collection[
 
     Занятость — по номеру сделки, не по телефону (задача 6, ТЗ 2026-09-22):
     один клиент с двумя номерами не должен выглядеть как два разных клиента.
+
+    Смотрим обе колонки — `lead_id` (сделка ковровой воронки) и
+    `primary_lead_id` (лид первичной, если цепочку вели с него, путь
+    `use_primary`): старая дыра, найденная в ревью 22.09 — до этой правки
+    занятость проверялась только по `lead_id`, и второй заказ того же
+    клиента с кандидатом, совпавшим с чужим `primary_lead_id`, не видел его
+    занятым и вёл цепочку с того же лида второй раз. Тот же приём, что у
+    `fetch_taken_lead_ids` и `fetch_calendar_taken_leads`.
     """
     if not lead_ids:
         return set()
+    wanted = set(lead_ids)
     async with own_pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT lead_id FROM adminbot.carpet_links
-            WHERE partner_id <> $2 AND lead_id = ANY($1::bigint[])
+            SELECT lead_id, primary_lead_id FROM adminbot.carpet_links
+            WHERE partner_id <> $2
+              AND (lead_id = ANY($1::bigint[]) OR primary_lead_id = ANY($1::bigint[]))
             """,
-            list(lead_ids), exclude_partner_id,
+            list(wanted), exclude_partner_id,
         )
-    return {row["lead_id"] for row in rows}
+    taken: set[int] = set()
+    for row in rows:
+        for value in (row["lead_id"], row["primary_lead_id"]):
+            if value and value in wanted:
+                taken.add(value)
+    return taken
 
 
 async def fetch_carpet_links_by_status(own_pool: asyncpg.Pool,

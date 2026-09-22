@@ -118,10 +118,17 @@ class MemoryCarpetStore:
 
     async def taken_leads(self, lead_ids: Collection[int], *,
                           exclude_partner_id: int) -> set[int]:
+        """Обе колонки — `lead_id` и `primary_lead_id` (путь `use_primary`),
+        тем же способом, что у заказов и календаря (см. `fetch_carpet_taken_leads`).
+        """
         wanted = set(lead_ids)
-        return {link.lead_id for link in self.links.values()
-                if link.partner_id != exclude_partner_id
-                and link.lead_id and link.lead_id in wanted}
+        taken: set[int] = set()
+        for link in self.links.values():
+            if link.partner_id == exclude_partner_id:
+                continue
+            taken.update(value for value in (link.lead_id, link.primary_lead_id)
+                         if value and value in wanted)
+        return taken
 
     def actions_of(self, action: str) -> list[dict]:
         return [row for row in self.actions if row["action"] == action]
