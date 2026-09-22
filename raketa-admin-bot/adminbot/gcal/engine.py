@@ -158,6 +158,10 @@ class StepResult:
     done: bool = True
     wait: bool = False
     ask: Optional[str] = None
+    # Цепочка закончена прямо здесь, без вопроса владельцу и без следующих шагов
+    # чек-листа: например, дочка из примечания уже закрыта в CRM руками
+    # (задача 1, ревью 22.09) — правка владельца важнее догадки робота.
+    stop: bool = False
 
 
 class CalendarEngine:
@@ -415,6 +419,8 @@ class CalendarEngine:
                 return await self._ask_owner(link, result.ask)
             if result.wait:
                 return await self.store.update(event.event_id, status="waiting_salesbot")
+            if result.stop:
+                return link           # шаг сам завершил цепочку (см. StepResult.stop)
 
             await self.store.mark_step(event.event_id, step)
             link = await self.store.get(event.event_id)
@@ -452,11 +458,27 @@ class CalendarEngine:
         if self.child_by_note:
             child_id = await self.amo.get_child_lead_id(link.primary_lead_id)
             if child_id is not None:
+                # Дочку привязываем всегда — так гласит примечание, это факт
+                # цепочки. Но прежде чем писать в неё дальше (fill_realization
+                # и т.д.), проверяем, не закрыта ли она уже руками: правка
+                # владельца в CRM важнее догадки робота (тот же принцип, что
+                # у already_done). Сделка удалена (get_lead вернул None) —
+                # тоже считаем закрытой.
                 await self.store.update(event.event_id, real_lead_id=child_id,
                                         status="in_progress")
                 await self.store.log(event.event_id, "child_by_note", dry_run=self.dry_run,
                                      payload={"parent": link.primary_lead_id,
                                               "child": child_id})
+                child_lead = await self._get_lead(child_id)
+                status_id = (int(child_lead.get("status_id") or 0)
+                            if child_lead is not None else None)
+                if child_lead is None or status_id in ids.STATUSES_FINAL:
+                    await self.store.log(event.event_id, "child_closed", dry_run=self.dry_run,
+                                         payload={"child": child_id, "status_id": status_id})
+                    await self.store.update(
+                        event.event_id, status="done",
+                        skip_reason="сделка реализации уже закрыта в CRM, не трогал")
+                    return StepResult(stop=True)
                 return StepResult()
         else:
             taken = await self.store.taken_leads(event.phone10,

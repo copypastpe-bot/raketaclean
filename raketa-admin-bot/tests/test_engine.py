@@ -342,6 +342,51 @@ async def test_child_by_note_waits_when_there_is_no_note_yet():
     assert link.real_lead_id is None
 
 
+async def test_child_by_note_stops_when_the_linked_deal_is_already_closed():
+    """Ревью 22.09: дочку из примечания привязываем всегда — это факт цепочки —
+    но если она уже закрыта руками (успех или отказ), дальше в неё не пишем.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NEW_LEAD,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600)
+    order = make_order()
+
+    await make_engine(amo, store, child_by_note=True).process_order(order)
+
+    amo.add_lead(702, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS,
+                 created_at=int(ORDER_MOMENT.timestamp()))
+    amo.add_child_note(700, 702)
+    writes_before = len(amo.calls_of("update_lead")) + len(amo.calls_of("move_lead"))
+
+    link = await make_engine(amo, store, child_by_note=True).process_order(order)
+
+    assert link.real_lead_id == 702                # привязали — это факт цепочки
+    assert link.status == "done"
+    assert link.last_error == "сделка реализации уже закрыта в CRM, не трогал"
+    # После привязки в амо ни одной новой записи: дальше шаги не выполнялись.
+    assert len(amo.calls_of("update_lead")) + len(amo.calls_of("move_lead")) == writes_before
+    logged = store.actions_of("child_closed")
+    assert logged and logged[0]["payload"] == {"child": 702, "status_id": ids.STATUS_SUCCESS}
+
+
+async def test_child_by_note_treats_a_deleted_deal_as_closed():
+    """Примечание есть, а сделки уже нет (get_lead → None) — тоже не трогаем."""
+    amo, store = FakeAmo(), FakeStore()
+    amo.add_lead(700, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NEW_LEAD,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600)
+    order = make_order()
+
+    await make_engine(amo, store, child_by_note=True).process_order(order)
+    amo.add_child_note(700, 703)                    # дочки в amo.leads нет вовсе
+
+    link = await make_engine(amo, store, child_by_note=True).process_order(order)
+
+    assert link.real_lead_id == 703
+    assert link.status == "done"
+    logged = store.actions_of("child_closed")
+    assert logged and logged[0]["payload"] == {"child": 703, "status_id": None}
+
+
 async def test_duplicate_leads_get_a_comment():
     """Клиент звонил дважды: второму лиду робот пишет комментарий (заказ №583)."""
     amo, store = FakeAmo(), FakeStore()
