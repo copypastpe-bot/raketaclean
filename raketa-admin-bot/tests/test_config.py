@@ -11,6 +11,18 @@ def test_settings_from_env(monkeypatch):
     assert s.owner_tg_id == 42
     assert s.amo_sync_enabled is False      # по умолчанию ВЫКЛЮЧЕНО (дизайн: kill switch)
     assert s.amo_sync_dry_run is True       # по умолчанию репетиция, не запись
+    assert s.amo_child_by_note is False     # по умолчанию старое поведение (задача 1)
+
+
+def test_child_by_note_flag_is_read_from_env(monkeypatch):
+    monkeypatch.setenv("ADMINBOT_TG_TOKEN", "123:abc")
+    monkeypatch.setenv("ADMINBOT_OWNER_TG_ID", "42")
+    monkeypatch.setenv("BOT_DB_DSN", "postgresql://ro@localhost/clients_db")
+    monkeypatch.setenv("AMO_BASE_URL", "https://raketacleancrm.amocrm.ru")
+    monkeypatch.setenv("AMO_TOKEN", "tok")
+    monkeypatch.setenv("AMO_CHILD_BY_NOTE", "1")
+
+    assert Settings.from_env().amo_child_by_note is True
 
 
 def test_settings_missing_required(monkeypatch):

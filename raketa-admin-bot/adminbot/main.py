@@ -249,6 +249,7 @@ async def build_app(settings: Settings) -> App:
     engine = Engine(amo=amo, store=store, specialists=specialists,
                     dry_run=settings.amo_sync_dry_run,
                     salesbot_wait_sec=settings.salesbot_wait_sec,
+                    child_by_note=settings.amo_child_by_note,
                     service_by_master=services)
 
     # На российском сервере имя api.telegram.org не разрешается: если заданы
@@ -340,10 +341,12 @@ async def build_app(settings: Settings) -> App:
         fetch_orders=source.pending,
         rehearsal_engine=lambda scratch: Engine(
             amo=rehearsal_amo, store=scratch, specialists=specialists, dry_run=True,
-            salesbot_wait_sec=settings.salesbot_wait_sec, service_by_master=services),
+            salesbot_wait_sec=settings.salesbot_wait_sec,
+            child_by_note=settings.amo_child_by_note, service_by_master=services),
         live_engine=Engine(amo=live_amo, store=PgLinkStore(own_pool),
                            specialists=specialists, dry_run=False,
                            salesbot_wait_sec=settings.salesbot_wait_sec,
+                           child_by_note=settings.amo_child_by_note,
                            service_by_master=services),
     )
 
@@ -464,6 +467,7 @@ def _build_cleaning(settings: Settings, bot_pool: Any, own_pool: Any, mail: Owne
         store=store, specialists=specialists,
         dry_run=settings.cleaning_sync_dry_run,
         salesbot_wait_sec=settings.salesbot_wait_sec,
+        child_by_note=settings.amo_child_by_note,
         service_by_master=services,
     )
     watcher = Watcher(
@@ -574,6 +578,7 @@ def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
         store=store,
         dry_run=settings.carpets_dry_run,
         salesbot_wait_sec=settings.salesbot_wait_sec,
+        child_by_note=settings.amo_child_by_note,
     )
     watcher = CarpetWatcher(
         engine=engine,
@@ -629,6 +634,7 @@ def _build_calendar(settings: Settings, own_pool: Any, mail: OwnerMail,
         store=store,
         dry_run=settings.gcal_dry_run,
         salesbot_wait_sec=settings.salesbot_wait_sec,
+        child_by_note=settings.amo_child_by_note,
     )
     watcher = CalendarWatcher(
         calendars=[GoogleCalendar(calendar_id=calendar_id, token=token)
