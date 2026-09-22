@@ -410,36 +410,41 @@ class CalendarEngine:
         Сделка для вопроса — только дочка воронки 2, лид воронки 1 робот не
         трогает никогда, даже когда дочки нет (задача 4 ТЗ 2026-09-22, решение
         владельца 5). Дочку ищет общий помощник `_resolve_child`.
+
+        Сбой амо в любой точке этой подготовки — на поиске дочки или на
+        проверке её статуса — не должен ронять проход и морозить запись
+        (ревью 22.09): раньше исключение гасило наблюдатель, статус записи не
+        менялся, курсор синка всё равно уходил вперёд, и Google второй раз про
+        удаление уже не сообщит — запись зависла бы навсегда без ответа
+        владельцу. Поэтому всё тело — под одним перехватом: сбой на любом шаге
+        задаёт владельцу тот же вопрос вслепую, без подтверждённого статуса
+        дочки; точный статус уточнит `_close_deal`, когда владелец подтвердит
+        закрытие. Ветка «дочки нет вовсе» в амо не ходит и под перехват не
+        попадает — ей нечему падать.
         """
         try:
             link = await self._resolve_child(link)
+            lead_id = link.real_lead_id
+            if lead_id is None:
+                return await self.store.update(link.event_id, status="cancelled",
+                                               skip_reason=NO_REALIZATION_REASON)
+
+            lead = await self._get_lead(lead_id)
+            if lead is not None and int(lead.get("status_id") or 0) in ids.STATUSES_FINAL:
+                # Сделка уже проведена: работа сделана, запись убрали для порядка.
+                return await self.store.update(link.event_id, status="cancelled",
+                                               skip_reason="запись удалена, сделка уже закрыта")
+
+            return await self._ask_owner(link, "заказ отменён — закрыть сделку?",
+                                         payload={"lead_id": lead_id})
         except AmoError as exc:
-            # CRM не ответила на поиск дочки (ревью 22.09, задача 4): раньше
-            # исключение гасило наблюдатель, статус записи не менялся, курсор
-            # синка уходил вперёд, и запись зависала навсегда без ответа
-            # владельцу. Вместо этого спрашиваем вслепую — точную дочку найдёт
-            # тот же помощник в `_close_deal`, когда владелец подтвердит закрытие.
-            log.warning("Календарь, запись %s: поиск дочки по примечанию не удался — %s",
+            log.warning("Календарь, запись %s: подготовка вопроса об отмене не удалась — %s",
                         link.event_id, exc)
             link = await self._ask_owner(
                 link, "заказ отменён — закрыть сделку?",
-                payload={"lead_id": None, "child_lookup_failed": True})
+                payload={"lead_id": link.real_lead_id, "child_lookup_failed": True})
             return await self.store.update(
                 link.event_id, last_error=f"{type(exc).__name__}: {exc}") or link
-
-        lead_id = link.real_lead_id
-        if lead_id is None:
-            return await self.store.update(link.event_id, status="cancelled",
-                                           skip_reason=NO_REALIZATION_REASON)
-
-        lead = await self._get_lead(lead_id)
-        if lead is not None and int(lead.get("status_id") or 0) in ids.STATUSES_FINAL:
-            # Сделка уже проведена: работа сделана, запись убрали для порядка.
-            return await self.store.update(link.event_id, status="cancelled",
-                                           skip_reason="запись удалена, сделка уже закрыта")
-
-        return await self._ask_owner(link, "заказ отменён — закрыть сделку?",
-                                     payload={"lead_id": lead_id})
 
     # --- выбор пути ---
 
