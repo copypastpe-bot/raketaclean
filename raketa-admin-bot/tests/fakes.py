@@ -228,12 +228,14 @@ class FakeStore:
         self.actions.append({"order_id": order_id, "action": action, "dry_run": dry_run,
                              "entity": entity, "amo_id": amo_id, "payload": payload})
 
-    async def taken_leads(self, phone10: str, exclude_order_id: int) -> set[int]:
+    async def taken_leads(self, lead_ids, *, exclude_order_id: int) -> set[int]:
+        wanted = set(lead_ids)
         taken: set[int] = set()
         for link in self.links.values():
-            if link.phone10 != phone10 or link.order_id == exclude_order_id:
+            if link.order_id == exclude_order_id:
                 continue
-            taken.update(value for value in (link.primary_lead_id, link.real_lead_id) if value)
+            taken.update(value for value in (link.primary_lead_id, link.real_lead_id)
+                         if value and value in wanted)
         return taken
 
     def actions_of(self, action: str) -> list[dict]:

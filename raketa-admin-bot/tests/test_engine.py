@@ -25,10 +25,11 @@ SPECIALISTS = SpecialistIndex.from_enums([
 ORDER_MOMENT = datetime(2026, 8, 24, 17, 53, tzinfo=MOSCOW_TZ)
 
 
-def make_order(order_id=596, amount="5950", rating=None, master=("Дмитрий Козлов", "79306858534")):
+def make_order(order_id=596, amount="5950", rating=None, master=("Дмитрий Козлов", "79306858534"),
+              phone10="9601861067"):
     return Order(
         order_id=order_id,
-        phone10="9601861067",
+        phone10=phone10,
         created_at=ORDER_MOMENT,
         amount_total=Decimal(amount),
         masters=[master] if master else [],
@@ -471,6 +472,26 @@ async def test_deal_taken_by_another_order_is_not_reused():
     await store.update(1, status="done", path="A", real_lead_id=901)
     third = await engine.process_order(make_order(order_id=3))
     assert third.real_lead_id == 902             # остаётся только вторая
+
+
+async def test_deal_taken_by_another_order_is_not_reused_across_different_phones():
+    """Задача 6, ТЗ 2026-09-22: один и тот же человек с двумя номерами —
+    «занято» считается по номеру сделки, а не по телефону заказа. Раньше
+    заказ со вторым номером не видел первую связку занятой и забирал чужую
+    сделку.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    first_lead = open_realization_lead(amo, lead_id=901)
+    second_lead = open_realization_lead(amo, lead_id=902)
+    engine = make_engine(amo, store)
+
+    first = await engine.process_order(make_order(order_id=1, phone10="9601861067"))
+    assert first.status == "waiting_owner"       # два кандидата — вопрос владельцу
+    await store.update(1, status="done", path="A", real_lead_id=901)
+
+    # второй заказ того же человека, но с другим номером телефона
+    second = await engine.process_order(make_order(order_id=2, phone10="9219998877"))
+    assert second.real_lead_id == 902             # сделка 901 занята первым заказом
 
 
 # --- телефон не распознан ---

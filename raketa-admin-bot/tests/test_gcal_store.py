@@ -50,10 +50,25 @@ async def test_lead_taken_by_another_calendar_event_is_not_reused(store):
     await store.update("evt-1", real_lead_id=777)
     await store.create("evt-2", kind="order", phone10="9601861067")
 
-    taken = await store.taken_leads("9601861067", exclude_event_id="evt-2")
+    taken = await store.taken_leads([777], exclude_event_id="evt-2")
 
     assert taken == {777}
-    assert await store.taken_leads("9601861067", exclude_event_id="evt-1") == set()
+    assert await store.taken_leads([777], exclude_event_id="evt-1") == set()
+
+
+async def test_lead_taken_by_another_phone_of_the_same_person_is_not_reused(store):
+    """Задача 6, ТЗ 2026-09-22: занятость — по номеру сделки, не по телефону.
+
+    Один и тот же человек с двумя номерами не должен выглядеть для робота
+    как два разных клиента.
+    """
+    await store.create("evt-1", kind="order", phone10="9601861067")
+    await store.update("evt-1", real_lead_id=777)
+    await store.create("evt-2", kind="order", phone10="9219998877")
+
+    taken = await store.taken_leads([777], exclude_event_id="evt-2")
+
+    assert taken == {777}
 
 
 async def test_unfinished_events_come_back(store):

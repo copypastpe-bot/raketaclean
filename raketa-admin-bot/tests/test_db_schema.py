@@ -601,7 +601,20 @@ async def test_carpet_taken_leads_are_not_reused(pool):
     await db.update_carpet_link(pool, 44426, lead_id=31516051)
     await db.create_carpet_link(pool, 44427, "9601945325")
 
-    taken = await db.fetch_carpet_taken_leads(pool, "9601945325", exclude_partner_id=44427)
+    taken = await db.fetch_carpet_taken_leads(pool, [31516051], exclude_partner_id=44427)
+    assert taken == {31516051}
+
+
+async def test_carpet_taken_lead_is_found_regardless_of_phone(pool):
+    """Задача 6, ТЗ 2026-09-22: занятость — по номеру сделки, не по телефону.
+
+    Тот же человек со вторым номером не должен выглядеть новым клиентом.
+    """
+    await db.create_carpet_link(pool, 44426, "9601945325")
+    await db.update_carpet_link(pool, 44426, lead_id=31516051)
+    await db.create_carpet_link(pool, 44427, "9219998877")
+
+    taken = await db.fetch_carpet_taken_leads(pool, [31516051], exclude_partner_id=44427)
     assert taken == {31516051}
 
 
@@ -847,8 +860,24 @@ async def test_calendar_lead_taken_by_another_event_is_not_reused(pool):
     await store.update("evt-1", real_lead_id=41400002)
     await store.create("evt-2", kind="order", phone10="9601861067")
 
-    assert await store.taken_leads("9601861067", exclude_event_id="evt-2") == {41400002}
-    assert await store.taken_leads("9601861067", exclude_event_id="evt-1") == set()
+    assert await store.taken_leads([41400002], exclude_event_id="evt-2") == {41400002}
+    assert await store.taken_leads([41400002], exclude_event_id="evt-1") == set()
+
+
+async def test_calendar_lead_taken_by_another_phone_of_the_same_person_is_not_reused(pool):
+    """Задача 6, ТЗ 2026-09-22: занятость — по номеру сделки, не по телефону записи.
+
+    Наталья звонит с одного номера, дежурный менеджер записывает в календарь
+    другой — без этой правки сделка первой записи достанется второй.
+    """
+    from adminbot.gcal.store import PgCalendarStore
+
+    store = PgCalendarStore(pool)
+    await store.create("evt-1", kind="order", phone10="9601861067")
+    await store.update("evt-1", real_lead_id=41400002)
+    await store.create("evt-2", kind="order", phone10="9219998877")
+
+    assert await store.taken_leads([41400002], exclude_event_id="evt-2") == {41400002}
 
 
 # --- почта владельца (миграция 009) ---
@@ -1049,10 +1078,23 @@ async def test_a_lead_taken_by_one_stream_is_not_reused_by_the_other(pool):
     await db.update_link(pool, 5, table=db.CLEANING_LINKS_TABLE, real_lead_id=31500002)
 
     # уборка не берёт сделку, занятую химчисткой...
-    assert await db.fetch_taken_lead_ids(pool, "9601861067", 5,
+    assert await db.fetch_taken_lead_ids(pool, [31500001, 31500002], 5,
                                          table=db.CLEANING_LINKS_TABLE) == {31500001}
     # ...и наоборот
-    assert await db.fetch_taken_lead_ids(pool, "9601861067", 597) == {31500002}
+    assert await db.fetch_taken_lead_ids(pool, [31500001, 31500002], 597) == {31500002}
+
+
+async def test_lead_taken_by_another_phone_of_the_same_person_is_not_reused(pool):
+    """Задача 6, ТЗ 2026-09-22: занятость — по номеру сделки, не по телефону.
+
+    Одна и та же Наталья с двумя номерами не должна выглядеть для робота
+    как два разных клиента — иначе сделка первой работы достаётся второй.
+    """
+    await db.create_link(pool, order_id=597, phone10="9601861067")
+    await db.update_link(pool, 597, real_lead_id=31500001)
+    await db.create_link(pool, order_id=598, phone10="9219998877")
+
+    assert await db.fetch_taken_lead_ids(pool, [31500001], 598) == {31500001}
 
 
 async def test_dead_order_link_does_not_hold_the_lead_taken(pool):
@@ -1069,12 +1111,12 @@ async def test_dead_order_link_does_not_hold_the_lead_taken(pool):
     await db.update_link(pool, 7, table=db.CLEANING_LINKS_TABLE, real_lead_id=41500002)
 
     # заказ 9999 мёртв в своей же таблице связок...
-    assert await db.fetch_taken_lead_ids(pool, "9601861067", 1) == set()
+    assert await db.fetch_taken_lead_ids(pool, [41500001, 41500002], 1) == set()
     # ...и он же мёртв, когда его смотрят из «чужой» таблицы (проверка обеих веток UNION)
-    assert await db.fetch_taken_lead_ids(pool, "9601861067", 1,
+    assert await db.fetch_taken_lead_ids(pool, [41500001, 41500002], 1,
                                          table=db.CLEANING_LINKS_TABLE) == set()
     # уборка №7 удалена — её лид тоже свободен
-    assert await db.fetch_taken_lead_ids(pool, "9159496642", 1) == set()
+    assert await db.fetch_taken_lead_ids(pool, [41500002], 1) == set()
 
 
 async def test_cleaning_journal_is_its_own(pool):
