@@ -5,7 +5,7 @@
 перезаписанных руками полей и выдуманных данных.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from adminbot.amo import ids
@@ -13,6 +13,7 @@ from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.carpets.engine import CarpetEngine
 from adminbot.carpets.report import CarpetRow
 from adminbot.carpets.store import MemoryCarpetStore
+from adminbot.models import CarpetLink
 from tests.fakes import FakeAmo
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=MOSCOW_TZ)
@@ -362,6 +363,33 @@ async def test_silent_salesbot_becomes_a_question():
     order = row(partner_id=44535, phone10="9202994600", added_date=date(2026, 8, 17))
 
     await engine.process_row(order)
+    link = await engine.process_row(order)
+
+    assert link.status == "waiting_owner"
+    assert "автосделку" in link.question["reason"]
+
+
+async def test_wait_salesbot_timer_counts_from_move_primary_success_not_updated_at():
+    """Дефект 22.09 (задача 2 ТЗ `order-chain`): `_run_steps` перед каждым
+    `StepResult(wait=True)` зовёт `store.update(status="waiting_salesbot")` —
+    это двигает `updated_at`, даже когда статус не поменялся. Считать ожидание
+    от него нельзя: `updated_at` обнуляется на каждом опросе, и вопрос
+    владельцу не пришёл бы никогда. Отсчёт — от отметки шага
+    `move_primary_success` в чек-листе.
+    """
+    amo, store = FakeAmo(), MemoryCarpetStore(now=lambda: NOW)
+    moved_at = NOW - timedelta(minutes=20)
+    order = row(partner_id=44535, phone10="9202994600", added_date=date(2026, 8, 17))
+    store.links[order.partner_id] = CarpetLink(
+        partner_id=order.partner_id, phone10=order.phone10, status="waiting_salesbot",
+        path="scratch", primary_lead_id=31532745,
+        checklist={"create_primary_lead": moved_at.isoformat(),
+                  "move_primary_success": moved_at.isoformat()},
+        created_at=moved_at, updated_at=NOW - timedelta(minutes=1),
+    )
+    engine = CarpetEngine(amo=amo, store=store, dry_run=True,
+                          salesbot_wait_sec=600, now=lambda: NOW)
+
     link = await engine.process_row(order)
 
     assert link.status == "waiting_owner"
