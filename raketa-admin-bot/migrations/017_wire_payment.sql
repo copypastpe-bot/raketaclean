@@ -16,8 +16,20 @@
 --   payment_synced_at  — когда робот довёл сделку до конца после прихода
 --                         денег; NULL — ещё не доводил, второй раз не берём.
 --
+-- Колонка — в обеих таблицах связок, тем же приёмом, что и миграция 013
+-- (`address_reminder_*`): `_link_from_row`/`AmoLink` — общий код для химчистки
+-- и уборок, схемы обеих таблиц обязаны совпадать. Уборок это не касается по
+-- смыслу (ожидания оплаты по счёту у них нет, решение владельца 22.09 п.8):
+-- источник работы (`fetch_wire_paid_order_ids`/`fetch_links_needing_wire_payment_sync`,
+-- db.py) читает только `amo_links`, в `cleaning_links` эти поля просто лежат
+-- пустыми.
+--
 -- ТЗ 2026-09-22 «цепочка заказа», задача 11.
 
 ALTER TABLE adminbot.amo_links
+    ADD COLUMN IF NOT EXISTS payment_pending    boolean,
+    ADD COLUMN IF NOT EXISTS payment_synced_at  timestamptz;
+
+ALTER TABLE adminbot.cleaning_links
     ADD COLUMN IF NOT EXISTS payment_pending    boolean,
     ADD COLUMN IF NOT EXISTS payment_synced_at  timestamptz;

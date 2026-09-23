@@ -262,6 +262,65 @@ async def test_dead_order_link_is_not_offered_for_address_reminder(pool):
         pool, table=db.CLEANING_LINKS_TABLE) == []
 
 
+async def test_wire_payment_sync_candidates(pool):
+    """Задача 11 (ТЗ 2026-09-22): кого доводить после оплаты по счёту.
+
+    Заказ №596 в фикстуре оплачен по счёту (способ и признак ставим прямо
+    здесь — фикстура их не задаёт). Связка `done` без `payment_pending`
+    (NULL) — как у пяти исторических заказов 26.08–22.09 — обязана попасть
+    в выборку: решать будет стадия сделки, а не этот флаг.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE public.orders SET payment_method = 'Расчётный', "
+            "awaiting_wire_payment = false WHERE id = 596"
+        )
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link(pool, 596, status="done", path="A", real_lead_id=41463832)
+
+    since = date(2026, 8, 1)
+    wire_ids = await db.fetch_wire_paid_order_ids(pool, since)
+    assert wire_ids == {596}                            # 597/500 — не по счёту
+
+    due = await db.fetch_links_needing_wire_payment_sync(pool, wire_ids)
+    assert [link.order_id for link in due] == [596]
+    assert due[0].payment_pending is None                # исторический вид
+
+    # ждёт оплаты (awaiting_wire_payment=true) — деньги ещё не пришли, робот не лезет
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE public.orders SET awaiting_wire_payment = true WHERE id = 596"
+        )
+    assert await db.fetch_wire_paid_order_ids(pool, since) == set()
+
+    # оплата пришла — снова кандидат
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE public.orders SET awaiting_wire_payment = false WHERE id = 596"
+        )
+    wire_ids = await db.fetch_wire_paid_order_ids(pool, since)
+    assert wire_ids == {596}
+
+    # уже доведена — payment_synced_at стоит, второй раз не берём
+    await db.update_link(pool, 596, payment_synced_at=datetime.now(timezone.utc))
+    assert await db.fetch_links_needing_wire_payment_sync(pool, wire_ids) == []
+
+    # связка ещё не done — доводкой оплаты не трогаем
+    await db.update_link(pool, 596, status="in_progress", payment_synced_at=None)
+    assert await db.fetch_links_needing_wire_payment_sync(pool, wire_ids) == []
+    await db.update_link(pool, 596, status="done")
+
+    # payment_pending=false (движок сам решил, что оплата не ждалась) — не кандидат
+    await db.update_link(pool, 596, payment_pending=False)
+    assert await db.fetch_links_needing_wire_payment_sync(pool, wire_ids) == []
+
+    # способ оплаты не безнал — вовсе не кандидат на уровне заказа
+    await db.update_link(pool, 596, payment_pending=True)
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE public.orders SET payment_method = 'Наличные' WHERE id = 596")
+    assert await db.fetch_wire_paid_order_ids(pool, since) == set()
+
+
 async def test_actions_journal(pool):
     await db.create_link(pool, order_id=596, phone10="9601861067")
     await db.log_action(
