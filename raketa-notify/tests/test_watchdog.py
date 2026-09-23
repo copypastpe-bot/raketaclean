@@ -60,7 +60,7 @@ async def _set_heartbeat(pool, *, table: str, service_key: str, last_seen_at,
         )
 
 
-async def _set_amocrm_poll(pool, *, updated_at, stream: str = "lead_events") -> None:
+async def _set_amocrm_poll(pool, *, updated_at, stream: str = "unsorted") -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -158,6 +158,19 @@ async def test_amocrm_stale_poll_is_broken(watchdog_pool):
     result = _result(await wd.check_once(), KEY_AMOCRM_POLL)
     assert result.ok is False
     assert "стоит" in result.detail
+
+
+async def test_amocrm_watches_unsorted_stream_not_lead_events(watchdog_pool):
+    # Опрос новых сделок (поток lead_events) удалён: его строка в базе остаётся
+    # и стареет. Сторож обязан смотреть на поток «Неразобранного».
+    await _set_amocrm_poll(watchdog_pool, updated_at=NOW - timedelta(seconds=30),
+                           stream="lead_events")
+    wd = _watchdog(watchdog_pool, amocrm_max_age_sec=300)
+    assert _result(await wd.check_once(), KEY_AMOCRM_POLL).ok is False
+
+    await _set_amocrm_poll(watchdog_pool, updated_at=NOW - timedelta(seconds=30),
+                           stream="unsorted")
+    assert _result(await wd.check_once(), KEY_AMOCRM_POLL).ok is True
 
 
 # --------------------------------------------------------------------------

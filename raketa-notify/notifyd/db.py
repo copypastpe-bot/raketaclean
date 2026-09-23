@@ -328,15 +328,17 @@ async def ping_database(pool: asyncpg.Pool) -> bool:
         return await conn.fetchval("SELECT 1") == 1
 
 
-async def fetch_amocrm_last_poll(pool: asyncpg.Pool, *, stream: str = "lead_events") -> Optional[datetime]:
+async def fetch_amocrm_last_poll(pool: asyncpg.Pool, *, stream: str = "unsorted") -> Optional[datetime]:
     """Когда опрос amoCRM последний раз успешно прошёл цикл.
 
-    `amocrm_api_state.updated_at` (bot.py:_amocrm_set_cursor) обновляется на
-    КАЖДЫЙ успешный проход `_amocrm_poll_new_leads_once`, даже если новых
-    событий не было — а значит застывшая отметка и есть точный сигнал того,
-    что цикл `amocrm_api_polling_loop` встал (факт 6 ТЗ: он выходит навсегда
-    при ошибке авторизации, ничего больше не пишет). Нет строки вовсе — опрос
-    либо выключен, либо ещё не сделал ни одного цикла."""
+    `amocrm_api_state.updated_at` (bot.py:_amocrm_set_cursor) потока `unsorted`
+    обновляется на КАЖДЫЙ успешный проход `_amocrm_poll_unsorted_once` (опрос
+    «Неразобранного»), даже если новых записей не было — а значит застывшая
+    отметка и есть точный сигнал того, что цикл `amocrm_api_polling_loop` встал
+    (факт 6 ТЗ: он выходит навсегда при ошибке авторизации, ничего больше не
+    пишет). Нет строки вовсе — опрос либо выключен, либо ещё не сделал ни
+    одного цикла. Прежний поток `lead_events` (опрос новых сделок) удалён
+    23.09, его строка в базе осталась и стареет — на неё не смотреть."""
     async with pool.acquire() as conn:
         return await conn.fetchval(
             "SELECT updated_at FROM public.amocrm_api_state WHERE stream = $1", stream,
