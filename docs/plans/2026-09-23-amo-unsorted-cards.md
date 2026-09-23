@@ -237,6 +237,8 @@
 Таблицы (`amocrm_webhook_events`, `amocrm_api_events`, `amocrm_pending_incoming`) не
 удалять. Тесты удалённых функций удалить вместе с ними.
 
+Выполнено (пункты 2 и 5): 2026-09-23, 23ff380 (пункт 2), d82b2e3 (пункт 5)
+
 ## Задача 6. Сторож службы оповещений
 
 `raketa-notify/notifyd/db.py:fetch_amocrm_last_poll`: поток по умолчанию — `unsorted`;
