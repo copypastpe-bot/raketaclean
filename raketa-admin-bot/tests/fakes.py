@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from adminbot.amo import ids
 from adminbot.amo.client import ROBOT_TASK_RESULT, AmoError, Intent
-from adminbot.models import AmoLink
+from adminbot.models import AmoLink, CalendarLink
 
 
 def _remember_fields(entity: dict, custom_fields: Any) -> None:
@@ -197,6 +197,7 @@ class FakeStore:
     def __init__(self, now=None):
         self.links: dict[int, AmoLink] = {}
         self.actions: list[dict] = []
+        self.calendar_links: dict[str, CalendarLink] = {}
         self._now = now or _now
 
     async def get(self, order_id: int) -> Optional[AmoLink]:
@@ -237,6 +238,22 @@ class FakeStore:
             taken.update(value for value in (link.primary_lead_id, link.real_lead_id)
                          if value and value in wanted)
         return taken
+
+    async def get_calendar_link(self, event_id: str) -> Optional[CalendarLink]:
+        return self.calendar_links.get(event_id)
+
+    async def update_calendar_link(self, event_id: str, **fields) -> Optional[CalendarLink]:
+        link = self.calendar_links.get(event_id)
+        if link is None:
+            return None
+        self.calendar_links[event_id] = replace(link, **fields)
+        return self.calendar_links[event_id]
+
+    def add_calendar_link(self, event_id: str, **fields) -> CalendarLink:
+        """Завести запись календаря для теста (задача 10, ТЗ 2026-09-22)."""
+        link = CalendarLink(event_id=event_id, kind="order", status="in_progress", **fields)
+        self.calendar_links[event_id] = link
+        return link
 
     def actions_of(self, action: str) -> list[dict]:
         return [row for row in self.actions if row["action"] == action]

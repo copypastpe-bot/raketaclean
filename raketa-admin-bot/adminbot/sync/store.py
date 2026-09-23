@@ -13,7 +13,7 @@ from typing import Any, Collection, Optional, Protocol
 import asyncpg
 
 from adminbot import db
-from adminbot.models import AmoLink
+from adminbot.models import AmoLink, CalendarLink
 
 
 class LinkStore(Protocol):
@@ -38,6 +38,14 @@ class LinkStore(Protocol):
 
     async def taken_leads(self, lead_ids: Collection[int], *,
                           exclude_order_id: int) -> set[int]: ...
+
+    # Заказ с известной сделкой (задача 10, ТЗ 2026-09-22): движок читает запись
+    # календаря, чтобы взять её real_lead_id, а наблюдатель пишет в неё номер
+    # заказа после того, как сделка проведена — круг замкнут в обе стороны.
+    async def get_calendar_link(self, event_id: str) -> Optional[CalendarLink]: ...
+
+    async def update_calendar_link(self, event_id: str,
+                                   **fields: Any) -> Optional[CalendarLink]: ...
 
 
 class MemoryLinkStore:
@@ -107,6 +115,15 @@ class MemoryLinkStore:
                          if value and value in wanted)
         return taken
 
+    async def get_calendar_link(self, event_id: str) -> Optional[CalendarLink]:
+        # Хранилище в памяти не персистентно и записей календаря не держит:
+        # репетиция и разовые прогоны заказ с calendar_event_id просто не свяжут
+        # мимо матчера, что для них не страшно.
+        return None
+
+    async def update_calendar_link(self, event_id: str, **fields: Any) -> Optional[CalendarLink]:
+        return None
+
 
 class PgLinkStore:
     """Боевое хранилище: схема `adminbot` того же Postgres, что и у бота.
@@ -153,6 +170,13 @@ class PgLinkStore:
                           exclude_order_id: int) -> set[int]:
         return await db.fetch_taken_lead_ids(self._pool, lead_ids, exclude_order_id,
                                              table=self._links)
+
+    async def get_calendar_link(self, event_id: str) -> Optional[CalendarLink]:
+        # Тот же пул, что и у связок: записи календаря живут в той же схеме `adminbot`.
+        return await db.get_calendar_link(self._pool, event_id)
+
+    async def update_calendar_link(self, event_id: str, **fields: Any) -> Optional[CalendarLink]:
+        return await db.update_calendar_link(self._pool, event_id, **fields)
 
 
 class PgCleaningLinkStore(PgLinkStore):

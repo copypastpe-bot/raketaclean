@@ -144,7 +144,10 @@ class Engine:
         try:
             if link.path is None:
                 link = await self._decide(order, link)
-                if link.status in ("waiting_owner", "done"):
+                # Путь ещё не выбран — заказ с известной записью календаря ждёт,
+                # пока движок календаря узнает её сделку (задача 10, ТЗ 2026-09-22):
+                # чек-листу тут пока нечего исполнять, отдаём link как есть.
+                if link.path is None or link.status in ("waiting_owner", "done"):
                     return link
             return await self._run_checklist(order, link)
         except AmoError as exc:
@@ -215,7 +218,14 @@ class Engine:
     # --- выбор пути ---
 
     async def _decide(self, order: Order, link: AmoLink) -> AmoLink:
-        """Спросить матчер и записать выбранный путь."""
+        """Спросить матчер и записать выбранный путь.
+
+        Заказ с известной записью календаря (задача 10, ТЗ 2026-09-22) матчер
+        не спрашивает вовсе: сделку назвал мастер, а не гадание по телефону.
+        """
+        if order.deal_lead_id is not None or order.calendar_event_id is not None:
+            return await self._decide_from_calendar(order, link)
+
         raw_leads = await self.amo.find_leads_by_phone(order.phone10)
         candidates = [self._to_lead_info(lead) for lead in raw_leads]
         taken = await self.store.taken_leads(
@@ -265,6 +275,36 @@ class Engine:
         link = await self.store.update(order.order_id, **fields)
         self._duplicates[order.order_id] = tuple(decision.duplicates)
         return link
+
+    async def _decide_from_calendar(self, order: Order, link: AmoLink) -> AmoLink:
+        """Заказ с известной сделкой — мастер выбрал запись календаря (задача 10).
+
+        `deal_lead_id` заказа называет сделку прямо: её поставил мастер, выбирая
+        запись в сценарии рабочего бота (задача 9). Матчер и проверка «занято»
+        здесь не нужны — гадать нечего, сделка уже названа. Известен только
+        `calendar_event_id` (мастер выбрал запись, но на момент заказа движок
+        календаря (`gcal/engine.py`) ещё не завёл её сделку) — читаем запись
+        заново и берём её `real_lead_id`. Не готова и она — ждём, пока движок
+        календаря её заведёт, тем же таймером, что и путь Б (задача 2), но от
+        `created_at` связки: чек-листа здесь ещё нет, отметки шага — тоже.
+        """
+        real_lead_id = order.deal_lead_id
+        if real_lead_id is None and order.calendar_event_id is not None:
+            calendar_link = await self.store.get_calendar_link(order.calendar_event_id)
+            real_lead_id = calendar_link.real_lead_id if calendar_link is not None else None
+
+        if real_lead_id is not None:
+            link = await self.store.update(order.order_id, path="A", status="in_progress",
+                                           real_lead_id=real_lead_id)
+            await self.store.log(order.order_id, "linked_by_master", dry_run=self.dry_run,
+                                 payload={"lead_id": real_lead_id,
+                                          "calendar_event_id": order.calendar_event_id})
+            return link
+
+        waited = (self.now() - _as_msk(link.created_at)).total_seconds()
+        if waited > self.salesbot_wait_sec:
+            return await self._ask_owner(order, link, "сейлзбот не создал автосделку")
+        return await self.store.update(order.order_id, status="waiting_salesbot")
 
     # --- исполнение чек-листа ---
 

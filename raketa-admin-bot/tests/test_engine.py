@@ -27,7 +27,7 @@ ORDER_MOMENT = datetime(2026, 8, 24, 17, 53, tzinfo=MOSCOW_TZ)
 
 
 def make_order(order_id=596, amount="5950", rating=None, master=("Дмитрий Козлов", "79306858534"),
-              phone10="9601861067"):
+              phone10="9601861067", deal_lead_id=None, calendar_event_id=None):
     return Order(
         order_id=order_id,
         phone10=phone10,
@@ -37,6 +37,8 @@ def make_order(order_id=596, amount="5950", rating=None, master=("Дмитрий
         rating_score=rating,
         client_name="Ирина",
         address="ул. Ленина, 5",
+        deal_lead_id=deal_lead_id,
+        calendar_event_id=calendar_event_id,
     )
 
 
@@ -541,6 +543,51 @@ async def test_engines_do_not_share_scratch_state():
 
     assert second._duplicates == {}
     assert second._contacts == {}
+
+
+# --- заказ с известной сделкой: мастер выбрал запись календаря (задача 10, ТЗ 2026-09-22) ---
+
+async def test_deal_lead_id_goes_straight_to_path_a_without_the_matcher():
+    """Мастер выбрал запись календаря — сделка известна заранее: матчер и
+    «занято» не нужны, даже если у клиента открыты ещё две сделки.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = open_realization_lead(amo)
+    amo.add_lead(41400101, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 created_at=int(ORDER_MOMENT.timestamp()))
+    amo.add_lead(41400102, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NEW_LEAD,
+                 created_at=int(ORDER_MOMENT.timestamp()))
+    order = make_order(deal_lead_id=lead_id)
+
+    link = await make_engine(amo, store).process_order(order)
+
+    assert link.status == "done" and link.path == "A" and link.real_lead_id == lead_id
+    assert amo.calls_of("find_leads_by_phone") == []          # матчер не спрашивали
+    logged = store.actions_of("linked_by_master")
+    assert logged and logged[0]["payload"]["lead_id"] == lead_id
+
+
+async def test_calendar_event_without_lead_waits_then_asks_owner():
+    """Известна только запись (`calendar_event_id`), а её сделку движок
+    календаря ещё не завёл — ждём тем же таймером, что и путь Б, и спрашиваем
+    владельца по истечении, как обычно.
+    """
+    amo, store = FakeAmo(), FakeStore(now=lambda: ORDER_MOMENT)
+    store.add_calendar_link("evt1", real_lead_id=None)
+    order = make_order(calendar_event_id="evt1")
+
+    link = await make_engine(amo, store, now=lambda: ORDER_MOMENT).process_order(order)
+
+    assert link.status == "waiting_salesbot" and link.path is None
+    assert amo.calls_of("find_leads_by_phone") == []
+
+    engine = make_engine(amo, store, now=lambda: ORDER_MOMENT + timedelta(minutes=45))
+    engine.salesbot_wait_sec = 2400
+    link = await engine.process_order(order)
+
+    assert link.status == "waiting_owner"
+    logged = store.actions_of("ask_owner")
+    assert logged and logged[-1]["payload"] == {"reason": "сейлзбот не создал автосделку"}
 
 
 # --- доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22) ---
