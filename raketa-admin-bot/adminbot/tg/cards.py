@@ -589,8 +589,14 @@ def order_done_text(order: Any, link: Any, *, base_url: str, dry_run: bool = Fal
 
 
 def wire_payment_synced_text(order: Any, link: Any, *, base_url: str, tasks_closed: int,
-                             dry_run: bool = False) -> str:
-    """Сделка доведена до конца после оплаты по счёту (задача 11, ТЗ 2026-09-22)."""
+                             stage_moved: bool, dry_run: bool = False) -> str:
+    """Сделка доведена после оплаты по счёту (задача 11, ТЗ 2026-09-22).
+
+    Отчёт уходит и при частичной доводке (сумма и/или задачи поправлены, а
+    сделка уже была финальной) — тогда `stage_moved=False`, и слов о переводе
+    стадии в тексте нет (ревью 23.09): владелец не должен подумать, что стадию
+    поменяли, если её не трогали.
+    """
     label = getattr(order, "label", "Заказ")
     parts = [f"{label} №{order.order_id}"]
     if getattr(order, "client_name", None):
@@ -599,7 +605,10 @@ def wire_payment_synced_text(order: Any, link: Any, *, base_url: str, tasks_clos
     parts.append(f"{money(order.amount_total)} ₽ по счёту")
     lead_id = link.real_lead_id
     if lead_id:
-        parts.append(f"сделка #{lead_id} → «выполнено и оплата получена»")
+        if stage_moved:
+            parts.append(f"сделка #{lead_id} → «выполнено и оплата получена»")
+        else:
+            parts.append(f"сделка #{lead_id}")
     parts.append(f"закрыто задач: {tasks_closed}")
     lines = ["💸 " + " · ".join(parts)]
     if lead_id:
