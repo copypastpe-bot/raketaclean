@@ -1615,15 +1615,6 @@ async def run_weekly_leads_exchange() -> None:
 
     logger.info("Обмен, недельные лиды за %s дней: %s",
                 WEEKLY_LEADS_PERIOD_DAYS, counters or "ничего не было")
-    if counters and ADMIN_TG_IDS:
-        lines = ["🔄 Лиды из amoCRM за неделю:"]
-        for action, total in sorted(counters.items(), key=lambda item: -item[1]):
-            lines.append(f"   • {EXCHANGE_ACTION_WORDS.get(action, action)}: {total}")
-        for admin_id in ADMIN_TG_IDS:
-            try:
-                await bot.send_message(admin_id, "\n".join(lines))
-            except Exception:                 # noqa: BLE001
-                logger.warning("Не удалось отправить отчёт по недельным лидам")
 
 
 # Закладка репетиции разговора с клиентом. Живёт в памяти процесса ровно по той
