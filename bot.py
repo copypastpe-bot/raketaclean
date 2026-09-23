@@ -327,6 +327,13 @@ DEAL_LINK_WAIT_TIMEOUT_SEC = max(60, _env_int("DEAL_LINK_WAIT_TIMEOUT_SEC", 1800
 # в базу со ссылкой на запись/сделку (adminbot.calendar_jobs, задача 8 того
 # же ТЗ). По умолчанию выключено — бот в представление не смотрит вовсе.
 ORDER_CALENDAR_PICK = _env_int("ORDER_CALENDAR_PICK", 0) == 1
+# Старое сообщение админам «клиент/лид откликнулся на промо» (ТЗ
+# docs/plans/2026-09-23-promo-autocall.md, задача 3). Отклик теперь ведётся
+# заявкой в `promo_callbacks`, по ней админ-бот заводит сделку и автозвонок
+# звонит сам. По умолчанию `1` — сообщение уходит как раньше; `0` ставится
+# последним шагом выката, когда автозвонок по откликам заработает. Заявка
+# пишется при любом значении.
+PROMO_INTEREST_ADMIN_MESSAGE = _env_int("PROMO_INTEREST_ADMIN_MESSAGE", 1) == 1
 # Карточки «Неразобранного» amoCRM админам (ТЗ docs/plans/2026-09-23-amo-unsorted-cards.md):
 # опрос заводит дело на каждую новую запись, отдельный цикл раз в минуту рассылает
 # карточку обоим админам и напоминает раз в час, пока кто-то не нажмёт кнопку.
@@ -2595,6 +2602,11 @@ LEADS_PROMO_CAMPAIGNS: dict[str, list[str]] = {
 }
 
 LEADS_AUTO_REPLY = "Спасибо! Свяжемся с вами в ближайшее время."
+# Отклик на промо — только чистая «1»: «1», «1.», «1!», «1)», с пробелами вокруг
+# (решение владельца 1, ТЗ 2026-09-23 «автозвонок по промо»). Сверяется с
+# текстом после strip(), целиком. Раньше хватало единицы в начале, и «160 на
+# 200» уходило админам как отклик. Одна на ветки клиентов и лидов.
+PROMO_INTEREST_RE = re.compile(r"1[.!)]?")
 STOP_AUTO_REPLY = "Вы отписаны от промо рассылки и акций. Если понадобимся, просто напишите нам.\nraketaclean.ru +79040437523"
 CLIENT_PROMO_INTEREST_REPLY = "Спасибо! Свяжемся с вами в ближайшее время."
 LEADS_AUTO_REPLY_CAMPAIGN_PREFIX = "inbound_auto_reply"
@@ -2722,6 +2734,78 @@ async def _log_lead_response(
         response_kind,
         response_text,
     )
+
+
+async def _lead_promo_awaiting_answer(conn: asyncpg.Connection, lead_id: int) -> bool:
+    """Приходило ли лиду промо, на которое он ещё не ответил.
+
+    Правило владельца (решение 2, ТЗ 2026-09-23 «автозвонок по промо») — одно
+    для клиентов и лидов, срок не ограничен. Рассылка — строка `lead_logs` с
+    кампанией из `LEADS_PROMO_CAMPAIGNS` и `sent_at`; ответ — входящее
+    `interest` или `stop` позже самой поздней такой рассылки. Автоответы
+    (`inbound_auto_reply_*`) и прочие входящие рассылкой не считаются.
+    """
+    return bool(await conn.fetchval(
+        """
+        WITH last_promo AS (
+            SELECT MAX(sent_at) AS sent_at
+            FROM lead_logs
+            WHERE lead_id = $1
+              AND campaign = ANY($2::text[])
+              AND sent_at IS NOT NULL
+        )
+        SELECT lp.sent_at IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1
+               FROM lead_logs r
+               WHERE r.lead_id = $1
+                 AND r.campaign = 'inbound'
+                 AND r.response_kind IN ('interest', 'stop')
+                 AND r.response_at > lp.sent_at
+           )
+        FROM last_promo lp
+        """,
+        lead_id,
+        list(LEADS_PROMO_CAMPAIGNS),
+    ))
+
+
+async def _record_promo_callback(
+    conn: asyncpg.Connection,
+    *,
+    source: str,
+    client_id: int | None = None,
+    lead_id: int | None = None,
+    phone: str | None,
+    name: str | None,
+    response_text: str,
+) -> None:
+    """Заявка на звонок по отклику на промо — строка `promo_callbacks`.
+
+    Договорённость с админ-ботом (миграция 0015): он читает новые строки,
+    заводит сделку в «Новом лиде» с тегом «Отклик на промо», дальше звонит
+    автозвонок. Рабочий бот в CRM не пишет. Сбой записи не должен лишить
+    человека ответа: исключение уходит в журнал, обработчик идёт дальше.
+    """
+    try:
+        await conn.execute(
+            """
+            INSERT INTO promo_callbacks (source, client_id, lead_id, phone, name, response_text)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            source,
+            client_id,
+            lead_id,
+            phone,
+            name,
+            response_text,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не записал заявку на звонок по отклику на промо (%s %s)",
+            source,
+            client_id if source == "client" else lead_id,
+        )
 
 
 async def _send_lead_auto_reply(
@@ -3554,10 +3638,13 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
         except ValueError:
             rating_score = None
     is_stop = normalized_compact in {"stop", "стоп", "стоn", "стоp"}
-    is_interest = normalized_lower.startswith("1")
+    is_interest = PROMO_INTEREST_RE.fullmatch(normalized_text) is not None
     # Сообщение, которое заберёт одна из давно работающих веток: оценка работы,
     # отписка, отклик на промо. Раньше на этом месте стоял выход — теперь ждём,
     # пока станет ясно, не подтверждения ли мы ждём от этого человека.
+    # С 2026-09-23 отклик — только чистая «1»: «160 на 200» сюда больше не
+    # попадает и от ждущего подтверждения клиента уходит владельцу как
+    # непонятый ответ.
     known_branch = is_stop or is_interest or rating_score is not None
 
     phone_value = None
@@ -3650,9 +3737,20 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
                 )
                 return True
 
-            if is_interest:
+            # Отклик лида засчитывается, только если промо ему приходило и он
+            # на него ещё не отвечал (решение 2 ТЗ 2026-09-23); иначе «1» —
+            # обычное входящее и уходит в «other» ниже.
+            if is_interest and await _lead_promo_awaiting_answer(conn, lead["id"]):
                 channel_kind = _resolve_channel_kind(channel_alias, "leads", channel_uuid)
                 await _log_lead_response(conn, lead_id=lead["id"], response_kind="interest", response_text=normalized_text)
+                await _record_promo_callback(
+                    conn,
+                    source="lead",
+                    lead_id=lead["id"],
+                    phone=lead.get("phone"),
+                    name=lead.get("full_name") or lead.get("name"),
+                    response_text=normalized_text,
+                )
                 await _send_lead_auto_reply(
                     conn,
                     lead_row=lead,
@@ -3660,16 +3758,17 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
                     text=LEADS_AUTO_REPLY,
                     channel_kind=channel_kind,
                 )
-                msg_admin = (
-                    "Лид откликнулся на промо (1)\n"
-                    f"Имя: {(lead.get('full_name') or lead.get('name') or 'Лид')}\n"
-                    f"Телефон: {lead.get('phone') or 'неизвестно'}"
-                )
-                for admin_id in ADMIN_TG_IDS:
-                    try:
-                        await bot.send_message(admin_id, msg_admin)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("Failed to notify admin %s about lead interest: %s", admin_id, exc)
+                if PROMO_INTEREST_ADMIN_MESSAGE:
+                    msg_admin = (
+                        "Лид откликнулся на промо (1)\n"
+                        f"Имя: {(lead.get('full_name') or lead.get('name') or 'Лид')}\n"
+                        f"Телефон: {lead.get('phone') or 'неизвестно'}"
+                    )
+                    for admin_id in ADMIN_TG_IDS:
+                        try:
+                            await bot.send_message(admin_id, msg_admin)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to notify admin %s about lead interest: %s", admin_id, exc)
                 return True
 
             await _log_lead_response(conn, lead_id=lead["id"], response_kind="other", response_text=normalized_text)
@@ -3746,7 +3845,16 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
                 """,
                 client["id"],
             )
-            await _notify_admins_about_promo_interest(client, normalized_text)
+            await _record_promo_callback(
+                conn,
+                source="client",
+                client_id=client["id"],
+                phone=client["phone"],
+                name=client["full_name"],
+                response_text=normalized_text,
+            )
+            if PROMO_INTEREST_ADMIN_MESSAGE:
+                await _notify_admins_about_promo_interest(client, normalized_text)
             try:
                 contact = ClientContact(
                     client_id=client["id"],
