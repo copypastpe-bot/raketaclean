@@ -20,14 +20,10 @@ class WahelpWebhookServer:
         *,
         token: str | None = None,
         inbound_handler: Callable[[Mapping[str, Any]], Awaitable[bool]] | None = None,
-        amocrm_token: str | None = None,
-        amocrm_handler: Callable[[Mapping[str, Any]], Awaitable[bool]] | None = None,
     ) -> None:
         self.pool = pool
         self.token = token
         self.inbound_handler = inbound_handler
-        self.amocrm_token = amocrm_token
-        self.amocrm_handler = amocrm_handler
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -35,8 +31,6 @@ class WahelpWebhookServer:
         app = web.Application()
         app.router.add_post("/wahelp/webhook", self._handle)
         app.router.add_post("/wahelp/webhook/", self._handle)
-        app.router.add_post("/amocrm/webhook", self._handle_amocrm)
-        app.router.add_post("/amocrm/webhook/", self._handle_amocrm)
         return app
 
     async def start(self, host: str, port: int) -> None:
@@ -83,35 +77,6 @@ class WahelpWebhookServer:
             logger.debug("Webhook payload ignored: %s", payload)
         return web.json_response({"ok": True, "handled": handled or custom_handled})
 
-    async def _handle_amocrm(self, request: web.Request) -> web.Response:
-        if not self.amocrm_token:
-            return web.json_response({"ok": False, "error": "amocrm_disabled"}, status=503)
-        provided = request.headers.get("X-Amocrm-Token") or request.rel_url.query.get("token")
-        if provided != self.amocrm_token:
-            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
-
-        try:
-            if "application/json" in (request.content_type or ""):
-                payload_any: Any = await request.json()
-                if not isinstance(payload_any, Mapping):
-                    return web.json_response({"ok": False, "error": "invalid_payload"}, status=400)
-                payload: Mapping[str, Any] = payload_any
-            else:
-                form = await request.post()
-                payload = {str(key): str(value) for key, value in form.items()}
-        except Exception:
-            return web.json_response({"ok": False, "error": "invalid_payload"}, status=400)
-
-        custom_handled = False
-        if self.amocrm_handler is not None:
-            try:
-                custom_handled = await self.amocrm_handler(payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("amoCRM handler failed: %s", exc)
-        if not custom_handled:
-            logger.debug("amoCRM webhook payload ignored: %s", payload)
-        return web.json_response({"ok": True, "handled": custom_handled})
-
 
 async def start_wahelp_webhook(
     pool: asyncpg.Pool,
@@ -120,15 +85,11 @@ async def start_wahelp_webhook(
     port: int,
     token: str | None = None,
     inbound_handler: Callable[[Mapping[str, Any]], Awaitable[bool]] | None = None,
-    amocrm_token: str | None = None,
-    amocrm_handler: Callable[[Mapping[str, Any]], Awaitable[bool]] | None = None,
 ) -> WahelpWebhookServer:
     server = WahelpWebhookServer(
         pool,
         token=token,
         inbound_handler=inbound_handler,
-        amocrm_token=amocrm_token,
-        amocrm_handler=amocrm_handler,
     )
     await server.start(host, port)
     return server
