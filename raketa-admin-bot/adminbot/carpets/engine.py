@@ -423,6 +423,7 @@ class CarpetEngine:
             order_date=_order_date(lead),
             price=None if lead.get("price") is None else Decimal(str(lead["price"])),
             name=lead.get("name"),
+            address=field_value(lead, ids.FIELD_ADDRESS),
         )
 
     @staticmethod
@@ -431,7 +432,7 @@ class CarpetEngine:
         return {"lead_id": lead.lead_id, "pipeline_id": lead.pipeline_id,
                 "date": when.isoformat() if when else None,
                 "price": None if lead.price is None else int(lead.price),
-                "name": lead.name}
+                "name": lead.name, "address": lead.address}
 
 
 def _order_date(lead: dict) -> Optional[date]:

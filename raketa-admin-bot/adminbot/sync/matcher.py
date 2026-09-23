@@ -74,6 +74,7 @@ class LeadInfo:
     specialist_ids: tuple[int, ...] = ()   # поле «Специалист»: enum-значения мастеров
     price: Optional[Decimal] = None        # бюджет сделки: часто плановый или заглушка
     name: Optional[str] = None             # для карточки-вопроса владельцу
+    address: Optional[str] = None          # для карточки-вопроса владельцу (задача 7, ТЗ 2026-09-22)
 
     @property
     def is_open(self) -> bool:

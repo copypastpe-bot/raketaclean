@@ -492,7 +492,7 @@ class CalendarEngine:
             # первичной воронки или готовая сделка реализации.
             options = [{"lead_id": info.lead_id, "pipeline_id": info.pipeline_id,
                         "date": info.order_date.isoformat() if info.order_date else None,
-                        "name": info.name}
+                        "name": info.name, "address": info.address}
                        for info in candidates if info.lead_id in decision.options]
             return await self._ask_owner(link, decision.kind, payload={"options": options})
 
@@ -912,6 +912,7 @@ def _to_lead_info(lead: dict) -> LeadInfo:
         created_date=_stamp_to_date(lead.get("created_at")),
         closed_date=_stamp_to_date(lead.get("closed_at")),
         name=lead.get("name"),
+        address=field_value(lead, ids.FIELD_ADDRESS),
     )
 
 

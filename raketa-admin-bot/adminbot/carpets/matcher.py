@@ -54,6 +54,7 @@ class CarpetLead:
     order_date: Optional[date] = None
     price: Optional[Decimal] = None
     name: Optional[str] = None
+    address: Optional[str] = None          # для карточки-вопроса владельцу (задача 7, ТЗ 2026-09-22)
 
     @property
     def is_carpet(self) -> bool:

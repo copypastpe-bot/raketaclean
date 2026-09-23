@@ -522,6 +522,7 @@ class Engine:
             specialist_ids=specialist_ids(lead),
             price=None if lead.get("price") is None else Decimal(str(lead["price"])),
             name=lead.get("name"),
+            address=field_value(lead, ids.FIELD_ADDRESS),
         )
 
 
@@ -561,6 +562,7 @@ def _option(info: LeadInfo) -> dict:
         "date": when.isoformat() if when else None,
         "price": None if info.price is None else int(info.price),
         "name": info.name,
+        "address": info.address,
     }
 
 
