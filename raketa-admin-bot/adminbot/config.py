@@ -192,6 +192,10 @@ class Settings:
     # выключатель для календаря, заказов и ковров. По умолчанию выключен —
     # если амо поменяет формат примечания, откат одной командой.
     amo_child_by_note: bool = False
+    # Сверка «номер + имя» записи с контактом сделки и напоминание владельцу
+    # при расхождении (задача 5, ТЗ 2026-09-22): свой выключатель, по
+    # умолчанию выключен. Выключено — ни сверки в движке, ни цикла напоминаний.
+    gcal_contact_check_enabled: bool = False
 
     # Напоминание владельцу про сделку без адреса (задача 7): свой выключатель,
     # по умолчанию выключен — выкатывается последним, когда задачи 3-6 уже
@@ -316,6 +320,7 @@ class Settings:
             salesbot_wait_sec=_int("AMO_SYNC_SALESBOT_WAIT_SEC", 600),
             poll_interval_sec=_int("AMO_SYNC_POLL_INTERVAL_SEC", 60),
             amo_child_by_note=_flag("AMO_CHILD_BY_NOTE", False),
+            gcal_contact_check_enabled=_flag("GCAL_CONTACT_CHECK_ENABLED", False),
             address_reminder_enabled=_flag("ADDRESS_REMINDER_ENABLED", False),
             address_reminder_poll_interval_sec=_int("ADDRESS_REMINDER_POLL_INTERVAL_SEC", 3600),
             order_deletions_enabled=_flag("ORDER_DELETIONS_ENABLED", False),
