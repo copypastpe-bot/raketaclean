@@ -50,6 +50,13 @@ class Order:
     # None — выводим по мастерам, как раньше.
     service_kind: Optional[str] = None
     specialist_enums: Optional[tuple[int, ...]] = None
+    # Мастер выбрал запись календаря в сценарии рабочего бота (задача 9, ТЗ
+    # 2026-09-22): `calendar_event_id` — событие Google Calendar, `deal_lead_id` —
+    # сделка воронки 2, если она уже была известна на момент выбора. Заполнены —
+    # движок ведёт заказ напрямую, без матчера (задача 10 той же ТЗ). Уборки этих
+    # полей не знают — читаются только заказами химчистки.
+    calendar_event_id: Optional[str] = None
+    deal_lead_id: Optional[int] = None
 
     @property
     def order_date(self):

@@ -43,7 +43,11 @@ CREATE TABLE public.orders (
     payment_method  text,
     awaiting_wire_payment boolean NOT NULL DEFAULT false,
     rating_score    smallint,
-    created_at      timestamptz NOT NULL DEFAULT now()
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    -- Задача 9/10 ТЗ 2026-09-22 (миграция рабочего бота 0013): запись календаря
+    -- и сделка воронки 2, если мастер выбрал их в сценарии заказа.
+    calendar_event_id text,
+    deal_lead_id    bigint
 );
 
 CREATE TABLE public.order_masters (

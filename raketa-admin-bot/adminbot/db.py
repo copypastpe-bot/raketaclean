@@ -50,6 +50,8 @@ SELECT
     o.rating_score,
     o.payment_method,
     o.awaiting_wire_payment,
+    o.calendar_event_id,
+    o.deal_lead_id,
     EXISTS (
         SELECT 1 FROM public.orders prev
         WHERE prev.phone_digits = o.phone_digits AND prev.created_at < o.created_at
@@ -154,6 +156,8 @@ def _order_from_row(row: asyncpg.Record) -> Order:
         is_repeat_client=bool(row["is_repeat_client"]),
         client_name=(row["client_full_name"] or row["customer_name"]),
         address=row["address"],
+        calendar_event_id=row["calendar_event_id"],
+        deal_lead_id=row["deal_lead_id"],
     )
 
 
