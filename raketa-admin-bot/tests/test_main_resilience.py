@@ -399,3 +399,59 @@ def test_deletion_text_lead_gone_has_no_dead_crm_link():
 
     assert "leads/detail" not in text
     assert "связку убрал" in text
+
+
+# --- отклики на промо (ТЗ 2026-09-23, задача 6): свой выключатель и dry_run ---
+
+def test_promo_callback_disabled_returns_none():
+    from adminbot.main import _build_promo_callback
+
+    settings = _minimal_settings(promo_callback_enabled=False)
+
+    assert _build_promo_callback(settings, None, None, None, object(), object()) is None
+
+
+def test_promo_callback_rehearsal_uses_the_rehearsal_amo_client():
+    from adminbot.main import _build_promo_callback
+
+    settings = _minimal_settings(promo_callback_enabled=True, promo_callback_dry_run=True)
+    live, rehearsal = object(), object()
+
+    sync = _build_promo_callback(settings, None, None, None, live, rehearsal)
+
+    assert sync.amo is rehearsal
+    assert sync.dry_run is True and sync.mode == "rehearsal"
+
+
+def test_promo_callback_live_uses_the_live_amo_client():
+    from adminbot.main import _build_promo_callback
+
+    settings = _minimal_settings(promo_callback_enabled=True, promo_callback_dry_run=False)
+    live, rehearsal = object(), object()
+
+    sync = _build_promo_callback(settings, None, None, None, live, rehearsal)
+
+    assert sync.amo is live
+    assert sync.dry_run is False and sync.mode == "live"
+
+
+async def test_promo_callback_failure_letter_goes_to_owner_mail():
+    from adminbot.main import MAIL_PROMO_CALLBACK_FAILED, _make_promo_callback_failure_sender
+    from adminbot.promo_callback.sync import PromoCallback
+
+    class Mail:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, text, *, kind, ref=None, reply_markup=None):
+            self.sent.append((text, kind, ref))
+
+    mail = Mail()
+    send = _make_promo_callback_failure_sender(mail, "https://x", dry_run=False)
+
+    await send(PromoCallback(id=5, source="client", phone="+79601861067", name="Ирина"),
+               None, "amoCRM 500")
+
+    [(text, kind, ref)] = mail.sent
+    assert kind == MAIL_PROMO_CALLBACK_FAILED and ref == 5
+    assert "позвоните руками" in text and "+79601861067" in text

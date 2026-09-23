@@ -51,6 +51,8 @@ from adminbot.control import PgControlPanel, sync_allowed
 from adminbot.heartbeat import HeartbeatWriter
 from adminbot.mail import MailBox, mail_settings_from_env
 from adminbot.phone import for_owner
+from adminbot.promo_callback.store import PgPromoCallbackSource, PgPromoCallbackStore
+from adminbot.promo_callback.sync import PromoCallbackSync
 from adminbot.sync.address_reminder import DEFAULT_CAP, AddressReminder, PgReminderSource
 from adminbot.sync.backlog import BacklogRunner
 from adminbot.sync.deletions import DeletionHandler, DeletionOutcome
@@ -73,6 +75,8 @@ from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
     carpet_held_text, carpet_question_card, carpet_report_text, mark_rehearsal,
     order_done_text, question_card, summary_text, wire_payment_synced_text)
+from adminbot.tg.promo_cards import (
+    failure_text as promo_failure_text, rehearsal_text as promo_rehearsal_text)
 from adminbot.tg.outbox import (
     SUMMARY_TTL_SEC, MemoryMailStore, OwnerMail, PgMailStore, Purpose)
 from adminbot.tg.session import build_session
@@ -106,6 +110,8 @@ MAIL_AUTOCALL_CONNECTED = "autocall_connected"
 MAIL_AUTOCALL_NO_PHONE = "autocall_no_phone"
 MAIL_AUTOCALL_MANAGER = "autocall_manager"
 MAIL_WIRE_PAYMENT_SYNCED = "wire_payment_synced"
+MAIL_PROMO_CALLBACK_REHEARSAL = "promo_callback_rehearsal"
+MAIL_PROMO_CALLBACK_FAILED = "promo_callback_failed"
 
 
 @dataclass
@@ -140,6 +146,9 @@ class App:
     # Доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22): свой
     # выключатель, поэтому обычно пусто, даже когда amo_sync уже в бою.
     wire_payment: Optional[Any] = None
+    # Отклик «1» на промо → сделка с тегом (ТЗ 2026-09-23): свой выключатель,
+    # поэтому обычно пусто.
+    promo_callback: Optional[Any] = None
     # Отдельный send-only бот для сообщений менеджеру (WORKER_TG_TOKEN) — не участвует
     # в опросе, но его aiohttp-сессия открывается лениво при первой отправке и должна
     # закрыться вместе с сервисом, как и сессия self.bot.
@@ -186,6 +195,9 @@ class App:
         if self.wire_payment is not None:
             background.append(asyncio.create_task(
                 self.wire_payment.run_forever(self.stop), name="wire_payment"))
+        if self.promo_callback is not None:
+            background.append(asyncio.create_task(
+                self.promo_callback.run_forever(self.stop), name="promo_callback"))
         if self.mail is not None:
             background.append(asyncio.create_task(
                 self.mail.run_forever(self.stop), name="mail"))
@@ -300,6 +312,12 @@ async def build_app(settings: Settings) -> App:
     # опрашивать реже, отчёт владельцу свой.
     wire_payment = _build_wire_payment(settings, bot_pool, own_pool, mail,
                                        specialists, services, live_amo, rehearsal_amo)
+
+    # Отклик «1» на промо → контакт → сделка с тегом «Отклик на промо» (ТЗ
+    # 2026-09-23, задачи 5–6): свой выключатель и свой цикл. Дальше сделку
+    # берёт автозвонок сам, по тегу.
+    promo_callback = _build_promo_callback(settings, bot_pool, own_pool, mail,
+                                           live_amo, rehearsal_amo)
 
     source = PgOrderSource(bot_pool, own_pool, settings.backlog_from)
     watcher = Watcher(
@@ -471,6 +489,7 @@ async def build_app(settings: Settings) -> App:
                cleaning_address_reminder=cleaning_address_reminder,
                contact_reminder=contact_reminder,
                wire_payment=wire_payment,
+               promo_callback=promo_callback,
                mail=mail,
                heartbeat=heartbeat,
                stop=asyncio.Event())
@@ -642,6 +661,35 @@ def _build_wire_payment(settings: Settings, bot_pool: Any, own_pool: Any, mail: 
         on_synced=_make_wire_payment_sender(mail, settings.amo_base_url, dry_run=dry_run),
     )
     log.info("Оплата по счёту: включена, режим %s",
+             "репетиция" if dry_run else "БОЕВОЙ")
+    return sync
+
+
+def _build_promo_callback(settings: Settings, bot_pool: Any, own_pool: Any, mail: OwnerMail,
+                          live_amo: AmoClient, rehearsal_amo: AmoClient):
+    """Собрать отклики на промо: заявка → контакт → сделка с тегом (ТЗ 2026-09-23).
+
+    Свой выключатель, по умолчанию выключен. Свой dry_run: выбирает клиента амо
+    (`rehearsal_amo` читает CRM по-настоящему и не пишет). Хранилище одно —
+    Postgres, в отличие от остальных репетиций: у репетиции и у боя там свои
+    строки и своя закладка (миграция 018), поэтому репетиция не отнимает
+    работу у боя, а отчёт по каждой заявке уходит один раз и после рестарта.
+    """
+    if not settings.promo_callback_enabled:
+        log.info("Отклики на промо: функция выключена настройкой PROMO_CALLBACK_ENABLED")
+        return None
+
+    dry_run = settings.promo_callback_dry_run
+    sync = PromoCallbackSync(
+        source=PgPromoCallbackSource(bot_pool),
+        store=PgPromoCallbackStore(own_pool),
+        amo=rehearsal_amo if dry_run else live_amo,
+        dry_run=dry_run,
+        on_rehearsal=_make_promo_callback_rehearsal_sender(mail),
+        on_failure=_make_promo_callback_failure_sender(mail, settings.amo_base_url,
+                                                       dry_run=dry_run),
+    )
+    log.info("Отклики на промо: включены, режим %s",
              "репетиция" if dry_run else "БОЕВОЙ")
     return sync
 
@@ -989,6 +1037,28 @@ def _make_wire_payment_sender(mail: OwnerMail, amo_base_url: str, *, dry_run: bo
                                      tasks_closed=result.tasks_closed,
                                      stage_moved=result.stage_moved, dry_run=dry_run),
             kind=MAIL_WIRE_PAYMENT_SYNCED, ref=order.order_id)
+
+    return send
+
+
+def _make_promo_callback_rehearsal_sender(mail: OwnerMail):
+    """Репетиция откликов на промо: что робот сделал бы по заявке."""
+
+    async def send(callback, contact_id) -> None:
+        await mail.send(promo_rehearsal_text(callback, contact_id),
+                        kind=MAIL_PROMO_CALLBACK_REHEARSAL, ref=callback.id)
+
+    return send
+
+
+def _make_promo_callback_failure_sender(mail: OwnerMail, amo_base_url: str, *,
+                                        dry_run: bool = False):
+    """Сделку по отклику завести не вышло — владелец звонит сам."""
+
+    async def send(callback, lead_id, error: str) -> None:
+        await mail.send(promo_failure_text(callback, error=error, lead_id=lead_id,
+                                           base_url=amo_base_url, dry_run=dry_run),
+                        kind=MAIL_PROMO_CALLBACK_FAILED, ref=callback.id)
 
     return send
 

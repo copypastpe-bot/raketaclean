@@ -21,6 +21,9 @@
 #   sudo raketa-admin-bot-update --wire-payment-on --wire-payment-rehearsal   доводка оплаты по счёту: репетиция
 #   sudo raketa-admin-bot-update --wire-payment-live                        доводка оплаты по счёту: боевой режим
 #   sudo raketa-admin-bot-update --wire-payment-off                         доводка оплаты по счёту: выключить
+#   sudo raketa-admin-bot-update --promo-callback-on --promo-callback-rehearsal   отклики «1» на промо → сделка: репетиция
+#   sudo raketa-admin-bot-update --promo-callback-live                          отклики на промо: боевой режим
+#   sudo raketa-admin-bot-update --promo-callback-off                           отклики на промо: выключить
 #   sudo raketa-admin-bot-update --carpets-on --carpets-rehearsal   ковры: репетиция
 #   sudo raketa-admin-bot-update --carpets-live                     ковры: боевой режим
 #   sudo raketa-admin-bot-update --carpets-held                     ковры: какие письма отложены и почему
@@ -72,6 +75,8 @@ DELETIONS=""
 DELETIONS_DRY=""
 WIRE_PAYMENT=""
 WIRE_PAYMENT_DRY=""
+PROMO_CALLBACK=""
+PROMO_CALLBACK_DRY=""
 CLEANING_DRY=""
 CLEANING_FROM=""
 GCAL=""
@@ -128,6 +133,10 @@ for arg in "$@"; do
         --wire-payment-off)       WIRE_PAYMENT=0 ;;
         --wire-payment-live)      WIRE_PAYMENT_DRY=0 ;;
         --wire-payment-rehearsal) WIRE_PAYMENT_DRY=1 ;;
+        --promo-callback-on)        PROMO_CALLBACK=1 ;;
+        --promo-callback-off)       PROMO_CALLBACK=0 ;;
+        --promo-callback-live)      PROMO_CALLBACK_DRY=0 ;;
+        --promo-callback-rehearsal) PROMO_CALLBACK_DRY=1 ;;
         --cleaning-off)       CLEANING=0 ;;
         --cleaning-live)      CLEANING_DRY=0 ;;
         --cleaning-rehearsal) CLEANING_DRY=1 ;;
@@ -313,6 +322,8 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$DELETIONS_DRY" ] && set_flag ORDER_DELETIONS_DRY_RUN "$DELETIONS_DRY"
 [ -n "$WIRE_PAYMENT" ] && set_flag WIRE_PAYMENT_ENABLED "$WIRE_PAYMENT"
 [ -n "$WIRE_PAYMENT_DRY" ] && set_flag WIRE_PAYMENT_DRY_RUN "$WIRE_PAYMENT_DRY"
+[ -n "$PROMO_CALLBACK" ] && set_flag PROMO_CALLBACK_ENABLED "$PROMO_CALLBACK"
+[ -n "$PROMO_CALLBACK_DRY" ] && set_flag PROMO_CALLBACK_DRY_RUN "$PROMO_CALLBACK_DRY"
 [ -n "$CLEANING_DRY" ] && set_flag CLEANING_SYNC_DRY_RUN "$CLEANING_DRY"
 [ -n "$CLEANING_FROM" ] && set_flag CLEANING_BACKLOG_FROM "$CLEANING_FROM"
 [ -n "$TELEGRAM_PROXY_SET" ] && set_flag TELEGRAM_PROXY_URL "$TELEGRAM_PROXY"
@@ -365,6 +376,9 @@ echo "удаления: $([ "$now_deletions" = 1 ] && echo "ВКЛЮЧЕНЫ, $(
 now_wire_payment=$(flag_of WIRE_PAYMENT_ENABLED)
 now_wire_payment_dry=$(flag_of WIRE_PAYMENT_DRY_RUN)
 echo "оплата по счёту: $([ "$now_wire_payment" = 1 ] && echo "ВКЛЮЧЕНА, $([ "$now_wire_payment_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключена')"
+now_promo_callback=$(flag_of PROMO_CALLBACK_ENABLED)
+now_promo_callback_dry=$(flag_of PROMO_CALLBACK_DRY_RUN)
+echo "отклики на промо: $([ "$now_promo_callback" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_promo_callback_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключены')"
 now_gcal=$(flag_of GCAL_ENABLED)
 now_gcal_dry=$(flag_of GCAL_DRY_RUN)
 echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"

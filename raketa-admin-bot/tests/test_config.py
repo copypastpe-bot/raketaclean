@@ -283,3 +283,28 @@ def test_wire_payment_env_overrides(monkeypatch):
 
     assert s.wire_payment_enabled is True
     assert s.wire_payment_dry_run is False
+
+
+# --- отклики на промо (ТЗ 2026-09-23, задача 6) ---
+
+def test_promo_callback_is_off_by_default(monkeypatch):
+    """Свой выключатель, по умолчанию выключен и в репетиции."""
+    _minimal_env(monkeypatch)
+    monkeypatch.delenv("PROMO_CALLBACK_ENABLED", raising=False)
+    monkeypatch.delenv("PROMO_CALLBACK_DRY_RUN", raising=False)
+
+    s = Settings.from_env()
+
+    assert s.promo_callback_enabled is False
+    assert s.promo_callback_dry_run is True
+
+
+def test_promo_callback_env_overrides(monkeypatch):
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("PROMO_CALLBACK_ENABLED", "1")
+    monkeypatch.setenv("PROMO_CALLBACK_DRY_RUN", "0")
+
+    s = Settings.from_env()
+
+    assert s.promo_callback_enabled is True
+    assert s.promo_callback_dry_run is False

@@ -221,6 +221,12 @@ class Settings:
     wire_payment_enabled: bool = False
     wire_payment_dry_run: bool = True
 
+    # Отклик «1» на промо → сделка с тегом «Отклик на промо» (ТЗ 2026-09-23,
+    # задача 6): свой выключатель, по умолчанию выключен. Своя репетиция:
+    # модуль пишет в amoCRM (контакт, сделка, примечание).
+    promo_callback_enabled: bool = False
+    promo_callback_dry_run: bool = True
+
     # Мастер заказа → вид работ для поля «Услуга»
     service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
@@ -334,6 +340,8 @@ class Settings:
             order_deletions_dry_run=_flag("ORDER_DELETIONS_DRY_RUN", True),
             wire_payment_enabled=_flag("WIRE_PAYMENT_ENABLED", False),
             wire_payment_dry_run=_flag("WIRE_PAYMENT_DRY_RUN", True),
+            promo_callback_enabled=_flag("PROMO_CALLBACK_ENABLED", False),
+            promo_callback_dry_run=_flag("PROMO_CALLBACK_DRY_RUN", True),
             service_by_master=_service_by_master("SERVICE_BY_MASTER",
                                                  DEFAULT_SERVICE_BY_MASTER),
             heartbeat_enabled=_flag("HEARTBEAT_ENABLED", False),
