@@ -258,3 +258,28 @@ def test_order_deletions_env_overrides(monkeypatch):
 
     assert s.order_deletions_enabled is True
     assert s.order_deletions_dry_run is False
+
+
+# --- доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22) ---
+
+def test_wire_payment_is_off_by_default(monkeypatch):
+    """Свой выключатель, по умолчанию выключен и в репетиции."""
+    _minimal_env(monkeypatch)
+    monkeypatch.delenv("WIRE_PAYMENT_ENABLED", raising=False)
+    monkeypatch.delenv("WIRE_PAYMENT_DRY_RUN", raising=False)
+
+    s = Settings.from_env()
+
+    assert s.wire_payment_enabled is False
+    assert s.wire_payment_dry_run is True
+
+
+def test_wire_payment_env_overrides(monkeypatch):
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("WIRE_PAYMENT_ENABLED", "1")
+    monkeypatch.setenv("WIRE_PAYMENT_DRY_RUN", "0")
+
+    s = Settings.from_env()
+
+    assert s.wire_payment_enabled is True
+    assert s.wire_payment_dry_run is False

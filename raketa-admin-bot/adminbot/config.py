@@ -214,6 +214,13 @@ class Settings:
     order_deletions_enabled: bool = False
     order_deletions_dry_run: bool = True
 
+    # Доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22): свой
+    # выключатель, по умолчанию выключен. Свой dry_run, а не общий
+    # AMO_SYNC_DRY_RUN — основной обмен уже в бою, ронять его в репетицию
+    # ради этой доводки нельзя.
+    wire_payment_enabled: bool = False
+    wire_payment_dry_run: bool = True
+
     # Мастер заказа → вид работ для поля «Услуга»
     service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
@@ -325,6 +332,8 @@ class Settings:
             address_reminder_poll_interval_sec=_int("ADDRESS_REMINDER_POLL_INTERVAL_SEC", 3600),
             order_deletions_enabled=_flag("ORDER_DELETIONS_ENABLED", False),
             order_deletions_dry_run=_flag("ORDER_DELETIONS_DRY_RUN", True),
+            wire_payment_enabled=_flag("WIRE_PAYMENT_ENABLED", False),
+            wire_payment_dry_run=_flag("WIRE_PAYMENT_DRY_RUN", True),
             service_by_master=_service_by_master("SERVICE_BY_MASTER",
                                                  DEFAULT_SERVICE_BY_MASTER),
             heartbeat_enabled=_flag("HEARTBEAT_ENABLED", False),
