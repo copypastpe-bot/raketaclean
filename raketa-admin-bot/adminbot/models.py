@@ -123,6 +123,14 @@ class CalendarLink:
     question_msg_id: Optional[int] = None
     done_msg_id: Optional[int] = None  # отчёт о работе отправлен — второй раз не пишем
     last_error: Optional[str] = None
+    # Сверка «номер + имя» записи с контактом сделки (задача 5, ТЗ 2026-09-22):
+    # то же устройство, что у напоминания про адрес (см. AmoLink ниже) — текст
+    # расхождения человеческим языком, сколько раз уже напомнили, когда ушло
+    # последнее и не пора ли молчать (кнопка «Я разобрался» или потолок в 7).
+    contact_mismatch: Optional[str] = None
+    contact_reminder_count: int = 0
+    contact_reminder_sent_at: Optional[datetime] = None
+    contact_reminder_muted: bool = False
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
