@@ -325,6 +325,12 @@ ADDRESS_BACKFILL_LOOKBACK_DAYS = 7
 # если связка не появилась за отведённое время (ТЗ 2026-09-16, задача 5).
 PENDING_ORDER_REPORTS_INTERVAL_SEC = max(15, _env_int("PENDING_ORDER_REPORTS_INTERVAL_SEC", 60))
 DEAL_LINK_WAIT_TIMEOUT_SEC = max(60, _env_int("DEAL_LINK_WAIT_TIMEOUT_SEC", 1800))
+# Выбор записи календаря после телефона в сценарии «🧾 Заказ» (ТЗ «цепочка
+# заказа» 2026-09-22, задача 9): при двух и более открытых записях на один
+# номер за сегодня/вчера мастер выбирает, какую проводит, и заказ уезжает
+# в базу со ссылкой на запись/сделку (adminbot.calendar_jobs, задача 8 того
+# же ТЗ). По умолчанию выключено — бот в представление не смотрит вовсе.
+ORDER_CALENDAR_PICK = _env_int("ORDER_CALENDAR_PICK", 0) == 1
 
 # env rules
 MIN_CASH = Decimal(os.getenv("MIN_CASH", "2500"))
