@@ -31,8 +31,8 @@ from typing import Any, Callable, Optional
 from adminbot.amo import ids
 from adminbot.amo.client import AmoError
 from adminbot.amo.fields import (
-    MOSCOW_TZ, checkbox_field, datetime_field, enum_field, enums_field, field_value,
-    lead_contact_ids, order_date_msk, text_field,
+    MOSCOW_TZ, checkbox_field, contact_phones, datetime_field, enum_field, enums_field,
+    field_value, lead_contact_ids, order_date_msk, text_field,
 )
 from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.matcher import match_event
@@ -140,8 +140,12 @@ SILENT_KINDS: dict[EventKind, str] = {
 # Путь А: сделка в воронке реализации уже есть — дозаполнить и оставить.
 PATH_A: tuple[str, ...] = ("fill_realization", "fix_contact_name", "note_from_calendar")
 # Путь Б: есть лид первичной — заполнить, передать в работу, дождаться автосделки.
+# `check_contact` — сверка «номер + имя» записи с контактом лида воронки 1
+# (задача 5, ТЗ 2026-09-22): контакт здесь известен с самого начала пути, шаг
+# читает его сам и в scratch не заглядывает — переживает перезапуск робота.
 PATH_B: tuple[str, ...] = (
-    "note_duplicates", "fill_primary", "move_primary_success", "wait_salesbot") + PATH_A
+    "check_contact", "note_duplicates", "fill_primary", "move_primary_success",
+    "wait_salesbot") + PATH_A
 # Путь В: сделки нет вовсе — контакт, лид, дальше как в пути Б.
 PATH_C: tuple[str, ...] = (
     "ensure_contact", "create_primary_lead", "move_primary_success",
@@ -190,6 +194,7 @@ class CalendarEngine:
         dry_run: bool = True,
         salesbot_wait_sec: int = DEFAULT_SALESBOT_WAIT_SEC,
         child_by_note: bool = False,
+        contact_check: bool = False,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
         self.amo = amo
@@ -200,6 +205,10 @@ class CalendarEngine:
         # «первую свободную» сделку по телефону (задача 1 ТЗ 2026-09-22).
         # Выключено — старое поведение (AMO_CHILD_BY_NOTE, откат одной командой).
         self.child_by_note = child_by_note
+        # Сверка «номер + имя» записи с контактом сделки (задача 5, ТЗ 2026-09-22):
+        # свой выключатель, по умолчанию выключен. Выключено — ни сверки на
+        # путях Б/В, ни сверки при смене номера в `_refresh`.
+        self.contact_check = contact_check
         self.now = now
         # У каждого движка свои черновики: в сервисе их работает несколько сразу
         # (наблюдатель, репетиция), и путать их расчёты нельзя.
@@ -613,6 +622,11 @@ class CalendarEngine:
         if contacts:
             scratch.contact_id = int(contacts[0]["id"])
             scratch.is_new_client = False
+            # Путь В: контакт НАШЁЛСЯ, а не создан роботом — сверка «номер +
+            # имя» (задача 5, ТЗ 2026-09-22). Свежесозданный контакт (ветка
+            # ниже) сверять незачем: он по построению совпадает с записью.
+            if self.contact_check:
+                await self._apply_contact_check(event, contacts[0])
             return StepResult()
 
         intent = await self._write(
@@ -621,6 +635,19 @@ class CalendarEngine:
                                     phone=normalize_phone(event.phone10)))
         if intent and intent.entity_id:
             scratch.contact_id = intent.entity_id
+        return StepResult()
+
+    async def _step_check_contact(self, event: ParsedEvent, link: CalendarLink) -> StepResult:
+        """Путь Б: сверка «номер + имя» записи с контактом лида воронки 1.
+
+        Контакт этого лида читается заново (`_contact_for_lead`), а не через
+        `_Scratch`: путь Б не заводит контакт сам (`ensure_contact` — только
+        у пути В), и после перезапуска робота эта сверка обязана пройти
+        так же, как при первом проходе.
+        """
+        if self.contact_check:
+            contact = await self._contact_for_lead(link.primary_lead_id)
+            await self._apply_contact_check(event, contact)
         return StepResult()
 
     async def _step_create_primary_lead(self, event: ParsedEvent,
@@ -803,6 +830,18 @@ class CalendarEngine:
             # пометка, а прямое указание не трогать заказ.
             changed["status"] = "new"
             changed["skip_reason"] = None
+
+        # Смена номера в записи с известной сделкой — тоже повод сверить
+        # «номер + имя» (задача 5, ТЗ 2026-09-22, п.6): робот не блокирует
+        # и не переносит, только запоминает расхождение, если оно появилось.
+        if self.contact_check and "phone10" in changed:
+            lead_id = link.real_lead_id or link.primary_lead_id
+            if lead_id is not None:
+                contact = await self._contact_for_lead(lead_id)
+                mismatch = _contact_mismatch_text(event.client_name, event.phone10, contact)
+                if mismatch:
+                    changed["contact_mismatch"] = mismatch
+
         if not changed:
             return link
         return await self.store.update(event.event_id, **changed) or link
@@ -888,6 +927,26 @@ class CalendarEngine:
         getter = getattr(self.amo, "get_contact", None)
         return await getter(contact_id) if getter else None
 
+    async def _contact_for_lead(self, lead_id: Optional[int]) -> Optional[dict]:
+        """Первый контакт сделки — общее место для сверки контакта (задача 5)."""
+        lead = await self._get_lead(lead_id)
+        contact_ids = lead_contact_ids(lead)
+        if not contact_ids:
+            return None
+        return await self._get_contact(contact_ids[0])
+
+    async def _apply_contact_check(self, event: ParsedEvent,
+                                   contact: Optional[dict]) -> None:
+        """Сверить запись с контактом и запомнить расхождение, если оно есть.
+
+        Не сверяем и не пишем — не задаёт вопросов и не останавливает цепочку
+        (решение владельца 22.09, п.6): сходится или сверять нечем — просто
+        ничего не меняем в связке.
+        """
+        mismatch = _contact_mismatch_text(event.client_name, event.phone10, contact)
+        if mismatch:
+            await self.store.update(event.event_id, contact_mismatch=mismatch)
+
 
 # --- вспомогательное ---
 
@@ -939,6 +998,38 @@ def _is_autogenerated_name(name: str) -> bool:
     has_letters = any(ch.isalpha() for ch in cleaned)
     digits = sum(1 for ch in cleaned if ch.isdigit())
     return not has_letters and digits >= 10
+
+
+def _contact_mismatch_text(record_name: Optional[str], record_phone10: Optional[str],
+                           contact: Optional[dict]) -> Optional[str]:
+    """Сверка «номер + имя» записи с контактом сделки (задача 5, ТЗ 2026-09-22).
+
+    `None` — сверять было нечем (контакта нет, в записи нет имени, у контакта
+    имя автоматическое) или пара сошлась. Строка — расхождение человеческим
+    языком: используется и движком (три точки сверки), и циклом напоминаний
+    (`gcal/contact_reminder.py`) — общий код, не общий цикл.
+
+    Сравнение имени: без регистра, по первому слову, совпадение первых трёх
+    букв («Наташа»/«Наталья» — не расхождение). Телефон записи должен входить
+    в телефоны контакта (последние 10 цифр).
+    """
+    if contact is None:
+        return None
+    name = (record_name or "").strip()
+    contact_name = (contact.get("name") or "").strip()
+    if not name or _is_autogenerated_name(contact_name):
+        return None
+
+    phones = contact_phones(contact)
+    phone_ok = not record_phone10 or record_phone10 in phones
+    name_ok = name.split()[0][:3].lower() == contact_name.split()[0][:3].lower()
+    if phone_ok and name_ok:
+        return None
+
+    record_phone_text = mask(record_phone10) if record_phone10 else "телефон не распознан"
+    contact_phone_text = mask(phones[0]) if phones else "телефон не задан"
+    return (f"В записи: {name}, {record_phone_text}. "
+            f"В CRM: {contact_name or 'имя не задано'}, {contact_phone_text}.")
 
 
 def _stamp_to_date(stamp: Any):
