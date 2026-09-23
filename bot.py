@@ -13051,6 +13051,7 @@ async def find_cmd(msg: Message):
 # ===== FSM: Я ВЫПОЛНИЛ ЗАКАЗ =====
 class OrderFSM(StatesGroup):
     phone = State()
+    pick_job = State()
     name = State()
     amount = State()
     upsell_flag = State()
@@ -13090,6 +13091,124 @@ async def start_order(msg: Message, state: FSMContext):
     reply_markup=cancel_kb
 )
 
+async def _order_continue_after_phone(msg: Message, state: FSMContext) -> None:
+    """Продолжение сценария заказа сразу после того, как телефон клиента
+    известен: имя/исправление имени/сумма чека — ровно то же самое, что шло
+    после телефона до задачи 9 ТЗ «цепочка заказа» (2026-09-22). Вынесено в
+    отдельную функцию, чтобы не дублировать её для обычного пути и для пути
+    после выбора записи календаря (`got_calendar_job_pick`)."""
+    data = await state.get_data()
+    if data.get("client_id"):
+        full_name = data.get("client_name") or ""
+        # Если имя некорректное ИЛИ запись помечена как lead — попросим мастера исправить
+        if is_bad_name(full_name) or data.get("client_status") == "lead":
+            await state.set_state(OrderFSM.name_fix)
+            return await msg.answer(
+                "Найден лид/некорректное имя.\n"
+                "Введите правильное имя клиента (или нажмите «Отмена»):",
+                reply_markup=cancel_kb
+            )
+
+        await state.set_state(OrderFSM.amount)
+        return await msg.answer(
+            f"Клиент найден: {full_name or 'Без имени'}\n"
+            f"Бонусов: {int(data.get('bonus_balance') or 0)}\n"
+            "Введите сумму чека (руб):",
+            reply_markup=cancel_kb
+        )
+    else:
+        await state.set_state(OrderFSM.name)
+        return await msg.answer("Клиент не найден. Введите имя клиента:", reply_markup=cancel_kb)
+
+
+async def _order_pick_calendar_job(msg: Message, state: FSMContext, phone_in: str) -> None:
+    """Задача 9 ТЗ «цепочка заказа» (2026-09-22): если на этот номер в
+    представлении `adminbot.calendar_jobs` есть ещё не заведённые заказом
+    записи за сегодня/вчера по Москве — мастер выбирает, какую проводит, и
+    заказ уезжает в базу со связкой на запись и сделку. Выключено по
+    умолчанию (`ORDER_CALENDAR_PICK`); сбой запроса к представлению
+    (нет таблицы, нет прав, обрыв) не должен ронять сценарий заказа — тогда
+    просто идём дальше как раньше."""
+    if not ORDER_CALENDAR_PICK:
+        return await _order_continue_after_phone(msg, state)
+
+    phone10 = only_digits(phone_in)[-10:]
+    jobs: list[Any] = []
+    try:
+        now_msk = datetime.now(MOSCOW_TZ)
+        today = now_msk.date()
+        yesterday = today - timedelta(days=1)
+        async with pool.acquire() as conn:
+            jobs = await conn.fetch(
+                "SELECT event_id, order_date, address, real_lead_id "
+                "FROM adminbot.calendar_jobs "
+                "WHERE $1 = ANY(phones) AND order_date BETWEEN $2 AND $3 "
+                "  AND order_id IS NULL "
+                "ORDER BY order_date, address",
+                phone10, yesterday, today,
+            )
+        jobs = list(jobs)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("order calendar pick query failed, falling back: %s", exc)
+        jobs = []
+
+    if not jobs:
+        return await _order_continue_after_phone(msg, state)
+
+    if len(jobs) == 1:
+        job = jobs[0]
+        await state.update_data(
+            calendar_event_id=job["event_id"],
+            deal_lead_id=job["real_lead_id"],
+            calendar_address=job["address"],
+        )
+        return await _order_continue_after_phone(msg, state)
+
+    choices = [
+        {
+            "event_id": job["event_id"],
+            "deal_lead_id": job["real_lead_id"],
+            "address": job["address"],
+            "order_date": job["order_date"].isoformat() if job["order_date"] else None,
+        }
+        for job in jobs
+    ]
+    await state.update_data(calendar_job_choices=choices)
+    lines = [
+        "{}) {} · {}".format(
+            idx,
+            job["order_date"].strftime("%d.%m") if job["order_date"] else "?",
+            job["address"] or "адрес не указан",
+        )
+        for idx, job in enumerate(jobs, start=1)
+    ]
+    kb_rows = [[KeyboardButton(text=str(idx))] for idx in range(1, len(jobs) + 1)]
+    kb_rows.append([KeyboardButton(text="Не из списка")])
+    await state.set_state(OrderFSM.pick_job)
+    return await msg.answer(
+        f"На этот номер {len(jobs)} записей в календаре. Какую проводите?\n" + "\n".join(lines),
+        reply_markup=ReplyKeyboardMarkup(keyboard=kb_rows, resize_keyboard=True),
+    )
+
+
+@dp.message(OrderFSM.pick_job, F.text)
+async def got_calendar_job_pick(msg: Message, state: FSMContext):
+    choice = msg.text.strip()
+    if choice == "Не из списка":
+        return await _order_continue_after_phone(msg, state)
+    data = await state.get_data()
+    choices = data.get("calendar_job_choices") or []
+    if choice.isdigit() and 1 <= int(choice) <= len(choices):
+        job = choices[int(choice) - 1]
+        await state.update_data(
+            calendar_event_id=job["event_id"],
+            deal_lead_id=job["deal_lead_id"],
+            calendar_address=job["address"],
+        )
+        return await _order_continue_after_phone(msg, state)
+    return await msg.answer("Выберите номер записи из списка или «Не из списка».")
+
+
 @dp.message(OrderFSM.phone, F.text)
 async def got_phone(msg: Message, state: FSMContext):
     user_input = msg.text.strip()
@@ -13107,34 +13226,16 @@ async def got_phone(msg: Message, state: FSMContext):
     if client:
         data["client_id"] = client["id"]
         data["client_name"] = client["full_name"]
+        data["client_status"] = client["status"]
         data["bonus_balance"] = int(client["bonus_balance"] or 0)
         data["birthday"] = client["birthday"]
         data["client_address"] = (client.get("address") or "").strip()
-        await state.update_data(**data)
-
-        # Если имя некорректное ИЛИ запись помечена как lead — попросим мастера исправить
-        if is_bad_name(client["full_name"] or "") or (client["status"] == "lead"):
-            await state.set_state(OrderFSM.name_fix)
-            return await msg.answer(
-                "Найден лид/некорректное имя.\n"
-                "Введите правильное имя клиента (или нажмите «Отмена»):",
-                reply_markup=cancel_kb
-            )
-
-        await state.set_state(OrderFSM.amount)
-        return await msg.answer(
-            f"Клиент найден: {client['full_name'] or 'Без имени'}\n"
-            f"Бонусов: {data['bonus_balance']}\n"
-            "Введите сумму чека (руб):",
-            reply_markup=cancel_kb
-        )
     else:
         data["client_id"] = None
         data["bonus_balance"] = 0
         data["client_address"] = ""
-        await state.update_data(**data)
-        await state.set_state(OrderFSM.name)
-        return await msg.answer("Клиент не найден. Введите имя клиента:", reply_markup=cancel_kb)
+    await state.update_data(**data)
+    return await _order_pick_calendar_job(msg, state, phone_in)
 
 
 # Новый обработчик для исправления некорректного имени клиента
