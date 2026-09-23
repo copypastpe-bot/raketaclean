@@ -187,11 +187,20 @@ from notifications.amocrm_api import (
     AmoCRMAlert,
     build_lead_link,
     build_unanswered_message_alert,
-    build_unsorted_alert,
     extract_event_entity_id,
     extract_event_identity,
     format_amocrm_api_alert,
     normalize_lead,
+)
+from notifications.amocrm_unsorted import (
+    OPEN_LEAD_BUTTON_TEXT,
+    UnsortedCard,
+    build_unsorted_card,
+    done_button_text,
+    first_send_at,
+    next_reminder_at,
+    render_card_text,
+    unsorted_kind,
 )
 from expense_categories import EXPENSE_CATEGORIES, normalize_expense_category, suggest_expense_category
 from telegram_transport import TelegramIPFallbackResolver
@@ -326,6 +335,13 @@ DEAL_LINK_WAIT_TIMEOUT_SEC = max(60, _env_int("DEAL_LINK_WAIT_TIMEOUT_SEC", 1800
 # в базу со ссылкой на запись/сделку (adminbot.calendar_jobs, задача 8 того
 # же ТЗ). По умолчанию выключено — бот в представление не смотрит вовсе.
 ORDER_CALENDAR_PICK = _env_int("ORDER_CALENDAR_PICK", 0) == 1
+# Карточки «Неразобранного» amoCRM админам (ТЗ docs/plans/2026-09-23-amo-unsorted-cards.md):
+# опрос заводит дело на каждую новую запись, отдельный цикл раз в минуту рассылает
+# карточку обоим админам и напоминает раз в час, пока кто-то не нажмёт кнопку.
+# По умолчанию выключено: записи только отмечаются пропущенными, дел и рассылки нет.
+AMOCRM_UNSORTED_CARDS = _env_int("AMOCRM_UNSORTED_CARDS", 0) == 1
+UNSORTED_CARDS_DISPATCH_INTERVAL_SEC = 60
+UNSORTED_DONE_CB_PREFIX = "unsorted_done:"
 
 # env rules
 MIN_CASH = Decimal(os.getenv("MIN_CASH", "2500"))
@@ -1273,43 +1289,6 @@ async def _amocrm_mark_event_action(
         error,
         notified,
     )
-
-
-async def _amocrm_has_notified_lead_alert(
-    conn: asyncpg.Connection,
-    lead_id: int,
-    *,
-    excluding_event_id: str | None = None,
-) -> bool:
-    if not lead_id:
-        return False
-    lead_id_text = str(lead_id)
-    api_event = await conn.fetchval(
-        """
-        SELECT 1
-        FROM amocrm_api_events
-        WHERE action='notified'
-          AND event_type='lead_added'
-          AND entity_id=$1
-          AND ($2::text IS NULL OR event_id<>$2)
-        LIMIT 1
-        """,
-        lead_id_text,
-        excluding_event_id,
-    )
-    if api_event:
-        return True
-    unsorted = await conn.fetchval(
-        """
-        SELECT 1
-        FROM amocrm_unsorted_seen
-        WHERE action='notified'
-          AND payload @> $1::jsonb
-        LIMIT 1
-        """,
-        json.dumps({"_embedded": {"leads": [{"id": lead_id}]}}, ensure_ascii=False),
-    )
-    return bool(unsorted)
 
 
 async def _notify_admins_amocrm_api_alert(alert: AmoCRMAlert) -> bool:
@@ -2363,7 +2342,30 @@ async def run_confirmation_silence_watch() -> None:
         logger.info("Разговор с клиентом: позвал владельца к %s молчунам", called)
 
 
+async def _amocrm_mark_unsorted_action(
+    conn: asyncpg.Connection,
+    uid: str,
+    action: str,
+    error: str | None = None,
+) -> None:
+    await conn.execute(
+        "UPDATE amocrm_unsorted_seen SET action=$2, error=$3 WHERE uid=$1",
+        uid,
+        action,
+        error,
+    )
+
+
 async def _amocrm_poll_unsorted_once(client: AmoCRMAPIClient) -> None:
+    """Один проход опроса «Неразобранного» воронки `AMOCRM_PIPELINE_ID`.
+
+    Новая запись отмечается в `amocrm_unsorted_seen`: выключатель
+    `AMOCRM_UNSORTED_CARDS` выключен → `ignored` «выключено»; категория не
+    `sip`/`chats` → `ignored` с названием категории; иначе заводится дело в
+    `amocrm_unsorted_cards` со временем первой отправки и отметка `carded`.
+    Курсор `unsorted` пишется на каждом проходе, даже пустом: по его
+    `updated_at` сторож службы оповещений судит, жив ли опрос.
+    """
     if pool is None:
         return
     default_cursor = _amocrm_default_cursor()
@@ -2398,25 +2400,19 @@ async def _amocrm_poll_unsorted_once(client: AmoCRMAPIClient) -> None:
             )
         if not inserted:
             continue
+        # Сам опрос в Telegram не пишет: он только заводит дело, карточку шлёт
+        # рассылка (`run_unsorted_cards_dispatch`).
         try:
-            embedded = item.get("_embedded") if isinstance(item.get("_embedded"), Mapping) else {}
-            leads = embedded.get("leads") if isinstance(embedded.get("leads"), list) else []
-            lead_id = 0
-            if leads and isinstance(leads[0], Mapping):
-                lead_id = _to_int(leads[0].get("id"), 0)
-            if lead_id:
+            if not AMOCRM_UNSORTED_CARDS:
                 async with pool.acquire() as conn:
-                    if await _amocrm_has_notified_lead_alert(conn, lead_id):
-                        await conn.execute(
-                            """
-                            UPDATE amocrm_unsorted_seen
-                            SET action='ignored',
-                                error='lead already notified'
-                            WHERE uid=$1
-                            """,
-                            uid,
-                        )
-                        continue
+                    await _amocrm_mark_unsorted_action(conn, uid, "ignored", "выключено")
+                continue
+            if unsorted_kind(item) is None:
+                category = str(item.get("category") or "").strip() or "нет"
+                async with pool.acquire() as conn:
+                    await _amocrm_mark_unsorted_action(conn, uid, "ignored", f"категория {category}")
+                continue
+            embedded = item.get("_embedded") if isinstance(item.get("_embedded"), Mapping) else {}
             contacts = embedded.get("contacts") if isinstance(embedded.get("contacts"), list) else []
             contact = None
             if contacts and isinstance(contacts[0], Mapping) and contacts[0].get("id") is not None:
@@ -2424,22 +2420,26 @@ async def _amocrm_poll_unsorted_once(client: AmoCRMAPIClient) -> None:
                     contact = await client.fetch_contact(int(contacts[0]["id"]))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Failed to fetch amoCRM unsorted contact %s: %s", contacts[0].get("id"), exc)
-            alert = build_unsorted_alert(item, api_base=AMOCRM_API_BASE, contact=contact)
-            notified = await _notify_admins_amocrm_api_alert(alert)
+            card = build_unsorted_card(item, api_base=AMOCRM_API_BASE, contact=contact)
             async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    UPDATE amocrm_unsorted_seen
-                    SET action=$2,
-                        error=$3,
-                        notified_at=CASE WHEN $4 THEN NOW() ELSE notified_at END
-                    WHERE uid=$1
-                    """,
-                    uid,
-                    "notified" if notified else "error",
-                    None if notified else "ADMIN_TG_IDS is empty or Telegram send failed",
-                    notified,
-                )
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        INSERT INTO amocrm_unsorted_cards (
+                            uid, kind, lead_id, contact_name, phone, event_at, next_send_at
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT (uid) DO NOTHING
+                        """,
+                        uid,
+                        card.kind,
+                        card.lead_id,
+                        card.contact_name,
+                        card.phone,
+                        card.event_at,
+                        first_send_at(datetime.now(timezone.utc)),
+                    )
+                    await _amocrm_mark_unsorted_action(conn, uid, "carded")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to process amoCRM unsorted %s: %s", uid, exc)
             async with pool.acquire() as conn:

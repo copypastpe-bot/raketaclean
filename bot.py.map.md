@@ -58,7 +58,6 @@
 | 1237 | `_amocrm_payload_json` | Сериализация payload amoCRM в JSON-строку |
 | 1241 | `_amocrm_payload_from_db` | Десериализация payload amoCRM из БД |
 | 1254 | `_amocrm_mark_event_action` | Отметка выполненного действия по событию amoCRM |
-| 1277 | `_amocrm_has_notified_lead_alert` | Проверка, было ли уже отправлено оповещение по сделке |
 | 1314 | `_notify_admins_amocrm_api_alert` | Уведомление админов об ошибке API amoCRM |
 | 1328 | `_amocrm_fetch_first_contact` | Получение первого контакта сделки amoCRM |
 | 1340 | `_amocrm_resolve_target_lead` | Определение целевой сделки для обработки |
@@ -79,7 +78,8 @@
 | 2267 | `run_unasked_question_watch` | Слежение за незаданными вопросами клиентов |
 | 2340 | `run_confirmation_deferred_retry` | Повторная попытка отложенного подтверждения |
 | 2397 | `run_confirmation_silence_watch` | Слежение за молчанием клиента после подтверждения |
-| 2460 | `_amocrm_poll_unsorted_once` | Один цикл опроса неразобранных заявок amoCRM |
+| 2345 | `_amocrm_mark_unsorted_action` | Отметка действия и причины по записи в `amocrm_unsorted_seen` (ТЗ 2026-09-23 карточки «Неразобранного», задача 3) |
+| 2460 | `_amocrm_poll_unsorted_once` | Один цикл опроса «Неразобранного»: заводит дело в `amocrm_unsorted_cards` (или отмечает пропуск), в Telegram не пишет; курсор `unsorted` — на каждом проходе |
 | 2550 | `_amocrm_close_pending_for_outgoing` | Закрытие ожидающих записей при исходящем сообщении |
 | 2592 | `_amocrm_poll_chat_events_once` | Один цикл опроса событий чата amoCRM |
 | 2688 | `_amocrm_notify_due_unanswered_once` | Уведомление о просроченных неотвеченных сообщениях |
