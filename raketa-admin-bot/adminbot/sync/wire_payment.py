@@ -51,9 +51,9 @@ class WirePaymentSync:
     ) -> None:
         self.source = source
         self.engine = engine
-        # Отчёт владельцу — только когда сделка реально доведена до конца
-        # (стадия переведена в «выполнено и оплата получена»): пример письма
-        # в ТЗ ровно про этот случай, а «сделка уже финальная» — тихая правка.
+        # Отчёт владельцу — всякий раз, когда `process_payment` реально что-то
+        # поменял в CRM (`result.changed`): сумму, стадию или хотя бы одну
+        # задачу. Молчит только если менять было нечего (ревью 23.09).
         self.on_synced = on_synced
         self.poll_interval_sec = poll_interval_sec
         self.sleep = sleep
@@ -71,7 +71,10 @@ class WirePaymentSync:
                              order.label, order.order_id)
                 continue
             synced += 1
-            if result is not None and result.stage_moved and self.on_synced is not None:
+            # Отчёт — всякий раз, когда робот реально что-то поменял в CRM
+            # (сумма, стадия или хотя бы одна задача); молчим, только если
+            # менять было нечего (ревью 23.09).
+            if result is not None and result.changed and self.on_synced is not None:
                 await self._report(order, link, result)
         return synced
 
