@@ -55,6 +55,14 @@ journalctl -u telegram-bot.service -n 20 --no-pager
 git remote set-url origin https://github.com/copypastpe-bot/raketaclean.git
 ```
 
+## Выключатели (switches.env)
+
+Динамические флаги в `/opt/telegram-bot/switches.env` (синтаксис: `КЛЮЧ=значение`, без кавычек):
+
+- `AMOCRM_UNSORTED_CARDS`: `1` — карточки «Неразобранного» админам включены, `0` — выключены; рестарт рабочего бота по слову владельца.
+
+Другие выключатели и детали их установки — см. комментарии в самом файле.
+
 ## Откат
 
 Вернуться на прежний SHA и перезапустить:
