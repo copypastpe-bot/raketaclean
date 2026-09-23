@@ -281,20 +281,6 @@ def is_accepted_call_note(note: Mapping[str, Any], *, min_duration_sec: int) -> 
     return duration >= min_duration_sec
 
 
-def extract_event_type(event: Mapping[str, Any]) -> str:
-    return str(event.get("type") or "").strip()
-
-
-def extract_event_message_id(event: Mapping[str, Any]) -> str | None:
-    for change in event.get("value_after") or []:
-        if not isinstance(change, Mapping):
-            continue
-        message = change.get("message")
-        if isinstance(message, Mapping) and message.get("id"):
-            return str(message["id"]).strip()
-    return None
-
-
 def extract_event_entity_id(event: Mapping[str, Any]) -> int | None:
     for key in ("entity_id", "lead_id"):
         if event.get(key) is not None:
@@ -312,32 +298,6 @@ def extract_event_entity_id(event: Mapping[str, Any]) -> int | None:
             except Exception:
                 return None
     return None
-
-
-def extract_event_identity(event: Mapping[str, Any]) -> dict[str, Any]:
-    identity: dict[str, Any] = {
-        "event_id": str(event.get("id") or ""),
-        "event_type": extract_event_type(event),
-        "created_at": _as_int(event.get("created_at"), 0),
-        "message_id": extract_event_message_id(event),
-        "lead_id": None,
-        "contact_id": None,
-        "talk_id": None,
-        "text": None,
-    }
-    for change in event.get("value_after") or []:
-        if not isinstance(change, Mapping):
-            continue
-        for key, target in (("lead", "lead_id"), ("contact", "contact_id"), ("talk", "talk_id")):
-            value = change.get(key)
-            if isinstance(value, Mapping) and value.get("id") is not None:
-                identity[target] = value["id"]
-        message = change.get("message")
-        if isinstance(message, Mapping):
-            identity["text"] = str(message.get("text") or message.get("message") or "").strip() or None
-    if identity["contact_id"] is None and str(event.get("entity_type") or "") == "contact" and event.get("entity_id"):
-        identity["contact_id"] = _as_int(event.get("entity_id"), 0) or None
-    return identity
 
 
 def normalize_lead(payload: Mapping[str, Any]) -> AmoCRMLead:
@@ -389,28 +349,6 @@ def build_unsorted_alert(
         source=_human_source_name(item, metadata),
         text=str(metadata.get("text") or metadata.get("message") or "").strip() or None,
         comment=_unsorted_comment(item, metadata),
-        link=build_lead_link(api_base, lead_id),
-    )
-
-
-def build_unanswered_message_alert(
-    *,
-    lead: Mapping[str, Any] | None,
-    contact: Mapping[str, Any] | None,
-    text: str | None,
-    api_base: str,
-) -> AmoCRMAlert:
-    lead_id = int(lead["id"]) if lead and lead.get("id") is not None else None
-    return AmoCRMAlert(
-        alert_type="unanswered_message",
-        title=str(lead.get("name") or "").strip() if lead else None,
-        lead_id=lead_id,
-        contact_id=int(contact["id"]) if contact and contact.get("id") is not None else None,
-        contact_name=str(contact.get("name") or "").strip() if contact else None,
-        phone=extract_contact_phone(contact),
-        source=None,
-        text=text,
-        comment=None,
         link=build_lead_link(api_base, lead_id),
     )
 
@@ -508,15 +446,6 @@ def _unsorted_comment(item: Mapping[str, Any], metadata: Mapping[str, Any]) -> s
     return "заявка"
 
 
-def _as_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None:
-            return default
-        return int(str(value).strip())
-    except Exception:
-        return default
-
-
 __all__ = [
     "AmoCRMAlert",
     "AmoCRMAPIAuthError",
@@ -526,13 +455,9 @@ __all__ = [
     "AmoCRMEvent",
     "AmoCRMLead",
     "build_lead_link",
-    "build_unanswered_message_alert",
     "build_unsorted_alert",
     "extract_contact_phone",
     "extract_event_entity_id",
-    "extract_event_identity",
-    "extract_event_message_id",
-    "extract_event_type",
     "extract_lead_contact_ids",
     "format_amocrm_api_alert",
     "is_accepted_call_note",
