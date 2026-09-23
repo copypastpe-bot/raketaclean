@@ -2741,9 +2741,10 @@ async def _lead_promo_awaiting_answer(conn: asyncpg.Connection, lead_id: int) ->
 
     Правило владельца (решение 2, ТЗ 2026-09-23 «автозвонок по промо») — одно
     для клиентов и лидов, срок не ограничен. Рассылка — строка `lead_logs` с
-    кампанией из `LEADS_PROMO_CAMPAIGNS` и `sent_at`; ответ — входящее
-    `interest` или `stop` позже самой поздней такой рассылки. Автоответы
-    (`inbound_auto_reply_*`) и прочие входящие рассылкой не считаются.
+    кампанией из `LEADS_PROMO_CAMPAIGNS`, `sent_at` и статусом не `failed`
+    (недошедшая рассылка промо не считается — правка 1, ревью 2026-09-23);
+    ответ — входящее `interest` или `stop` позже самой поздней такой рассылки.
+    Автоответы (`inbound_auto_reply_*`) и прочие входящие рассылкой не считаются.
     """
     return bool(await conn.fetchval(
         """
@@ -2753,6 +2754,7 @@ async def _lead_promo_awaiting_answer(conn: asyncpg.Connection, lead_id: int) ->
             WHERE lead_id = $1
               AND campaign = ANY($2::text[])
               AND sent_at IS NOT NULL
+              AND COALESCE(status, '') <> 'failed'
         )
         SELECT lp.sent_at IS NOT NULL
            AND NOT EXISTS (

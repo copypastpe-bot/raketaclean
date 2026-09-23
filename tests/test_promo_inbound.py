@@ -240,14 +240,14 @@ class PromoInboundRealDbTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def _lead_log(self, lead_id: int, campaign: str, *, days_ago: int,
-                        response_kind: str | None = None) -> None:
+                        response_kind: str | None = None, status: str = "sent") -> None:
         at = datetime.now(timezone.utc) - timedelta(days=days_ago)
         async with self.pool.acquire() as conn:
             if response_kind is None:
                 await conn.execute(
                     "INSERT INTO lead_logs (lead_id, campaign, variant, status, sent_at, created_at) "
-                    "VALUES ($1, $2, 1, 'sent', $3, $3)",
-                    lead_id, campaign, at,
+                    "VALUES ($1, $2, 1, $3, $4, $4)",
+                    lead_id, campaign, status, at,
                 )
             else:
                 await conn.execute(
@@ -373,6 +373,34 @@ class PromoInboundRealDbTests(unittest.IsolatedAsyncioTestCase):
         self.send.assert_awaited_once()
         self.assertEqual(self.send.await_args.kwargs["text"], bot.LEADS_AUTO_REPLY)
         self.tg.send_message.assert_awaited_once()
+
+    async def test_lead_failed_promo_is_not_interest(self):
+        """Правка 1 (ревью 2026-09-23): недошедшая рассылка — не «промо приходило»."""
+        lead_id = await self._lead()
+        await self._lead_log(lead_id, "week1", days_ago=5, status="failed")
+
+        handled = await bot.handle_wahelp_inbound(_payload("1", "+79264445566"))
+
+        self.assertTrue(handled)
+        self.assertEqual(await self._callbacks(), [])
+        self.assertEqual(await self._last_lead_response(lead_id), "other")
+        self.send.assert_not_awaited()
+        self.tg.send_message.assert_not_awaited()
+
+    async def test_lead_failed_promo_after_successful_counts_by_successful(self):
+        """Неудачная рассылка позже удачной не мешает: считаем по удачной, без ответа — отклик."""
+        lead_id = await self._lead()
+        await self._lead_log(lead_id, "week1", days_ago=10)
+        await self._lead_log(lead_id, "week2", days_ago=5, status="failed")
+
+        handled = await bot.handle_wahelp_inbound(_payload("1", "+79264445566"))
+
+        self.assertTrue(handled)
+        rows = await self._callbacks()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["lead_id"], lead_id)
+        self.assertEqual(await self._last_lead_response(lead_id), "interest")
+        self.send.assert_awaited_once()
 
     async def test_lead_who_answered_after_last_promo_is_not_interest(self):
         lead_id = await self._lead()
