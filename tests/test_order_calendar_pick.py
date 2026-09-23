@@ -222,7 +222,7 @@ class OrderCalendarPickQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(choices), 2)
         self.assertEqual([c["event_id"] for c in choices], ["evt-yesterday", "evt-today"])
         text = msg.answer.await_args.args[0]
-        self.assertIn("2 записей", text)
+        self.assertIn("Записей в календаре на этот номер: 2", text)
         self.assertIn("Ленина, 2", text)
         self.assertIn("Мира, 1", text)
         kb = msg.answer.await_args.kwargs["reply_markup"]

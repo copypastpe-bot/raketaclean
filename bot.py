@@ -13186,7 +13186,7 @@ async def _order_pick_calendar_job(msg: Message, state: FSMContext, phone_in: st
     kb_rows.append([KeyboardButton(text="Не из списка")])
     await state.set_state(OrderFSM.pick_job)
     return await msg.answer(
-        f"На этот номер {len(jobs)} записей в календаре. Какую проводите?\n" + "\n".join(lines),
+        f"Записей в календаре на этот номер: {len(jobs)}. Какую проводите?\n" + "\n".join(lines),
         reply_markup=ReplyKeyboardMarkup(keyboard=kb_rows, resize_keyboard=True),
     )
 
