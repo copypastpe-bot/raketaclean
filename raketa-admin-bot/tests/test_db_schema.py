@@ -1205,3 +1205,36 @@ async def test_evening_summary_of_cleanings_counts_handed_to_owner(pool):
     summary = build_summary(snapshot, now=NOW)
 
     assert summary.handed_to_owner == 1
+
+
+async def test_calendar_jobs_view_has_all_columns(pool):
+    """Представление `adminbot.calendar_jobs` для рабочего бота со всеми колонками."""
+    from adminbot.gcal.store import PgCalendarStore
+
+    store = PgCalendarStore(pool)
+    await store.create("evt-1", kind="order", phone10="9601861067",
+                       order_date=date(2026, 9, 23), client_name="Юлия")
+    await store.update("evt-1", status="in_progress", primary_lead_id=41400001,
+                       real_lead_id=41400002)
+
+    # проверяем, что представление существует и отдаёт строку с нужными колонками
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM adminbot.calendar_jobs WHERE event_id = $1", "evt-1")
+
+    assert len(rows) == 1
+    row = dict(rows[0])
+
+    # ожидаемые колонки по ТЗ задачи 8
+    expected_columns = {
+        "event_id", "phone10", "phones", "order_date", "client_name", "address",
+        "services", "primary_lead_id", "real_lead_id", "status", "order_id"
+    }
+    actual_columns = set(row.keys())
+
+    assert actual_columns == expected_columns
+    assert row["event_id"] == "evt-1"
+    assert row["phone10"] == "9601861067"
+    assert row["primary_lead_id"] == 41400001
+    assert row["real_lead_id"] == 41400002
+    assert row["status"] == "in_progress"
