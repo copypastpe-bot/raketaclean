@@ -638,6 +638,7 @@ def _build_wire_payment(settings: Settings, bot_pool: Any, own_pool: Any, mail: 
     sync = WirePaymentSync(
         source=PgWirePaymentSource(bot_pool, own_pool, settings.backlog_from),
         engine=engine,
+        dry_run=dry_run,
         on_synced=_make_wire_payment_sender(mail, settings.amo_base_url, dry_run=dry_run),
     )
     log.info("Оплата по счёту: включена, режим %s",

@@ -203,3 +203,41 @@ async def test_run_forever_survives_a_broken_tick():
     await sync.run_forever(stop)
 
     assert len(ticks) == 2
+
+async def test_rehearsal_handles_each_order_once_per_process():
+    """Задача 20 брифа: репетиция не пишет отметку в базу, и источник отдаёт те же
+    заказы каждый проход. Владелец получал одинаковые отчёты каждые 15 минут.
+    Связки в хранилище движка нет — как в бою: она из базы, а хранилище в памяти."""
+    amo, store = FakeAmo(dry_run=True), FakeStore()
+    lead_id = 41463832_26
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_DONE, price=1)
+    link = make_link(real_lead_id=lead_id)
+    order = make_order()
+    reported = []
+
+    async def on_synced(order, link, result):
+        reported.append(order.order_id)
+
+    sync = WirePaymentSync(source=FakeSource([(order, link)]),
+                           engine=make_engine(amo, store, dry_run=True),
+                           on_synced=on_synced, dry_run=True)
+    first = await sync.tick()
+    second = await sync.tick()
+
+    assert (first, second) == (1, 0)
+    assert reported == [588]                     # второй раз молчим до перезапуска
+
+async def test_live_mode_does_not_keep_handled_orders_in_memory():
+    """В бою отметка в базе, и повторный заказ от источника — повод доводить снова."""
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = 41463832_27
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_DONE, price=1)
+    link = make_link(real_lead_id=lead_id)
+    order = make_order()
+
+    sync = WirePaymentSync(source=FakeSource([(order, link)]),
+                           engine=make_engine(amo, store), dry_run=False)
+    first = await sync.tick()
+    second = await sync.tick()
+
+    assert (first, second) == (1, 1)

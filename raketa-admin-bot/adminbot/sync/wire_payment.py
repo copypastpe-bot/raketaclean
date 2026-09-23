@@ -46,6 +46,7 @@ class WirePaymentSync:
         engine: Any,
         on_synced: Optional[Callable[[Order, AmoLink, WirePaymentResult], Awaitable[Any]]] = None,
         poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC,
+        dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
@@ -58,12 +59,21 @@ class WirePaymentSync:
         self.poll_interval_sec = poll_interval_sec
         self.sleep = sleep
         self.now = now
+        # Репетиция не пишет отметку «доведено» в базу (хранилище движка — в
+        # памяти, а связка приходит из базы), поэтому источник отдаёт те же
+        # заказы каждый проход, и владелец получал одинаковые отчёты каждые
+        # 15 минут (задача 20 брифа 2026-09-18). Репетиция помнит обработанные
+        # заказы в памяти процесса — до перезапуска. В бою отметка в базе.
+        self.dry_run = dry_run
+        self._handled: set[int] = set()
 
     async def tick(self) -> int:
         """Один проход. Возвращает, сколько сделок доведено."""
         due = await self.source.due()
         synced = 0
         for order, link in due:
+            if order.order_id in self._handled:
+                continue
             try:
                 result = await self.engine.process_payment(order, link)
             except Exception:                          # noqa: BLE001 — один сбой не должен стопорить остальных
@@ -71,6 +81,8 @@ class WirePaymentSync:
                              order.label, order.order_id)
                 continue
             synced += 1
+            if self.dry_run:
+                self._handled.add(order.order_id)
             # Отчёт — всякий раз, когда робот реально что-то поменял в CRM
             # (сумма, стадия или хотя бы одна задача); молчим, только если
             # менять было нечего (ревью 23.09).
