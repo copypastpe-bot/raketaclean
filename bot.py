@@ -144,14 +144,12 @@ from notifications.amo_exchange import (
     ExistingClient,
     IncomingClient,
     decide_exchange,
-    field_values,
     incoming_from_amo,
     is_weekly_leads_day,
     outcome_of_event,
     prefer_deal_fields,
 )
 from notifications.client_messaging import (
-    AMO_FIELD_ORDER_DATETIME,
     AMO_PIPELINE_REALIZATION,
     AMO_STAGE_CONFIRMED,
     CANCEL_LETTER_EVENT,
@@ -188,14 +186,12 @@ from notifications.amocrm_api import (
     AmoCRMAPIRateLimitError,
     AmoCRMAlert,
     build_lead_link,
-    build_new_lead_alert,
     build_unanswered_message_alert,
     build_unsorted_alert,
     extract_event_entity_id,
     extract_event_identity,
     format_amocrm_api_alert,
     normalize_lead,
-    should_skip_new_lead_alert,
 )
 from expense_categories import EXPENSE_CATEGORIES, normalize_expense_category, suggest_expense_category
 from telegram_transport import TelegramIPFallbackResolver
@@ -263,7 +259,6 @@ AMOCRM_ACCOUNT_DOMAIN = (os.getenv("AMOCRM_ACCOUNT_DOMAIN") or "").strip()
 AMOCRM_API_BASE = (os.getenv("AMOCRM_API_BASE") or "").strip().rstrip("/")
 AMOCRM_API_TOKEN = (os.getenv("AMOCRM_API_TOKEN") or "").strip()
 AMOCRM_PIPELINE_ID = _env_int("AMOCRM_PIPELINE_ID", 0)
-AMOCRM_NEW_LEAD_STATUS_ID = _env_int("AMOCRM_NEW_LEAD_STATUS_ID", 0)
 AMOCRM_POLL_INTERVAL_SEC = max(10, _env_int("AMOCRM_POLL_INTERVAL_SEC", 30))
 AMOCRM_UNANSWERED_DELAY_SEC = max(60, _env_int("AMOCRM_UNANSWERED_DELAY_SEC", 600))
 AMOCRM_LOOKBACK_MINUTES = max(1, _env_int("AMOCRM_LOOKBACK_MINUTES", 30))
@@ -1360,92 +1355,6 @@ async def _amocrm_resolve_target_lead(
         if _to_int(lead.get("pipeline_id"), 0) == AMOCRM_PIPELINE_ID:
             return lead
     return None
-
-
-async def _amocrm_poll_new_leads_once(client: AmoCRMAPIClient) -> None:
-    if pool is None:
-        return
-    default_cursor = _amocrm_default_cursor()
-    async with pool.acquire() as conn:
-        cursor = await _amocrm_get_cursor(conn, "lead_events", default_cursor)
-
-    events = await client.fetch_events(event_types=["lead_added"], created_from=cursor)
-    max_created_at = cursor
-    for event in events:
-        event_id = str(event.get("id") or "")
-        if not event_id:
-            continue
-        event_type = str(event.get("type") or "")
-        created_at = _amocrm_created_at(event, cursor)
-        max_created_at = max(max_created_at, created_at)
-        lead_id = extract_event_entity_id(event)
-        async with pool.acquire() as conn:
-            inserted = await conn.fetchval(
-                """
-                INSERT INTO amocrm_api_events (
-                    event_id, event_type, entity_id, payload, action, created_at
-                )
-                VALUES ($1, $2, $3, $4::jsonb, 'pending', $5)
-                ON CONFLICT (event_id) DO NOTHING
-                RETURNING event_id
-                """,
-                event_id,
-                event_type,
-                str(lead_id) if lead_id else None,
-                _amocrm_payload_json(event),
-                created_at,
-            )
-        if not inserted:
-            continue
-        if not lead_id:
-            async with pool.acquire() as conn:
-                await _amocrm_mark_event_action(conn, event_id, "error", error="missing lead id")
-            continue
-
-        try:
-            lead_payload = await client.fetch_lead(lead_id)
-            lead = normalize_lead(lead_payload)
-            async with pool.acquire() as conn:
-                if await _amocrm_has_notified_lead_alert(conn, lead.lead_id, excluding_event_id=event_id):
-                    await _amocrm_mark_event_action(conn, event_id, "ignored", error="lead already notified")
-                    continue
-            notes = await client.fetch_lead_notes(lead.lead_id) if lead.status_id == AMOCRM_NEW_LEAD_STATUS_ID else []
-            # Оформленный заказ узнаём по дате работы в лиде и по дочерней
-            # сделке: и то, и другое ставит робот владельца, когда переносит
-            # запись из календаря. Такому лиду хозяин уже нашёлся.
-            order_placed = bool(field_values(lead_payload, AMO_FIELD_ORDER_DATETIME)) \
-                or child_deal_id(notes) is not None
-            if should_skip_new_lead_alert(
-                lead,
-                target_pipeline_id=AMOCRM_PIPELINE_ID,
-                new_lead_status_id=AMOCRM_NEW_LEAD_STATUS_ID,
-                notes=notes,
-                order_placed=order_placed,
-            ):
-                async with pool.acquire() as conn:
-                    await _amocrm_mark_event_action(
-                        conn, event_id, "ignored",
-                        error="оформленный заказ, а не заявка" if order_placed else None)
-                continue
-
-            contact = await _amocrm_fetch_first_contact(client, lead.contact_ids)
-            alert = build_new_lead_alert(lead, contact=contact, api_base=AMOCRM_API_BASE)
-            notified = await _notify_admins_amocrm_api_alert(alert)
-            async with pool.acquire() as conn:
-                await _amocrm_mark_event_action(
-                    conn,
-                    event_id,
-                    "notified" if notified else "error",
-                    error=None if notified else "ADMIN_TG_IDS is empty or Telegram send failed",
-                    notified=notified,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to process amoCRM lead event %s: %s", event_id, exc)
-            async with pool.acquire() as conn:
-                await _amocrm_mark_event_action(conn, event_id, "error", error=str(exc)[:500])
-
-    async with pool.acquire() as conn:
-        await _amocrm_set_cursor(conn, "lead_events", max_created_at)
 
 
 # Закладка репетиции: живёт в памяти процесса и умирает вместе с ним. В базу её
@@ -2771,7 +2680,6 @@ async def amocrm_api_polling_loop() -> None:
     async with AmoCRMAPIClient(AMOCRM_API_BASE, AMOCRM_API_TOKEN) as client:
         while True:
             try:
-                await _amocrm_poll_new_leads_once(client)
                 await _amocrm_poll_unsorted_once(client)
                 await _amocrm_poll_chat_events_once(client)
                 await _amocrm_notify_due_unanswered_once(client)

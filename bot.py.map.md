@@ -62,7 +62,6 @@
 | 1314 | `_notify_admins_amocrm_api_alert` | Уведомление админов об ошибке API amoCRM |
 | 1328 | `_amocrm_fetch_first_contact` | Получение первого контакта сделки amoCRM |
 | 1340 | `_amocrm_resolve_target_lead` | Определение целевой сделки для обработки |
-| 1359 | `_amocrm_poll_new_leads_once` | Один цикл опроса новых сделок amoCRM |
 | 1450 | `_exchange_fetch_deal` | Получение сделки amoCRM для модуля «Обмен» |
 | 1464 | `_exchange_handle_lead` | Обработка сделки в рамках сценария «Обмен» |
 | 1499 | `_amocrm_poll_exchange_once` | Один цикл опроса сделок «Обмен» |

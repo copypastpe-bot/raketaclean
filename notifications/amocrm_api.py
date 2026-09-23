@@ -281,10 +281,6 @@ def is_accepted_call_note(note: Mapping[str, Any], *, min_duration_sec: int) -> 
     return duration >= min_duration_sec
 
 
-def is_call_note(note: Mapping[str, Any]) -> bool:
-    return str(note.get("note_type") or "") == "call_in"
-
-
 def extract_event_type(event: Mapping[str, Any]) -> str:
     return str(event.get("type") or "").strip()
 
@@ -356,51 +352,6 @@ def normalize_lead(payload: Mapping[str, Any]) -> AmoCRMLead:
     )
 
 
-def should_skip_new_lead_alert(
-    lead: AmoCRMLead,
-    *,
-    target_pipeline_id: int,
-    new_lead_status_id: int,
-    notes: list[Mapping[str, Any]],
-    accepted_call_min_duration_sec: int | None = None,
-    order_placed: bool = False,
-) -> bool:
-    """Звать ли владельца к этой сделке.
-
-    `order_placed` — в лиде уже стоит дата работы или заведена дочерняя сделка.
-    Значит это не заявка, а оформленный заказ, который робот перенёс из
-    календаря: звать к нему некого и незачем. За неделю до 2026-08-29 такие
-    сделки давали 30 уведомлений из 57 — больше половины шума.
-    """
-    if lead.pipeline_id != target_pipeline_id:
-        return True
-    if order_placed:
-        return True
-    if lead.status_id != new_lead_status_id:
-        return False
-    return any(is_call_note(note) for note in notes)
-
-
-def build_new_lead_alert(
-    lead: AmoCRMLead,
-    *,
-    contact: Mapping[str, Any] | None,
-    api_base: str,
-) -> AmoCRMAlert:
-    return AmoCRMAlert(
-        alert_type="new_lead",
-        title=lead.name,
-        lead_id=lead.lead_id,
-        contact_id=int(contact["id"]) if contact and contact.get("id") is not None else None,
-        contact_name=str(contact.get("name") or "").strip() if contact else None,
-        phone=extract_contact_phone(contact),
-        source=None,
-        text=None,
-        comment=None,
-        link=build_lead_link(api_base, lead.lead_id),
-    )
-
-
 def build_unsorted_alert(
     item: Mapping[str, Any],
     *,
@@ -466,7 +417,6 @@ def build_unanswered_message_alert(
 
 def format_amocrm_api_alert(alert: AmoCRMAlert) -> str:
     labels = {
-        "new_lead": "новая сделка",
         "new_unsorted": "новое неразобранное",
         "unanswered_message": "новое входящее сообщение без ответа 10 минут",
     }
@@ -576,7 +526,6 @@ __all__ = [
     "AmoCRMEvent",
     "AmoCRMLead",
     "build_lead_link",
-    "build_new_lead_alert",
     "build_unanswered_message_alert",
     "build_unsorted_alert",
     "extract_contact_phone",
@@ -587,7 +536,5 @@ __all__ = [
     "extract_lead_contact_ids",
     "format_amocrm_api_alert",
     "is_accepted_call_note",
-    "is_call_note",
     "normalize_lead",
-    "should_skip_new_lead_alert",
 ]

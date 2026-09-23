@@ -6,9 +6,7 @@ from notifications.amocrm_api import (
     AmoCRMAPIError,
     AmoCRMAPIRateLimitError,
     AmoCRMAlert,
-    AmoCRMLead,
     build_lead_link,
-    build_new_lead_alert,
     build_unanswered_message_alert,
     build_unsorted_alert,
     extract_contact_phone,
@@ -19,7 +17,6 @@ from notifications.amocrm_api import (
     format_amocrm_api_alert,
     is_accepted_call_note,
     normalize_lead,
-    should_skip_new_lead_alert,
 )
 
 
@@ -221,115 +218,6 @@ class AmoCRMFetchersTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AmoCRMAlertRulesTests(unittest.TestCase):
-    def test_skips_new_lead_when_new_lead_status_and_accepted_call(self):
-        lead = AmoCRMLead(
-            lead_id=123,
-            name="Входящий звонок",
-            pipeline_id=55,
-            status_id=777,
-            created_at=100,
-            contact_ids=[10],
-            payload={},
-        )
-        notes = [{"note_type": "call_in", "params": {"duration": 30}}]
-
-        self.assertTrue(
-            should_skip_new_lead_alert(
-                lead,
-                target_pipeline_id=55,
-                new_lead_status_id=777,
-                notes=notes,
-            )
-        )
-
-    def test_skips_new_lead_when_new_lead_status_and_short_call(self):
-        lead = AmoCRMLead(
-            lead_id=123,
-            name="Входящий звонок",
-            pipeline_id=55,
-            status_id=777,
-            created_at=100,
-            contact_ids=[10],
-            payload={},
-        )
-        notes = [{"note_type": "call_in", "params": {"duration": 0}}]
-
-        self.assertTrue(
-            should_skip_new_lead_alert(
-                lead,
-                target_pipeline_id=55,
-                new_lead_status_id=777,
-                notes=notes,
-            )
-        )
-
-    def test_does_not_skip_non_call_new_lead(self):
-        lead = AmoCRMLead(
-            lead_id=123,
-            name="Заявка с сайта",
-            pipeline_id=55,
-            status_id=777,
-            created_at=100,
-            contact_ids=[10],
-            payload={},
-        )
-
-        self.assertFalse(
-            should_skip_new_lead_alert(
-                lead,
-                target_pipeline_id=55,
-                new_lead_status_id=777,
-                notes=[],
-            )
-        )
-
-    def test_skips_placed_order(self):
-        """Заказ, перенесённый роботом из календаря, — не заявка: звать
-        владельца некого. За неделю до 2026-08-29 такие сделки давали
-        30 уведомлений из 57."""
-        lead = AmoCRMLead(
-            lead_id=123,
-            name="Заказ 29.08 — Дмитрий",
-            pipeline_id=55,
-            status_id=777,
-            created_at=100,
-            contact_ids=[10],
-            payload={},
-        )
-
-        self.assertTrue(
-            should_skip_new_lead_alert(
-                lead,
-                target_pipeline_id=55,
-                new_lead_status_id=777,
-                notes=[],
-                order_placed=True,
-            )
-        )
-
-    def test_placed_order_is_skipped_even_after_the_stage_moved(self):
-        """Робот двигает лид в «Передано в работу» за секунду: к моменту опроса
-        статус уже не «Новый лид», и старая проверка звонка тут не спасала."""
-        lead = AmoCRMLead(
-            lead_id=123,
-            name="Заказ 29.08 — Дмитрий",
-            pipeline_id=55,
-            status_id=142,
-            created_at=100,
-            contact_ids=[10],
-            payload={},
-        )
-
-        self.assertTrue(
-            should_skip_new_lead_alert(
-                lead,
-                target_pipeline_id=55,
-                new_lead_status_id=777,
-                notes=[],
-                order_placed=True,
-            )
-        )
-
     def test_formats_unanswered_message_alert(self):
         alert = AmoCRMAlert(
             alert_type="unanswered_message",
@@ -370,31 +258,6 @@ class AmoCRMPollingAlertBuildTests(unittest.TestCase):
         self.assertEqual(lead.pipeline_id, 55)
         self.assertEqual(lead.status_id, 777)
         self.assertEqual(lead.contact_ids, [10])
-
-    def test_build_new_lead_alert_uses_contact_phone(self):
-        lead = normalize_lead(
-            {
-                "id": 123,
-                "name": "Заявка с сайта",
-                "pipeline_id": 55,
-                "status_id": 777,
-                "_embedded": {"contacts": [{"id": 10}]},
-            }
-        )
-        contact = {
-            "id": 10,
-            "name": "Иван",
-            "custom_fields_values": [
-                {"field_code": "PHONE", "values": [{"value": "+79991234567"}]},
-            ],
-        }
-
-        alert = build_new_lead_alert(lead, contact=contact, api_base="https://example.amocrm.ru")
-
-        self.assertEqual(alert.alert_type, "new_lead")
-        self.assertEqual(alert.lead_id, 123)
-        self.assertEqual(alert.contact_name, "Иван")
-        self.assertEqual(alert.phone, "+79991234567")
 
     def test_build_unsorted_alert_uses_uid_and_phone(self):
         item = {
