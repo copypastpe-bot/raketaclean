@@ -206,6 +206,47 @@ async def test_address_reminder_candidates(pool):
     assert [link.order_id for link in cleaning_due] == [5]
 
 
+async def test_contact_reminder_candidates(pool):
+    """Задача 5 (ТЗ 2026-09-22): кто созрел для напоминания про расхождение
+    «номер + имя» с контактом сделки. По образцу `test_address_reminder_candidates`
+    (ревью 23.09 — отдельного теста на живой базе для этого источника не было)."""
+    real_now = datetime.now(timezone.utc)
+    await db.create_calendar_link(pool, "evt-1", kind="order", phone10="9601861067")
+    await db.update_calendar_link(
+        pool, "evt-1", status="in_progress",
+        contact_mismatch="В записи: Наталья, …1933. В CRM: Ирина, …4455.")
+
+    due = await db.fetch_calendar_links_needing_contact_reminder(pool)
+    assert [link.event_id for link in due] == ["evt-1"]     # ещё не напоминали
+    assert due[0].contact_reminder_count == 0
+
+    # напомнили час назад — до завтра больше не тревожим
+    await db.update_calendar_link(pool, "evt-1", contact_reminder_count=1,
+                                  contact_reminder_sent_at=real_now - timedelta(hours=1))
+    assert await db.fetch_calendar_links_needing_contact_reminder(pool) == []
+
+    # прошли сутки — снова созрел
+    await db.update_calendar_link(pool, "evt-1",
+                                  contact_reminder_sent_at=real_now - timedelta(days=2))
+    due = await db.fetch_calendar_links_needing_contact_reminder(pool)
+    assert [link.event_id for link in due] == ["evt-1"]
+
+    # владелец нажал «Я разобрался» — молчим, несмотря на срок
+    await db.update_calendar_link(pool, "evt-1", contact_reminder_muted=True)
+    assert await db.fetch_calendar_links_needing_contact_reminder(pool) == []
+
+    # сошлось при перепроверке цикла (contact_mismatch снят) — тоже молчим
+    await db.update_calendar_link(pool, "evt-1", contact_reminder_muted=False,
+                                  contact_mismatch=None)
+    assert await db.fetch_calendar_links_needing_contact_reminder(pool) == []
+
+    # потолок: даже не muted, но счётчик уже на месте — не предлагаем снова
+    await db.update_calendar_link(
+        pool, "evt-1", contact_mismatch="В записи: Наталья, …1933. В CRM: Ирина, …4455.",
+        contact_reminder_count=7)
+    assert await db.fetch_calendar_links_needing_contact_reminder(pool, cap=7) == []
+
+
 async def test_dead_order_link_is_not_offered_for_address_reminder(pool):
     """Задача 6 (ТЗ 2026-09-17): сироте адрес напоминать некому и незачем."""
     await db.create_link(pool, order_id=9999, phone10="9601861067")
