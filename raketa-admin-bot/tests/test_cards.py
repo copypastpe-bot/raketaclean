@@ -671,12 +671,33 @@ def test_wire_payment_synced_message_names_the_deal_and_tasks_closed():
     link = AmoLink(order_id=588, phone10=order.phone10, status="done", path="A",
                    real_lead_id=31665059)
 
-    text = wire_payment_synced_text(order, link, base_url="https://x", tasks_closed=2)
+    text = wire_payment_synced_text(order, link, base_url="https://x", tasks_closed=2,
+                                    stage_moved=True)
 
     assert "Заказ №588" in text
     assert "по счёту" in text
     assert "выполнено и оплата получена" in text
     assert "закрыто задач: 2" in text
+    assert "https://x/leads/detail/31665059" in text
+
+
+def test_wire_payment_synced_message_without_stage_change_omits_the_arrow():
+    """Ревью 23.09: частичная доводка (сумма/задачи, стадия уже была финальной)
+    — без слов о переводе стадии, но задачи и ссылка на месте."""
+    from adminbot.models import AmoLink
+    from adminbot.tg.cards import wire_payment_synced_text
+    from tests.test_watcher import make_order
+
+    order = make_order(588)
+    link = AmoLink(order_id=588, phone10=order.phone10, status="done", path="A",
+                   real_lead_id=31665059)
+
+    text = wire_payment_synced_text(order, link, base_url="https://x", tasks_closed=1,
+                                    stage_moved=False)
+
+    assert "Заказ №588" in text
+    assert "выполнено и оплата получена" not in text
+    assert "закрыто задач: 1" in text
     assert "https://x/leads/detail/31665059" in text
 
 
@@ -689,9 +710,9 @@ def test_wire_payment_synced_message_marks_rehearsal():
                    real_lead_id=31665059)
 
     live_text = wire_payment_synced_text(make_order(588), link, base_url="https://x",
-                                         tasks_closed=1)
+                                         tasks_closed=1, stage_moved=True)
     rehearsal = wire_payment_synced_text(make_order(588), link, base_url="https://x",
-                                         tasks_closed=1, dry_run=True)
+                                         tasks_closed=1, stage_moved=True, dry_run=True)
 
     assert not live_text.startswith("🎭")
     assert rehearsal.startswith("🎭 РЕПЕТИЦИЯ")

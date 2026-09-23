@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from adminbot.amo import ids
+from adminbot.amo.client import AmoError
 from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.models import AmoLink, Order
 from adminbot.sync.engine import Engine
@@ -595,15 +596,18 @@ async def test_process_payment_completes_the_deal_when_stage_is_done():
     assert "выполнено и оплата получена" in note_text
     assert result.stage_moved is True
     assert result.tasks_closed == 1
+    assert result.changed is True
     updated = store.links[700]
     assert updated.payment_synced_at is not None
     action = store.actions_of("wire_payment_synced")[0]
     assert action["payload"] == {"lead_id": lead_id, "stage": ids.REAL_STAGE_DONE,
-                                 "tasks_closed": 1, "stage_moved": True}
+                                 "tasks_closed": 1, "stage_moved": True, "changed": True}
 
 
-async def test_process_payment_fixes_a_placeholder_price_without_moving_the_stage():
-    """Сделка уже финальная (вопреки ожиданию) с ценой-заглушкой — правим только сумму."""
+async def test_process_payment_fixes_placeholder_price_and_closes_tasks_in_final_stage():
+    """Сделка уже финальная (вопреки ожиданию) с ценой-заглушкой и открытой
+    задачей — задача 11 доводится: сумма и задача, стадию не трогаем, примечания
+    нет (оно только про перевод стадии — ревью 23.09)."""
     amo, store = FakeAmo(), FakeStore()
     lead_id = 41463832_11
     amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS, price=1)
@@ -618,10 +622,11 @@ async def test_process_payment_fixes_a_placeholder_price_without_moving_the_stag
     assert amo.leads[lead_id]["price"] == 5500
     assert amo.leads[lead_id]["status_id"] == ids.STATUS_SUCCESS     # стадия не тронута
     assert amo.calls_of("move_lead") == []
-    assert amo.calls_of("complete_task") == []                       # задачу не закрывали
-    assert amo.calls_of("add_note")[0][1] == "сумма уточнена по оплате"
+    assert amo.calls_of("complete_task") == [1]                      # задачу закрыли
+    assert amo.calls_of("add_note") == []                             # примечания нет
     assert result.stage_moved is False
-    assert result.tasks_closed == 0
+    assert result.tasks_closed == 1
+    assert result.changed is True                     # сумма и задача — есть о чём отчитаться
     assert store.links[701].payment_synced_at is not None
 
 
@@ -639,8 +644,10 @@ async def test_process_payment_does_nothing_when_final_stage_price_looks_right()
     assert amo.calls_of("update_lead") == []
     assert amo.calls_of("add_note") == []
     assert amo.calls_of("move_lead") == []
+    assert amo.calls_of("complete_task") == []
     assert result.stage_moved is False
     assert result.tasks_closed == 0
+    assert result.changed is False                    # менять было нечего — молчим
     assert store.links[702].payment_synced_at is not None            # второй раз не возьмут
 
 
@@ -659,3 +666,36 @@ async def test_process_payment_journal_dry_run_follows_the_engine_flag():
     assert amo.leads[lead_id]["status_id"] == ids.REAL_STAGE_DONE    # в амо не записано
     action = store.actions_of("wire_payment_synced")[0]
     assert action["dry_run"] is True
+
+
+async def test_process_payment_retries_closing_tasks_after_a_previous_failure():
+    """Ревью 23.09: сбой между move_lead и close_tasks не должен оставлять
+    задачу открытой навсегда. Первый проход — move_lead прошёл, close_tasks
+    упал: payment_synced_at не ставится. Второй проход видит сделку уже
+    финальной и всё равно закрывает задачу — эта ветка их больше не пропускает."""
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = 41463832_14
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_DONE, price=1)
+    amo.add_task(lead_id, 1, 2270740)
+    link = AmoLink(order_id=704, phone10="9601861067", status="done", path="A",
+                  real_lead_id=lead_id, payment_pending=True)
+    store.links[704] = link
+    order = make_wire_order(order_id=704)
+    engine = make_engine(amo, store)
+
+    amo.fail_on = "complete_task"
+    with pytest.raises(AmoError):
+        await engine.process_payment(order, link)
+
+    assert amo.leads[lead_id]["status_id"] == ids.STATUS_SUCCESS     # move_lead успел пройти
+    assert store.links[704].payment_synced_at is None                 # не отмечено — попробуем снова
+
+    amo.fail_on = None
+    link = store.links[704]                                           # перечитали обновлённую связку
+    result = await engine.process_payment(order, link)
+
+    assert amo.calls_of("complete_task") == [1]           # задача закрыта на повторном проходе
+    assert result.tasks_closed == 1
+    assert result.stage_moved is False        # стадия уже была финальной ко второму проходу
+    assert result.changed is True
+    assert store.links[704].payment_synced_at is not None

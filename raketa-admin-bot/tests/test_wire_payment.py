@@ -69,11 +69,37 @@ async def test_tick_completes_the_deal_and_reports_it():
     assert store.links[588].payment_synced_at is not None
 
 
-async def test_tick_does_not_report_the_final_stage_branch():
-    """Сделка уже финальная — сумму поправили, но письмо владельцу не за что слать."""
+async def test_tick_reports_a_partial_fix_in_the_final_branch():
+    """Сделка уже финальная, цена-заглушка и открытая задача — доводим и
+    отчитываемся (ревью 23.09): владелец просил «выполнить цепочку и кинуть
+    отчёт», а не только про случай полного перевода стадии."""
     amo, store = FakeAmo(), FakeStore()
     lead_id = 41463832_22
     amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS, price=1)
+    amo.add_task(lead_id, 1, 2270740)
+    link = make_link(real_lead_id=lead_id)
+    store.links[588] = link
+    order = make_order()
+    reported = []
+
+    async def on_synced(order, link, result):
+        reported.append((order.order_id, result.stage_moved, result.tasks_closed))
+
+    sync = WirePaymentSync(source=FakeSource([(order, link)]),
+                           engine=make_engine(amo, store), on_synced=on_synced)
+    n = await sync.tick()
+
+    assert n == 1
+    assert reported == [(588, False, 1)]         # отчитались, но без «стадия переведена»
+    assert amo.leads[lead_id]["price"] == 5500
+    assert amo.calls_of("complete_task") == [1]
+
+
+async def test_tick_does_not_report_when_nothing_changed():
+    """Финальная стадия, сумма уже верная, задач нет — менять нечего, молчим."""
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = 41463832_23
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS, price=5500)
     link = make_link(real_lead_id=lead_id)
     store.links[588] = link
     order = make_order()
@@ -86,9 +112,10 @@ async def test_tick_does_not_report_the_final_stage_branch():
                            engine=make_engine(amo, store), on_synced=on_synced)
     n = await sync.tick()
 
-    assert n == 1                                # обработали
+    assert n == 1                                # обработали (payment_synced_at стоит)
     assert reported == []                        # но не отчитались
-    assert amo.leads[lead_id]["price"] == 5500
+    assert amo.calls_of("update_lead") == []
+    assert store.links[588].payment_synced_at is not None
 
 
 async def test_rehearsal_writes_nothing_to_amo_but_still_reports():

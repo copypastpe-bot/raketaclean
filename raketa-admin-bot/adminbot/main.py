@@ -975,12 +975,18 @@ def _make_order_done_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = 
 
 
 def _make_wire_payment_sender(mail: OwnerMail, amo_base_url: str, *, dry_run: bool = False):
-    """Отчёт о доводке сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22)."""
+    """Отчёт о доводке сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22).
+
+    Уходит и при частичной доводке (`result.stage_moved is False`) — тогда
+    текст не говорит о переводе стадии, только о том, что реально поменялось
+    (ревью 23.09).
+    """
 
     async def send(order, link, result) -> None:
         await mail.send(
             wire_payment_synced_text(order, link, base_url=amo_base_url,
-                                     tasks_closed=result.tasks_closed, dry_run=dry_run),
+                                     tasks_closed=result.tasks_closed,
+                                     stage_moved=result.stage_moved, dry_run=dry_run),
             kind=MAIL_WIRE_PAYMENT_SYNCED, ref=order.order_id)
 
     return send
