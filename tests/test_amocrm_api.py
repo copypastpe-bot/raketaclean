@@ -7,12 +7,8 @@ from notifications.amocrm_api import (
     AmoCRMAPIRateLimitError,
     AmoCRMAlert,
     build_lead_link,
-    build_unanswered_message_alert,
     build_unsorted_alert,
     extract_contact_phone,
-    extract_event_identity,
-    extract_event_message_id,
-    extract_event_type,
     extract_lead_contact_ids,
     format_amocrm_api_alert,
     is_accepted_call_note,
@@ -63,18 +59,6 @@ class AmoCRMApiExtractionTests(unittest.TestCase):
         note = {"note_type": "call_in", "params": {"duration": 0}}
 
         self.assertFalse(is_accepted_call_note(note, min_duration_sec=20))
-
-    def test_extracts_event_type_and_message_id(self):
-        event = {
-            "id": "ev-1",
-            "type": "incoming_chat_message",
-            "value_after": [
-                {"message": {"id": "msg-1", "text": "Хочу уборку"}},
-            ],
-        }
-
-        self.assertEqual(extract_event_type(event), "incoming_chat_message")
-        self.assertEqual(extract_event_message_id(event), "msg-1")
 
     def test_builds_lead_link(self):
         self.assertEqual(
@@ -311,51 +295,6 @@ class AmoCRMPollingAlertBuildTests(unittest.TestCase):
         self.assertNotIn("Название:", text)
         self.assertNotIn("Телефон: Сергей", text)
         self.assertIn("Телефон: +79991234567", text)
-
-
-class AmoCRMIncomingMessageTests(unittest.TestCase):
-    def test_extract_event_identity_from_chat_event(self):
-        event = {
-            "id": "ev-1",
-            "type": "incoming_chat_message",
-            "entity_id": 10,
-            "entity_type": "contact",
-            "created_at": 1710000000,
-            "value_after": [
-                {
-                    "message": {"id": "msg-1", "text": "Хочу уборку"},
-                    "talk": {"id": "talk-1"},
-                    "lead": {"id": 123},
-                    "contact": {"id": 10},
-                }
-            ],
-        }
-
-        identity = extract_event_identity(event)
-
-        self.assertEqual(identity["event_id"], "ev-1")
-        self.assertEqual(identity["message_id"], "msg-1")
-        self.assertEqual(identity["lead_id"], 123)
-        self.assertEqual(identity["contact_id"], 10)
-        self.assertEqual(identity["talk_id"], "talk-1")
-        self.assertEqual(identity["text"], "Хочу уборку")
-
-    def test_build_unanswered_message_alert(self):
-        alert = build_unanswered_message_alert(
-            lead={"id": 123, "name": "Открытая сделка"},
-            contact={
-                "id": 10,
-                "name": "Иван",
-                "custom_fields_values": [{"field_code": "PHONE", "values": [{"value": "+79991234567"}]}],
-            },
-            text="Хочу уборку",
-            api_base="https://example.amocrm.ru",
-        )
-
-        self.assertEqual(alert.alert_type, "unanswered_message")
-        self.assertEqual(alert.lead_id, 123)
-        self.assertEqual(alert.contact_name, "Иван")
-        self.assertEqual(alert.phone, "+79991234567")
 
 
 class AmoCRMPhoneLookupTests(unittest.IsolatedAsyncioTestCase):
