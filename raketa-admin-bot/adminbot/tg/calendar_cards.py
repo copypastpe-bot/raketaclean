@@ -194,6 +194,55 @@ def _client_line(link: Any) -> str:
     return " · ".join(parts)
 
 
+# --- расхождение «номер + имя» с контактом сделки (задача 5, ТЗ 2026-09-22) ---
+
+CONTACT_PREFIX = "gcalcm"
+
+
+def parse_contact_choice(data: Optional[str], prefix: str = CONTACT_PREFIX) -> Optional[str]:
+    """Разобрать нажатие «Я разобрался»: возвращает event_id или None.
+
+    Своя приставка и свой разбор (не `parse_calendar_choice`): у этой карточки
+    один-единственный выбор, а идентификатор записи — переменной длины
+    (event_id Google), а не фиксированное служебное слово.
+    """
+    parts = (data or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != prefix or parts[2] != "done" or not parts[1]:
+        return None
+    return parts[1]
+
+
+def contact_mismatch_card(link: Any, *, dry_run: bool = False,
+                          base_url: Optional[str] = None,
+                          reminder_no: int, cap: int = 7) -> tuple[str, InlineKeyboardMarkup]:
+    """Номер и имя записи не сходятся с контактом сделки.
+
+    Телефон записи — целиком (решение владельца, тот же приём, что у
+    `_client_line`): бот личный, владельцу нужно позвонить клиенту самому,
+    не открывая CRM. `link.contact_mismatch` — уже готовый текст расхождения
+    (обе стороны, телефоны замаскированы) — просто печатаем его следующей строкой.
+    """
+    title = (link.event_data or {}).get("summary") or "без названия"
+    when = f"{link.order_date:%d.%m}" if link.order_date else "дата не указана"
+    lines = [f"👤 Запись «{title}» на {when}: телефон/имя не сходятся с контактом сделки."]
+    if link.phone10:
+        lines.append(for_owner(link.phone10))
+    if link.contact_mismatch:
+        lines.append(link.contact_mismatch)
+    lead_id = link.real_lead_id or link.primary_lead_id
+    url = deal_url(base_url, lead_id) if base_url else ""
+    if url:
+        lines += ["", url]
+    lines += ["", f"Напоминание {reminder_no} из {cap}."]
+    text = mark_rehearsal("\n".join(lines), dry_run)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Я разобрался",
+                             callback_data=f"{CONTACT_PREFIX}:{link.event_id}:done"),
+    ]])
+    return text, keyboard
+
+
 # --- тексты для владельца ---
 
 # Внутренние статусы → слова, понятные без объяснений.
