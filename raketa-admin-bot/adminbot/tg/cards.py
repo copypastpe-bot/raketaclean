@@ -22,6 +22,7 @@ from adminbot.amo import ids
 from adminbot.amo.fields import as_msk
 from adminbot.phone import for_owner, mask
 from adminbot.sync.backlog import PlannedOrder, money
+from adminbot.sync.matcher import PLACEHOLDER_PRICE
 
 # Приставка callback-данных карточки-вопроса: amosync:{номер заказа}:{выбор}.
 # У уборок приставка своя: номера работ в базе бота пересекаются, и без неё
@@ -71,19 +72,30 @@ ACTION_WORDS = {
 # --- карточка-вопрос ---
 
 def question_card(order: Any, question: Optional[dict],
-                  *, dry_run: bool = False) -> tuple[str, InlineKeyboardMarkup]:
-    """Вопрос по одной работе: что за работа и между чем выбирать."""
+                  *, dry_run: bool = False,
+                  base_url: Optional[str] = None) -> tuple[str, InlineKeyboardMarkup]:
+    """Вопрос по одной работе: что за работа и между чем выбирать.
+
+    Сделки-варианты на кнопках раньше выглядели одинаково («Сделка 20.09 ·
+    сумма» трижды у Натальи 20.09, факт 22.09) — теперь кнопка несёт только
+    номер, а различающий текст (дата, адрес, сумма, ссылка) идёт списком над
+    кнопками (задача 7, ТЗ 2026-09-22).
+    """
     reason = (question or {}).get("reason", "")
     options = (question or {}).get("options") or []
     prefix = PREFIX_BY_KIND.get(getattr(order, "kind", "order"), CHOICE_PREFIX)
 
-    text = mark_rehearsal("\n".join([
+    lines = [
         _order_line(order),
         "",
         REASON_TEXTS.get(reason, DEFAULT_REASON),
-    ]), dry_run)
+    ]
+    if options:
+        lines += ["", *_option_lines(options, base_url)]
+    text = mark_rehearsal("\n".join(lines), dry_run)
 
-    rows = [[_option_button(order.order_id, option, prefix)] for option in options]
+    rows = [[_option_button(number, order.order_id, option, prefix)]
+            for number, option in enumerate(options, 1)]
     if reason == "сейлзбот не создал автосделку":
         rows.append([InlineKeyboardButton(
             text="🔄 Проверить ещё раз",
@@ -117,19 +129,40 @@ def parse_choice(data: Optional[str],
     return None
 
 
-def _option_button(order_id: int, option: dict, prefix: str) -> InlineKeyboardButton:
+def _option_button(number: int, order_id: int, option: dict,
+                   prefix: str) -> InlineKeyboardButton:
+    """Кнопка варианта — только номер, различие в тексте над кнопками."""
     return InlineKeyboardButton(
-        text=_option_label(option),
+        text=str(number),
         callback_data=_choice(order_id, str(option["lead_id"]), prefix))
 
 
-def _option_label(option: dict) -> str:
-    parts = ["Сделка"]
+def _option_lines(options: Sequence[dict], base_url: Optional[str]) -> list[str]:
+    """Пронумерованный список сделок-вариантов текстом: `1) 20.09 · адрес · ссылка`."""
+    return [f"{number}) {_option_line(option, base_url)}"
+            for number, option in enumerate(options, 1)]
+
+
+def _option_line(option: dict, base_url: Optional[str]) -> str:
+    parts = []
     when = _as_date(option.get("date"))
     parts.append(f"{when:%d.%m}" if when else f"#{option['lead_id']}")
-    if option.get("price"):
-        parts.append(f"· {money(option['price'])} ₽")
-    return " ".join(parts)
+    if option.get("address"):
+        parts.append(option["address"])
+    price = option.get("price")
+    if price and price >= PLACEHOLDER_PRICE:
+        parts.append(f"{money(price)} ₽")
+    link = _deal_url(base_url, option.get("lead_id"))
+    if link:
+        parts.append(link)
+    return " · ".join(parts)
+
+
+def _deal_url(base_url: Optional[str], lead_id: Optional[int]) -> str:
+    """Ссылка на сделку в амо — тем же способом, что и calendar_cards.deal_url."""
+    if not base_url or not lead_id:
+        return ""
+    return f"{base_url.rstrip('/')}/leads/detail/{lead_id}"
 
 
 def _choice(order_id: int, value: str, prefix: str = CHOICE_PREFIX) -> str:
@@ -431,7 +464,8 @@ CARPET_REASONS = {
 CARPET_DEFAULT_REASON = "Не смог решить сам, что делать с этим заказом партнёра."
 
 
-def carpet_question_card(row: Any, question: Optional[dict], *, dry_run: bool = False):
+def carpet_question_card(row: Any, question: Optional[dict], *, dry_run: bool = False,
+                         base_url: Optional[str] = None):
     """Вопрос по строке отчёта партнёра."""
     reason = (question or {}).get("reason", "")
     options = (question or {}).get("options") or []
@@ -456,11 +490,13 @@ def carpet_question_card(row: Any, question: Optional[dict], *, dry_run: bool = 
         lines.append(f"Причина отказа: {row.refusal_reason}")
         lines.append("")
     lines.append(CARPET_REASONS.get(reason, CARPET_DEFAULT_REASON))
+    if options:
+        lines += ["", *_option_lines(options, base_url)]
 
-    rows = [[InlineKeyboardButton(text=_option_label(option),
+    rows = [[InlineKeyboardButton(text=str(number),
                                   callback_data=_carpet_choice(row.partner_id,
                                                                str(option["lead_id"])))]
-            for option in options]
+            for number, option in enumerate(options, 1)]
     rows.append([
         InlineKeyboardButton(text="➕ Завести сделку",
                              callback_data=_carpet_choice(row.partner_id, "new")),

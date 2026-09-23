@@ -113,24 +113,33 @@ def boat_card(link: Any, *, dry_run: bool = False) -> tuple[str, InlineKeyboardM
     return text, keyboard
 
 
-def calendar_question_card(link: Any, *, dry_run: bool = False) -> tuple[str, InlineKeyboardMarkup]:
-    """Робот не смог выбрать сделку сам."""
+def calendar_question_card(link: Any, *, dry_run: bool = False,
+                           base_url: Optional[str] = None) -> tuple[str, InlineKeyboardMarkup]:
+    """Робот не смог выбрать сделку сам.
+
+    Кнопка несёт только номер варианта — дата, адрес и ссылка на сделку идут
+    пронумерованным списком в тексте над кнопками (задача 7, ТЗ 2026-09-22).
+    """
     question = link.question or {}
     reason = question.get("reason", "")
     options = question.get("options") or []
 
-    text = mark_rehearsal("\n".join([
+    lines = [
         "📅 Запись календаря",
         _client_line(link),
         "",
         REASON_TEXTS.get(reason, DEFAULT_REASON),
-    ]), dry_run)
+    ]
+    if options:
+        lines += ["", *(f"{number}) {_option_line(option, reason, base_url)}"
+                        for number, option in enumerate(options, 1))]
+    text = mark_rehearsal("\n".join(lines), dry_run)
 
     # По закрытой сделке работать нечего: её можно только признать «той самой».
     prefix = "linked" if reason == "ask_owner_closed" else "lead"
-    rows = [[InlineKeyboardButton(text=_option_label(option, reason),
+    rows = [[InlineKeyboardButton(text=str(number),
                                   callback_data=_choice(f"{prefix}_{option['lead_id']}"))]
-            for option in options]
+            for number, option in enumerate(options, 1)]
     if reason == "сейлзбот не создал автосделку":
         rows.append([InlineKeyboardButton(text="🔄 Проверить ещё раз",
                                           callback_data=_choice("retry"))])
@@ -141,22 +150,31 @@ def calendar_question_card(link: Any, *, dry_run: bool = False) -> tuple[str, In
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _option_label(option: dict, reason: str = "") -> str:
-    """Подпись кнопки: номер сделки и её дата, если она известна.
+def _option_line(option: dict, reason: str, base_url: Optional[str]) -> str:
+    """Строка варианта над кнопками: дата, адрес, ссылка на сделку.
 
-    Год показываем, когда сделка не этого года: «11.09» у сделки 2024 года
-    выглядит свежей датой, и владелец 2026-09-02 именно так её и прочитал.
+    Кнопка несёт только номер (задача 7, ТЗ 2026-09-22) — здесь то, чем
+    варианты различаются. Год у даты показываем, когда сделка не этого года:
+    «11.09» у сделки 2024 года выглядит свежей, и владелец 2026-09-02 именно
+    так её и прочитал.
     """
-    label = f"Сделка #{option['lead_id']}"
+    parts = []
     if reason == "ask_owner_closed":
-        label = f"✔️ Это она — #{option['lead_id']}"
+        parts.append("✔️ Это она")
     when = option.get("date")
-    if not when:
-        return label
-    day = f"{when[8:10]}.{when[5:7]}"
-    if when[:4] != date.today().strftime("%Y"):
-        day = f"{day}.{when[:4]}"
-    return f"{label} · {day}"
+    if when:
+        day = f"{when[8:10]}.{when[5:7]}"
+        if when[:4] != date.today().strftime("%Y"):
+            day = f"{day}.{when[:4]}"
+        parts.append(day)
+    else:
+        parts.append(f"#{option['lead_id']}")
+    if option.get("address"):
+        parts.append(option["address"])
+    link = deal_url(base_url, option.get("lead_id")) if base_url else ""
+    if link:
+        parts.append(link)
+    return " · ".join(parts)
 
 
 def _client_line(link: Any) -> str:
