@@ -184,6 +184,28 @@ async def test_refresh_phone_change_matching_the_deal_is_not_a_mismatch(amo):
     assert changed.contact_mismatch is None
 
 
+async def test_refresh_amo_failure_on_contact_check_does_not_drop_the_edit(amo):
+    """Ревью 23.09: сбой амо на сверке не должен ронять весь `_refresh`.
+
+    Легитимная правка записи (здесь — новый телефон) обязана примениться,
+    даже если сверка контакта не задалась; расхождение при этом не пишем —
+    попробуем на следующем обмене.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.leads[41400001]["_embedded"] = {"contacts": [{"id": 555}]}
+    amo.contacts.append(contact_with_phone(555, "Юлия", "9605379757"))
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await engine.process(an_order())                       # заводим сделку как обычно
+
+    amo.fail_on = "get_contact"
+    changed = await engine.process(an_order(phones=("9009991122",)))   # чужой номер
+
+    assert changed.phone10 == "9009991122"                  # телефон всё равно записан
+    assert changed.contact_mismatch is None                 # а сверка — нет, амо упала
+    assert changed.last_error is None                        # исключение наружу не ушло
+
+
 # --- выключатель ---
 
 async def test_contact_check_disabled_does_nothing_anywhere(amo):

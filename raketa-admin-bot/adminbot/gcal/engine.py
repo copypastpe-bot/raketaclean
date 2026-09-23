@@ -834,13 +834,24 @@ class CalendarEngine:
         # Смена номера в записи с известной сделкой — тоже повод сверить
         # «номер + имя» (задача 5, ТЗ 2026-09-22, п.6): робот не блокирует
         # и не переносит, только запоминает расхождение, если оно появилось.
+        #
+        # Сбой амо здесь не должен ронять весь `_refresh` (ревью 23.09):
+        # `_refresh` вызывается вне `try/except AmoError` в `process()`, и
+        # упавшая сверка иначе отменила бы легитимные правки записи (телефон,
+        # дата, услуги, снятие «skipped») в этом же проходе. Пропускаем
+        # сверку в этом проходе — следующий обмен попробует снова.
         if self.contact_check and "phone10" in changed:
             lead_id = link.real_lead_id or link.primary_lead_id
             if lead_id is not None:
-                contact = await self._contact_for_lead(lead_id)
-                mismatch = contact_mismatch_text(event.client_name, event.phone10, contact)
-                if mismatch:
-                    changed["contact_mismatch"] = mismatch
+                try:
+                    contact = await self._contact_for_lead(lead_id)
+                except AmoError as exc:
+                    log.warning("Календарь, запись %s: сверка контакта при смене номера "
+                               "не задалась — %s", event.event_id, type(exc).__name__)
+                else:
+                    mismatch = contact_mismatch_text(event.client_name, event.phone10, contact)
+                    if mismatch:
+                        changed["contact_mismatch"] = mismatch
 
         if not changed:
             return link
