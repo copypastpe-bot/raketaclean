@@ -543,6 +543,7 @@ amocrm_api_task: asyncio.Task | None = None
 address_backfill_task: asyncio.Task | None = None  # дозаполнение адреса из связки админ-бота
 pending_order_reports_task: asyncio.Task | None = None  # отложенный отчёт и сообщение о деньгах
 own_heartbeat_task: asyncio.Task | None = None      # пульс рабочего бота (оповещения, задача 6)
+unsorted_cards_task: asyncio.Task | None = None     # карточки «Неразобранного» админам
 BONUS_CHANGE_NOTIFICATIONS_ENABLED = False
 
 # === Ignore group/supergroup/channel updates; work only in private chats ===
@@ -2451,6 +2452,177 @@ async def _amocrm_poll_unsorted_once(client: AmoCRMAPIClient) -> None:
 
     async with pool.acquire() as conn:
         await _amocrm_set_cursor(conn, "unsorted", max_created_at)
+
+
+def _unsorted_card_from_row(row: Mapping[str, Any]) -> UnsortedCard:
+    return UnsortedCard(
+        uid=row["uid"],
+        kind=row["kind"],
+        lead_id=row["lead_id"],
+        contact_name=row["contact_name"],
+        phone=row["phone"],
+        event_at=row["event_at"],
+        link=build_lead_link(AMOCRM_API_BASE, row["lead_id"]),
+    )
+
+
+def _unsorted_card_messages(value: Any) -> list[tuple[int, int]]:
+    """Сообщения карточки из колонки `messages` ({"<tg id>": message_id}) парами (чат, сообщение)."""
+    pairs: list[tuple[int, int]] = []
+    for chat_id, message_id in _amocrm_payload_from_db(value).items():
+        chat, message = _to_int(chat_id, 0), _to_int(message_id, 0)
+        if chat and message:
+            pairs.append((chat, message))
+    return pairs
+
+
+def _unsorted_card_keyboard(card: UnsortedCard, card_id: int) -> InlineKeyboardMarkup:
+    row: list[InlineKeyboardButton] = []
+    if card.link:
+        row.append(InlineKeyboardButton(text=OPEN_LEAD_BUTTON_TEXT, url=card.link))
+    row.append(
+        InlineKeyboardButton(
+            text=done_button_text(card.kind),
+            callback_data=f"{UNSORTED_DONE_CB_PREFIX}{card_id}",
+        )
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[row])
+
+
+async def _unsorted_card_deliver(
+    card: UnsortedCard,
+    card_id: int,
+    *,
+    previous: Sequence[tuple[int, int]],
+    closed: bool = False,
+) -> dict[int, int]:
+    """Единственная точка доставки карточки «Неразобранного» админам.
+
+    Всё, что уходит админам по делу — первая карточка, напоминание, закрытый
+    вид, — идёт только через эту функцию. При переезде на шину оповещений её
+    заменят на «положить событие в ящик»; дела, кнопки и текст останутся
+    (ТЗ docs/plans/2026-09-23-amo-unsorted-cards.md, решение владельца 10, задача 3).
+
+    `closed=False` — отправка: у каждого сообщения из `previous` удалить его
+    (ошибку проглотить и записать в журнал), каждому админу из `ADMIN_TG_IDS`
+    прислать карточку с кнопками заново; ответ — новые {админ: message_id}
+    (кому не ушло, того в ответе нет).
+    `closed=True` — закрытый вид: каждое сообщение из `previous` переписать
+    текстом с «✅ …» и без кнопок; ответ — `previous` как есть.
+    Текст простой, без разметки: в именах клиентов бывают `<` и `&`.
+    """
+    if closed:
+        text = render_card_text(card, closed=True)
+        for chat_id, message_id in previous:
+            try:
+                await bot.edit_message_text(
+                    text=text,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    parse_mode=None,
+                    disable_web_page_preview=True,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Неразобранное: дело %s, не удалось закрыть карточку %s у %s: %s",
+                    card_id, message_id, chat_id, exc,
+                )
+        return dict(previous)
+
+    for chat_id, message_id in previous:
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Неразобранное: дело %s, не удалось удалить карточку %s у %s: %s",
+                card_id, message_id, chat_id, exc,
+            )
+    text = render_card_text(card)
+    keyboard = _unsorted_card_keyboard(card, card_id)
+    sent: dict[int, int] = {}
+    for admin_id in sorted(ADMIN_TG_IDS):
+        try:
+            message = await bot.send_message(
+                admin_id,
+                text,
+                parse_mode=None,
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Неразобранное: дело %s, не удалось отправить карточку %s: %s", card_id, admin_id, exc)
+            continue
+        sent[admin_id] = message.message_id
+    return sent
+
+
+async def _unsorted_card_send_due(card_id: int, moment: datetime) -> None:
+    """Отправить одно наступившее дело под блокировкой его строки.
+
+    Строка держится `FOR UPDATE` всё время отправки, до записи новых номеров
+    сообщений. Нажатие кнопки (`unsorted_card_done_cb`) закрывает дело
+    обновлением той же строки, поэтому ждёт конца отправки и получает уже новые
+    номера сообщений — карточки у админов гарантированно переходят в закрытый
+    вид. Закрыли раньше, чем дошла очередь, — выборка пустая, отправки нет.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM amocrm_unsorted_cards
+                WHERE id=$1 AND status='open' AND next_send_at <= $2
+                FOR UPDATE
+                """,
+                card_id,
+                moment,
+            )
+            if row is None:
+                return
+            sent = await _unsorted_card_deliver(
+                _unsorted_card_from_row(row),
+                card_id,
+                previous=_unsorted_card_messages(row["messages"]),
+            )
+            # Не ушло никому — время не двигаем: следующий проход через минуту
+            # попробует снова, а не через час.
+            next_send_at = next_reminder_at(moment) if sent else row["next_send_at"]
+            await conn.execute(
+                "UPDATE amocrm_unsorted_cards SET messages=$2::jsonb, next_send_at=$3 WHERE id=$1",
+                card_id,
+                json.dumps({str(chat_id): message_id for chat_id, message_id in sent.items()}),
+                next_send_at,
+            )
+
+
+async def run_unsorted_cards_dispatch(now: datetime | None = None) -> None:
+    """Один проход рассылки карточек «Неразобранного» (фоновая задача, раз в минуту).
+
+    Берёт открытые дела с наступившим временем отправки; по каждому у админов
+    удаляет прежнюю карточку, присылает её заново и ставит время следующего
+    напоминания (+1 час в окне 9–20 МСК). Независима от цикла опроса amoCRM:
+    тот выходит навсегда при сбое авторизации, напоминания от этого не встают.
+    """
+    if pool is None or not ADMIN_TG_IDS:
+        return
+    moment = now or datetime.now(timezone.utc)
+    async with pool.acquire() as conn:
+        due = await conn.fetch(
+            """
+            SELECT id
+            FROM amocrm_unsorted_cards
+            WHERE status='open' AND next_send_at <= $1
+            ORDER BY next_send_at, id
+            LIMIT 50
+            """,
+            moment,
+        )
+    for record in due:
+        try:
+            await _unsorted_card_send_due(record["id"], moment)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Неразобранное: дело %s, рассылка не удалась: %s", record["id"], exc)
 
 
 async def _amocrm_close_pending_for_outgoing(conn: asyncpg.Connection, identity: Mapping[str, Any]) -> int:
@@ -14796,7 +14968,7 @@ async def unknown(msg: Message, state: FSMContext):
     await msg.answer("Команда не распознана. Выберите действие на клавиатуре ниже.", reply_markup=kb)
 
 async def main():
-    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task, own_heartbeat_task
+    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task, own_heartbeat_task, unsorted_cards_task
     notification_rules = _load_notification_rules()
     pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=5)
     dp["pool"] = pool
@@ -14917,6 +15089,16 @@ async def main():
         )
     if amocrm_api_task is None and _amocrm_api_enabled():
         amocrm_api_task = asyncio.create_task(amocrm_api_polling_loop())
+    if unsorted_cards_task is None and AMOCRM_UNSORTED_CARDS:
+        # Отдельно от цикла опроса amoCRM: тот выходит навсегда при сбое
+        # авторизации, а напоминания по заведённым делам вставать не должны.
+        unsorted_cards_task = asyncio.create_task(
+            schedule_periodic_job(
+                UNSORTED_CARDS_DISPATCH_INTERVAL_SEC,
+                run_unsorted_cards_dispatch,
+                "unsorted_cards",
+            )
+        )
     if own_heartbeat_task is None and SERVICE_HEARTBEAT_ENABLED:
         own_heartbeat_task = asyncio.create_task(
             schedule_periodic_job(
@@ -14962,6 +15144,12 @@ async def main():
             amocrm_api_task.cancel()
             try:
                 await amocrm_api_task
+            except asyncio.CancelledError:
+                pass
+        if unsorted_cards_task is not None:
+            unsorted_cards_task.cancel()
+            try:
+                await unsorted_cards_task
             except asyncio.CancelledError:
                 pass
 

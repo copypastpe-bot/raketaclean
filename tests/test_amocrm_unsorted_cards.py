@@ -216,5 +216,120 @@ class PollUnsortedTests(_RealDbCase):
         self.assertGreater(updated_at, old + timedelta(days=1))
 
 
+NOW = _msk(2026, 9, 23, 14, 0)
+
+
+class _CardsCase(_RealDbCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self._next_message_id = 500
+        self.send_message.side_effect = self._fake_send
+
+    async def _fake_send(self, chat_id, text, **kwargs):
+        self._next_message_id += 1
+        return mock.Mock(message_id=self._next_message_id)
+
+    async def _insert_card(self, *, uid="u1", lead_id=123, status="open", next_send_at=None, messages=None):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                """
+                INSERT INTO amocrm_unsorted_cards (
+                    uid, kind, lead_id, contact_name, phone, event_at, status, next_send_at, messages
+                )
+                VALUES ($1, 'call', $2, 'Иван <Петров> & Ко', '+79991234567', $3, $4, $5, $6::jsonb)
+                RETURNING id
+                """,
+                uid,
+                lead_id,
+                NOW - timedelta(minutes=5),
+                status,
+                next_send_at or NOW - timedelta(minutes=1),
+                json.dumps(messages or {}),
+            )
+
+    async def _card(self, card_id):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow("SELECT * FROM amocrm_unsorted_cards WHERE id=$1", card_id)
+
+    @staticmethod
+    def _buttons(markup):
+        return [button for row in markup.inline_keyboard for button in row]
+
+
+@unittest.skipUnless(TEST_DB_DSN, "TEST_DB_DSN не задан — нужен настоящий Postgres")
+class DispatchTests(_CardsCase):
+    async def test_first_send_goes_to_both_admins_as_plain_text_with_buttons(self):
+        card_id = await self._insert_card()
+
+        await bot.run_unsorted_cards_dispatch(NOW)
+
+        self.assertEqual([c.args[0] for c in self.send_message.await_args_list], [ADMIN_A, ADMIN_B])
+        row = await self._card(card_id)
+        expected_text = bot.render_card_text(bot._unsorted_card_from_row(row))
+        for call in self.send_message.await_args_list:
+            self.assertEqual(call.args[1], expected_text)
+            self.assertIsNone(call.kwargs["parse_mode"])
+            buttons = self._buttons(call.kwargs["reply_markup"])
+            self.assertEqual([b.text for b in buttons], ["Перейти в сделку", "Я перезвонил"])
+            self.assertEqual(buttons[0].url, f"{API_BASE}/leads/detail/123")
+            self.assertEqual(buttons[1].callback_data, f"unsorted_done:{card_id}")
+        self.assertIn("Клиент: Иван <Петров> & Ко", expected_text)
+        self.delete_message.assert_not_awaited()
+        self.assertEqual(json.loads(row["messages"]), {str(ADMIN_A): 501, str(ADMIN_B): 502})
+        self.assertEqual(row["next_send_at"], _msk(2026, 9, 23, 15, 0))
+
+    async def test_reminder_deletes_previous_cards_and_sends_again(self):
+        card_id = await self._insert_card(messages={str(ADMIN_A): 11, str(ADMIN_B): 22})
+        # Удалить не вышло (например, старше 48 часов) — ошибка глотается, карточка всё равно уходит.
+        self.delete_message.side_effect = [RuntimeError("message can't be deleted"), None]
+
+        await bot.run_unsorted_cards_dispatch(NOW)
+
+        self.assertEqual(
+            sorted(c.args for c in self.delete_message.await_args_list),
+            [(ADMIN_A, 11), (ADMIN_B, 22)],
+        )
+        self.assertEqual(self.send_message.await_count, 2)
+        row = await self._card(card_id)
+        self.assertEqual(json.loads(row["messages"]), {str(ADMIN_A): 501, str(ADMIN_B): 502})
+
+    async def test_evening_reminder_moves_to_next_morning(self):
+        card_id = await self._insert_card(next_send_at=_msk(2026, 9, 23, 19, 30))
+
+        await bot.run_unsorted_cards_dispatch(_msk(2026, 9, 23, 19, 30))
+
+        row = await self._card(card_id)
+        self.assertEqual(row["next_send_at"], _msk(2026, 9, 24, 9, 0))
+
+    async def test_not_due_and_closed_cards_are_left_alone(self):
+        await self._insert_card(uid="later", next_send_at=NOW + timedelta(minutes=1))
+        await self._insert_card(uid="done", status="done")
+
+        await bot.run_unsorted_cards_dispatch(NOW)
+
+        self.send_message.assert_not_awaited()
+        self.delete_message.assert_not_awaited()
+
+    async def test_card_without_lead_has_only_done_button(self):
+        card_id = await self._insert_card(lead_id=None)
+
+        await bot.run_unsorted_cards_dispatch(NOW)
+
+        call = self.send_message.await_args_list[0]
+        buttons = self._buttons(call.kwargs["reply_markup"])
+        self.assertEqual([(b.text, b.callback_data) for b in buttons], [("Я перезвонил", f"unsorted_done:{card_id}")])
+        self.assertIn("\nСсылка:", call.args[1])
+
+    async def test_nothing_delivered_keeps_send_time_for_next_pass(self):
+        card_id = await self._insert_card()
+        self.send_message.side_effect = RuntimeError("telegram down")
+
+        await bot.run_unsorted_cards_dispatch(NOW)
+
+        row = await self._card(card_id)
+        self.assertEqual(row["next_send_at"], NOW - timedelta(minutes=1))
+        self.assertEqual(json.loads(row["messages"]), {})
+
+
 if __name__ == "__main__":
     unittest.main()
