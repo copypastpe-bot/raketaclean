@@ -540,3 +540,122 @@ async def test_engines_do_not_share_scratch_state():
 
     assert second._duplicates == {}
     assert second._contacts == {}
+
+
+# --- доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22) ---
+
+def make_wire_order(order_id=700, amount="5500", awaiting=False):
+    return Order(order_id=order_id, phone10="9601861067", created_at=ORDER_MOMENT,
+                amount_total=Decimal(amount), masters=[], client_name="Ирина",
+                payment_method="Расчётный", awaiting_wire_payment=awaiting)
+
+
+async def test_move_realization_done_marks_payment_pending_when_wire_awaiting():
+    """Остановка на «Заказ выполнен» из-за неоплаченного счёта помечается
+    payment_pending — доводка (process_payment) потом находит её по этому флагу."""
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = open_realization_lead(amo)
+
+    link = await make_engine(amo, store).process_order(make_wire_order(awaiting=True))
+
+    assert link.status == "done"
+    assert amo.leads[lead_id]["status_id"] == ids.REAL_STAGE_DONE   # не STATUS_SUCCESS
+    assert store.links[700].payment_pending is True
+
+
+async def test_move_realization_done_leaves_payment_pending_unset_for_cash():
+    """Оплата не по счёту — флаг не трогаем вовсе (остаётся None)."""
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo)
+    order = Order(order_id=701, phone10="9601861067", created_at=ORDER_MOMENT,
+                 amount_total=Decimal("3000"), masters=[], payment_method="Наличные")
+
+    await make_engine(amo, store).process_order(order)
+
+    assert store.links[701].payment_pending is None
+
+
+async def test_process_payment_completes_the_deal_when_stage_is_done():
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = 41463832_10
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_DONE, price=1)
+    amo.add_task(lead_id, 1, 2270740)                     # автозадача, закрываем
+    link = AmoLink(order_id=700, phone10="9601861067", status="done", path="A",
+                  real_lead_id=lead_id, payment_pending=True)
+    store.links[700] = link
+    order = make_wire_order()
+
+    result = await make_engine(amo, store).process_payment(order, link)
+
+    assert amo.leads[lead_id]["status_id"] == ids.STATUS_SUCCESS
+    assert amo.leads[lead_id]["price"] == 5500
+    assert amo.calls_of("complete_task") == [1]
+    note_text = amo.calls_of("add_note")[0][1]
+    assert "Оплата по счёту получена: 5500 ₽" in note_text
+    assert "выполнено и оплата получена" in note_text
+    assert result.stage_moved is True
+    assert result.tasks_closed == 1
+    updated = store.links[700]
+    assert updated.payment_synced_at is not None
+    action = store.actions_of("wire_payment_synced")[0]
+    assert action["payload"] == {"lead_id": lead_id, "stage": ids.REAL_STAGE_DONE,
+                                 "tasks_closed": 1, "stage_moved": True}
+
+
+async def test_process_payment_fixes_a_placeholder_price_without_moving_the_stage():
+    """Сделка уже финальная (вопреки ожиданию) с ценой-заглушкой — правим только сумму."""
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = 41463832_11
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS, price=1)
+    amo.add_task(lead_id, 1, 2270740)
+    link = AmoLink(order_id=701, phone10="9601861067", status="done", path="A",
+                  real_lead_id=lead_id)
+    store.links[701] = link
+    order = make_wire_order(order_id=701)
+
+    result = await make_engine(amo, store).process_payment(order, link)
+
+    assert amo.leads[lead_id]["price"] == 5500
+    assert amo.leads[lead_id]["status_id"] == ids.STATUS_SUCCESS     # стадия не тронута
+    assert amo.calls_of("move_lead") == []
+    assert amo.calls_of("complete_task") == []                       # задачу не закрывали
+    assert amo.calls_of("add_note")[0][1] == "сумма уточнена по оплате"
+    assert result.stage_moved is False
+    assert result.tasks_closed == 0
+    assert store.links[701].payment_synced_at is not None
+
+
+async def test_process_payment_does_nothing_when_final_stage_price_looks_right():
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = 41463832_12
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS, price=5500)
+    link = AmoLink(order_id=702, phone10="9601861067", status="done", path="A",
+                  real_lead_id=lead_id)
+    store.links[702] = link
+    order = make_wire_order(order_id=702)
+
+    result = await make_engine(amo, store).process_payment(order, link)
+
+    assert amo.calls_of("update_lead") == []
+    assert amo.calls_of("add_note") == []
+    assert amo.calls_of("move_lead") == []
+    assert result.stage_moved is False
+    assert result.tasks_closed == 0
+    assert store.links[702].payment_synced_at is not None            # второй раз не возьмут
+
+
+async def test_process_payment_journal_dry_run_follows_the_engine_flag():
+    """Своя репетиция (WIRE_PAYMENT_DRY_RUN), не общий amo_sync_dry_run."""
+    amo, store = FakeAmo(dry_run=True), FakeStore()
+    lead_id = 41463832_13
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_DONE, price=1)
+    link = AmoLink(order_id=703, phone10="9601861067", status="done", path="A",
+                  real_lead_id=lead_id, payment_pending=True)
+    store.links[703] = link
+    order = make_wire_order(order_id=703)
+
+    await make_engine(amo, store, dry_run=True).process_payment(order, link)
+
+    assert amo.leads[lead_id]["status_id"] == ids.REAL_STAGE_DONE    # в амо не записано
+    action = store.actions_of("wire_payment_synced")[0]
+    assert action["dry_run"] is True
