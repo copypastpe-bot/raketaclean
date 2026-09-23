@@ -90,6 +90,10 @@ class WirePaymentResult:
     lead_id: Optional[int]
     tasks_closed: int
     stage_moved: bool   # True — сделка переведена в «выполнено и оплата получена»
+    # Что-то реально поменялось в амо в этом проходе (сумма, стадия или хотя бы
+    # одна задача) — по этому флагу цикл решает, слать ли отчёт владельцу
+    # (ревью 23.09): молчать, когда менять было нечего.
+    changed: bool
 
 
 class Engine:
@@ -155,42 +159,58 @@ class Engine:
         до вызывающего цикла как есть: `payment_synced_at` ниже не поставится,
         и на следующем проходе связка снова окажется «due» (тот же приём, что
         у `sync/address_reminder.py`).
+
+        Закрытие задач вынесено из веток и идёт всегда, независимо от того,
+        переводили стадию сейчас или она уже была финальной (ревью 23.09):
+        частичный сбой основной ветки — стадия переведена, а следующий шаг
+        (закрытие задач или примечание) упал — иначе на повторном проходе
+        сделка уже видна как «финальная», и открытые задачи не закрылись бы
+        никогда. Чтение задач идемпотентно: закрытую амо второй раз не отдаст.
         """
         lead_id = link.real_lead_id
         lead = await self._get_lead(lead_id)
         stage = int(lead["status_id"]) if lead is not None and lead.get("status_id") else None
-        tasks_closed = 0
         stage_moved = False
+        price_fixed = False
 
         if stage == ids.REAL_STAGE_DONE:
             await self._write("update_lead", order, lead_id,
                               self.amo.update_lead(lead_id, price=order.amount_total))
+            price_fixed = True
             await self._write("move_lead", order, lead_id,
                               self.amo.move_lead(lead_id, ids.PIPELINE_REALIZATION,
                                                  ids.STATUS_SUCCESS))
-            tasks_closed = await self._close_tasks(order, lead_id, ids.TASK_TYPES_TO_CLOSE)
-            note = (f"🤖 Оплата по счёту получена: {order.amount_total} ₽. Сделка проведена "
-                   "в «выполнено и оплата получена».")
-            await self._write("add_note", order, lead_id, self.amo.add_note(lead_id, note))
             stage_moved = True
         else:
             # Стадия уже финальная (вопреки ожиданию — п. «Принято координатором»
-            # 22.09) или сделки не нашлось: стадию не трогаем. Сумму правим,
-            # только если в сделке стоит заглушка.
+            # 22.09, или это повторный проход после частичного сбоя) или сделки
+            # не нашлось: стадию не трогаем. Сумму правим, только если в сделке
+            # стоит заглушка.
             price = None if lead is None else lead.get("price")
             price_dec = None if price is None else Decimal(str(price))
             if price_dec is not None and price_dec < PLACEHOLDER_PRICE:
                 await self._write("update_lead", order, lead_id,
                                   self.amo.update_lead(lead_id, price=order.amount_total))
-                await self._write("add_note", order, lead_id,
-                                  self.amo.add_note(lead_id, "сумма уточнена по оплате"))
+                price_fixed = True
+
+        tasks_closed = (await self._close_tasks(order, lead_id, ids.TASK_TYPES_TO_CLOSE)
+                        if lead_id is not None else 0)
+
+        # Примечание — только когда стадия переведена в ЭТОМ проходе: иначе
+        # повторный (или уже финальный) проход плодил бы дубли в сделке.
+        if stage_moved:
+            note = (f"🤖 Оплата по счёту получена: {order.amount_total} ₽. Сделка проведена "
+                   "в «выполнено и оплата получена».")
+            await self._write("add_note", order, lead_id, self.amo.add_note(lead_id, note))
 
         await self.store.update(order.order_id, payment_synced_at=self.now())
+        changed = stage_moved or price_fixed or tasks_closed > 0
         await self.store.log(order.order_id, "wire_payment_synced", dry_run=self.dry_run,
                              payload={"lead_id": lead_id, "stage": stage,
-                                      "tasks_closed": tasks_closed, "stage_moved": stage_moved})
+                                      "tasks_closed": tasks_closed, "stage_moved": stage_moved,
+                                      "changed": changed})
         return WirePaymentResult(lead_id=lead_id, tasks_closed=tasks_closed,
-                                 stage_moved=stage_moved)
+                                 stage_moved=stage_moved, changed=changed)
 
     # --- выбор пути ---
 
