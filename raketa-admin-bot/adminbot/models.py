@@ -184,6 +184,14 @@ class AmoLink:
     address_reminder_count: int = 0
     address_reminder_sent_at: Optional[datetime] = None
     address_reminder_muted: bool = False
+    # Доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22):
+    # `payment_pending` ставит основной движок в момент перевода сделки в
+    # «Заказ выполнен», если оплата ещё не пришла; None — связка заведена до
+    # этой миграции, и решает текущая стадия сделки. `payment_synced_at` —
+    # когда робот довёл сделку до конца после прихода денег; None — ещё не
+    # доводил, второй раз не берём.
+    payment_pending: Optional[bool] = None
+    payment_synced_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

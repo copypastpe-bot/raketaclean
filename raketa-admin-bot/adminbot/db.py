@@ -21,7 +21,8 @@ from adminbot.phone import last10
 _UPDATABLE_LINK_FIELDS = frozenset(
     {"phone10", "status", "path", "primary_lead_id", "real_lead_id", "deal_address",
      "question", "question_msg_id", "last_error",
-     "address_reminder_count", "address_reminder_sent_at", "address_reminder_muted"}
+     "address_reminder_count", "address_reminder_sent_at", "address_reminder_muted",
+     "payment_pending", "payment_synced_at"}
 )
 
 # Два потока работы — две таблицы связок. Номера `orders.id` и `cleaning_orders.id`
@@ -280,6 +281,8 @@ def _link_from_row(row: Optional[asyncpg.Record]) -> Optional[AmoLink]:
         address_reminder_count=row["address_reminder_count"],
         address_reminder_sent_at=row["address_reminder_sent_at"],
         address_reminder_muted=row["address_reminder_muted"],
+        payment_pending=row["payment_pending"],
+        payment_synced_at=row["payment_synced_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -628,6 +631,57 @@ async def fetch_links_needing_address_reminder(
             LIMIT $2
             """,
             cap, limit,
+        )
+    return [_link_from_row(row) for row in rows]
+
+
+# Доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22). Уборок
+# здесь нет: ожидания оплаты по счёту у них не бывает (решение владельца 22.09,
+# п.8) — `table` не параметризуем, как у прочих функций этого раздела.
+async def fetch_wire_paid_order_ids(bot_pool: asyncpg.Pool, since: date) -> set[int]:
+    """Заказы бота по счёту, оплата по которым уже внесена (`awaiting_wire_payment=false`).
+
+    Тот же способ сравнить способ оплаты, что и `WIRE_METHODS` в `sync/engine.py`
+    (без регистра, «ё»→«е»): значения бота — «Расчётный»/«р/с». Отдельный
+    узкий запрос, а не переиспользование `_SELECT_ORDERS`: вызывающей стороне
+    нужны только номера, чтобы сузить дальнейшую выборку связок, а полный
+    заказ (мастера, адрес) она потом берёт через `fetch_orders_by_ids`.
+    """
+    async with bot_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id FROM public.orders
+            WHERE created_at >= ($1::date AT TIME ZONE 'Europe/Moscow')
+              AND lower(replace(payment_method, 'ё', 'е')) IN ('р/с', 'расчетный')
+              AND awaiting_wire_payment = false
+            """,
+            since,
+        )
+    return {row["id"] for row in rows}
+
+
+async def fetch_links_needing_wire_payment_sync(
+    own_pool: asyncpg.Pool, order_ids: Collection[int]
+) -> list[AmoLink]:
+    """Из переданных номеров — связки, которые ещё не доведены после оплаты.
+
+    `payment_synced_at IS NULL` — ещё не обработана. `COALESCE(payment_pending,
+    true)` — у связок, заведённых до миграции 017 (`payment_pending` пусто),
+    считаем оплату ожидаемой: решать по факту будет текущая стадия сделки
+    (`Engine.process_payment`), а не этот флаг. Только `status = 'done'`:
+    заказ, который робот ещё не довёл до сделки, доводкой оплаты не трогаем.
+    """
+    if not order_ids:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT * FROM {LINKS_TABLE}
+            WHERE order_id = ANY($1::bigint[]) AND status = 'done'
+              AND payment_synced_at IS NULL AND COALESCE(payment_pending, true)
+            ORDER BY order_id
+            """,
+            list(order_ids),
         )
     return [_link_from_row(row) for row in rows]
 
