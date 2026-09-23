@@ -27,7 +27,7 @@ from adminbot.config import DEFAULT_SERVICE_BY_MASTER
 from adminbot.models import AmoLink, Order
 from adminbot.phone import mask, normalize_phone
 from adminbot.sync.checklist import StepContext, next_step
-from adminbot.sync.matcher import Decision, LeadInfo, match
+from adminbot.sync.matcher import PLACEHOLDER_PRICE, Decision, LeadInfo, match
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import LinkStore
 from adminbot.sync.waiting import waited_since
@@ -81,6 +81,15 @@ class StepResult:
     # чек-листа: например, дочка из примечания уже закрыта в CRM руками
     # (задача 1, ревью 22.09) — правка владельца важнее догадки робота.
     stop: bool = False
+
+
+@dataclass(frozen=True)
+class WirePaymentResult:
+    """Итог доводки одной сделки после оплаты по счёту — сырьё для отчёта владельцу."""
+
+    lead_id: Optional[int]
+    tasks_closed: int
+    stage_moved: bool   # True — сделка переведена в «выполнено и оплата получена»
 
 
 class Engine:
@@ -138,6 +147,50 @@ class Engine:
             log.warning("%s №%s: ошибка амо — %s", order.label, order.order_id, exc)
             return await self.store.update(
                 order.order_id, status="error", last_error=f"{type(exc).__name__}: {exc}")
+
+    async def process_payment(self, order: Order, link: AmoLink) -> Optional[WirePaymentResult]:
+        """Довести сделку до конца после того, как оплата по счёту пришла (задача 11).
+
+        Сбой амо (сделка недоступна, сеть моргнула) сюда не ловится — долетает
+        до вызывающего цикла как есть: `payment_synced_at` ниже не поставится,
+        и на следующем проходе связка снова окажется «due» (тот же приём, что
+        у `sync/address_reminder.py`).
+        """
+        lead_id = link.real_lead_id
+        lead = await self._get_lead(lead_id)
+        stage = int(lead["status_id"]) if lead is not None and lead.get("status_id") else None
+        tasks_closed = 0
+        stage_moved = False
+
+        if stage == ids.REAL_STAGE_DONE:
+            await self._write("update_lead", order, lead_id,
+                              self.amo.update_lead(lead_id, price=order.amount_total))
+            await self._write("move_lead", order, lead_id,
+                              self.amo.move_lead(lead_id, ids.PIPELINE_REALIZATION,
+                                                 ids.STATUS_SUCCESS))
+            tasks_closed = await self._close_tasks(order, lead_id, ids.TASK_TYPES_TO_CLOSE)
+            note = (f"🤖 Оплата по счёту получена: {order.amount_total} ₽. Сделка проведена "
+                   "в «выполнено и оплата получена».")
+            await self._write("add_note", order, lead_id, self.amo.add_note(lead_id, note))
+            stage_moved = True
+        else:
+            # Стадия уже финальная (вопреки ожиданию — п. «Принято координатором»
+            # 22.09) или сделки не нашлось: стадию не трогаем. Сумму правим,
+            # только если в сделке стоит заглушка.
+            price = None if lead is None else lead.get("price")
+            price_dec = None if price is None else Decimal(str(price))
+            if price_dec is not None and price_dec < PLACEHOLDER_PRICE:
+                await self._write("update_lead", order, lead_id,
+                                  self.amo.update_lead(lead_id, price=order.amount_total))
+                await self._write("add_note", order, lead_id,
+                                  self.amo.add_note(lead_id, "сумма уточнена по оплате"))
+
+        await self.store.update(order.order_id, payment_synced_at=self.now())
+        await self.store.log(order.order_id, "wire_payment_synced", dry_run=self.dry_run,
+                             payload={"lead_id": lead_id, "stage": stage,
+                                      "tasks_closed": tasks_closed, "stage_moved": stage_moved})
+        return WirePaymentResult(lead_id=lead_id, tasks_closed=tasks_closed,
+                                 stage_moved=stage_moved)
 
     # --- выбор пути ---
 
@@ -233,6 +286,11 @@ class Engine:
         await self._write("move_lead", order, link.real_lead_id,
                           self.amo.move_lead(link.real_lead_id, ids.PIPELINE_REALIZATION,
                                              self._final_stage(order)))
+        if self._payment_pending(order):
+            # Остановились на «Заказ выполнен» из-за неоплаченного счёта —
+            # отметка для доводки оплаты (задача 11, ТЗ 2026-09-22): когда
+            # админ привяжет платёж, `process_payment` найдёт эту связку сама.
+            await self.store.update(order.order_id, payment_pending=True)
         return StepResult()
 
     async def _step_fix_contact_name(self, order: Order, link: AmoLink) -> StepResult:
@@ -477,11 +535,15 @@ class Engine:
         return self.specialists.resolve_many(order.masters)
 
     async def _close_tasks(self, order: Order, lead_id: Optional[int],
-                           types: Sequence[int] | set[int]) -> None:
+                           types: Sequence[int] | set[int]) -> int:
+        """Закрыть автозадачи нужных типов. Возвращает, сколько закрыто."""
+        closed = 0
         for task in await self.amo.get_lead_tasks(lead_id):
             if task.get("task_type_id") in types:
                 await self._write("complete_task", order, task["id"],
                                   self.amo.complete_task(task["id"]))
+                closed += 1
+        return closed
 
     async def _write(self, action: str, order: Order, amo_id: Optional[int], coro) -> Any:
         """Выполнить действие в амо и записать его в журнал — и в бою, и в репетиции."""
