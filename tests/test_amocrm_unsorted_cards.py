@@ -14,6 +14,7 @@ tests/test_deleted_orders.py), а гонка нажатия и повторно�
     export TEST_DB_DSN=postgresql://postgres@127.0.0.1:5432/raketaclean_test
 """
 
+import asyncio
 import json
 import os
 import unittest
@@ -397,6 +398,46 @@ class PressTests(_CardsCase):
         self.assertEqual(set(edits), {(ADMIN_A, 11)})
         self._assert_closed_view(edits[(ADMIN_A, 11)])
         self.assertEqual((await self._card(card_id))["done_by"], ADMIN_B)
+
+    async def test_press_during_resend_closes_the_new_cards(self):
+        """Гонка: нажатие пришло, пока рассылка удаляет прежние карточки и шлёт новые.
+
+        Админ A жмёт кнопку на прежней карточке (11) в тот момент, когда рассылка
+        уже начала повторную отправку. Нажатие обязано дождаться конца отправки
+        (строка дела под блокировкой) и закрыть именно новые карточки 501 и 502,
+        а новых напоминаний после закрытия быть не должно.
+        """
+        card_id = await self._insert_card(messages={str(ADMIN_A): 11, str(ADMIN_B): 22})
+        press_tasks = []
+        waited_for_send = []
+
+        async def send_while_pressed(chat_id, text, **kwargs):
+            if not press_tasks:
+                press_tasks.append(
+                    asyncio.create_task(bot.unsorted_card_done_cb(FakeQuery(ADMIN_A, card_id, message_id=11)))
+                )
+                # Время дойти до базы и встать в очередь за блокировкой строки.
+                await asyncio.sleep(0.3)
+                waited_for_send.append(not press_tasks[0].done())
+            return await self._fake_send(chat_id, text, **kwargs)
+
+        self.send_message.side_effect = send_while_pressed
+
+        await bot.run_unsorted_cards_dispatch(NOW)
+        await asyncio.wait_for(press_tasks[0], timeout=5)
+
+        self.assertEqual(waited_for_send, [True])
+        row = await self._card(card_id)
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["done_by"], ADMIN_A)
+        self.assertEqual(json.loads(row["messages"]), {str(ADMIN_A): 501, str(ADMIN_B): 502})
+        edits = self._edits()
+        self.assertTrue({(ADMIN_A, 501), (ADMIN_B, 502)} <= set(edits), edits.keys())
+        for kwargs in edits.values():
+            self._assert_closed_view(kwargs)
+        self.send_message.reset_mock()
+        await bot.run_unsorted_cards_dispatch(NOW + timedelta(hours=3))
+        self.send_message.assert_not_awaited()
 
 
 if __name__ == "__main__":
