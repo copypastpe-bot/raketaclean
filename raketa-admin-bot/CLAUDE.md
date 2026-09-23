@@ -41,8 +41,12 @@ changed only the local source path; the server paths are the same as before.
 
 Files longer than 500 lines and their function maps:
 
-- `adminbot/db.py` (1636 lines) -> `adminbot/db.py.map.md`
-- `adminbot/tg/cards.py` (552 lines) -> `adminbot/tg/cards.py.map.md`
+- `adminbot/main.py` (1296 lines) -> `adminbot/main.py.map.md`
+- `adminbot/db.py` (1772 lines) -> `adminbot/db.py.map.md`
+- `adminbot/gcal/engine.py` (1130 lines) -> `adminbot/gcal/engine.py.map.md`
+- `adminbot/sync/engine.py` (761 lines) -> `adminbot/sync/engine.py.map.md`
+- `adminbot/tg/bot.py` (701 lines) -> `adminbot/tg/bot.py.map.md`
+- `adminbot/tg/cards.py` (618 lines) -> `adminbot/tg/cards.py.map.md`
 
 ## Current Focus
 
