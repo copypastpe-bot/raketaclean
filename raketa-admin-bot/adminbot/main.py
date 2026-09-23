@@ -283,7 +283,8 @@ async def build_app(settings: Settings) -> App:
         source=source,
         is_enabled=sync_allowed(sync_enabled=settings.amo_sync_enabled, control=control),
         poll_interval_sec=settings.poll_interval_sec,
-        on_question=_make_question_sender(mail, dry_run=settings.amo_sync_dry_run),
+        on_question=_make_question_sender(mail, settings.amo_base_url,
+                                          dry_run=settings.amo_sync_dry_run),
         # Неделя наблюдения (решение владельца 2026-08-27): о каждом проведённом
         # заказе робот пишет владельцу сразу, со ссылкой на сделку.
         on_done=_make_order_done_sender(mail, settings.amo_base_url,
@@ -477,7 +478,8 @@ def _build_cleaning(settings: Settings, bot_pool: Any, own_pool: Any, mail: Owne
         # Пауза общая с заказами: владелец жмёт одну кнопку /pause.
         is_enabled=sync_allowed(sync_enabled=settings.cleaning_sync_enabled, control=control),
         poll_interval_sec=settings.poll_interval_sec,
-        on_question=_make_cleaning_question_sender(mail, dry_run=settings.cleaning_sync_dry_run),
+        on_question=_make_cleaning_question_sender(mail, settings.amo_base_url,
+                                                   dry_run=settings.cleaning_sync_dry_run),
         on_done=_make_cleaning_done_sender(mail, settings.amo_base_url,
                                            dry_run=settings.cleaning_sync_dry_run),
         # Тот же разбор удалений, что и у заказов химчистки (задача 5, ТЗ
@@ -587,7 +589,8 @@ def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
         store=store,
         poll_interval_sec=settings.carpets_poll_interval_sec,
         max_rows=settings.carpets_max_rows,
-        on_question=_make_carpet_question_sender(mail, dry_run=settings.carpets_dry_run),
+        on_question=_make_carpet_question_sender(mail, settings.amo_base_url,
+                                                 dry_run=settings.carpets_dry_run),
         on_report=_make_carpet_report_sender(mail, dry_run=settings.carpets_dry_run),
         on_held=_make_carpet_hold_sender(mail, dry_run=settings.carpets_dry_run),
         dry_run=settings.carpets_dry_run,
@@ -644,7 +647,8 @@ def _build_calendar(settings: Settings, own_pool: Any, mail: OwnerMail,
         store=store,
         sync_from=settings.gcal_sync_from or datetime.now(MOSCOW_TZ).date(),
         poll_interval_sec=settings.gcal_poll_interval_sec,
-        on_question=_make_calendar_question_sender(mail, dry_run=settings.gcal_dry_run),
+        on_question=_make_calendar_question_sender(mail, settings.amo_base_url,
+                                                   dry_run=settings.gcal_dry_run),
         on_rehearsal=_make_rehearsal_sender(mail),
         on_done=_make_calendar_done_sender(mail, settings.amo_base_url),
         on_updated=_make_calendar_updated_sender(mail, settings.amo_base_url,
@@ -887,11 +891,12 @@ def _make_cleaning_done_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool
     return send
 
 
-def _make_cleaning_question_sender(mail: OwnerMail, dry_run: bool = False):
+def _make_cleaning_question_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = False):
     """Карточка-вопрос по уборке: те же кнопки, своя приставка (см. tg/cards.py)."""
 
     async def send(order, link) -> Optional[int]:
-        text, keyboard = question_card(order, link.question, dry_run=dry_run)
+        text, keyboard = question_card(order, link.question, dry_run=dry_run,
+                                       base_url=amo_base_url)
         return await mail.send(text, kind=MAIL_CLEANING_QUESTION, ref=order.order_id,
                                reply_markup=keyboard)
 
@@ -944,7 +949,7 @@ def _make_rehearsal_sender(mail: OwnerMail):
     return send
 
 
-def _make_calendar_question_sender(mail: OwnerMail, dry_run: bool = False):
+def _make_calendar_question_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = False):
     """Карточка по записи календаря. Какая именно — зависит от того, что случилось."""
 
     async def send(link) -> Optional[int]:
@@ -954,7 +959,8 @@ def _make_calendar_question_sender(mail: OwnerMail, dry_run: bool = False):
         elif reason.startswith("теплоход"):
             text, keyboard = boat_card(link, dry_run=dry_run)
         else:
-            text, keyboard = calendar_question_card(link, dry_run=dry_run)
+            text, keyboard = calendar_question_card(link, dry_run=dry_run,
+                                                     base_url=amo_base_url)
 
         return await mail.send(text, kind=MAIL_GCAL_QUESTION, ref=link.event_id,
                                reply_markup=keyboard)
@@ -962,9 +968,10 @@ def _make_calendar_question_sender(mail: OwnerMail, dry_run: bool = False):
     return send
 
 
-def _make_carpet_question_sender(mail: OwnerMail, dry_run: bool = False):
+def _make_carpet_question_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = False):
     async def send(row, link) -> Optional[int]:
-        text, keyboard = carpet_question_card(row, link.question, dry_run=dry_run)
+        text, keyboard = carpet_question_card(row, link.question, dry_run=dry_run,
+                                              base_url=amo_base_url)
         return await mail.send(text, kind=MAIL_CARPET_QUESTION, ref=row.partner_id,
                                reply_markup=keyboard)
 
@@ -1083,7 +1090,7 @@ def _make_summary_sender(mail: OwnerMail, amo_base_url: str):
     return send
 
 
-def _make_question_sender(mail: OwnerMail, dry_run: bool = False):
+def _make_question_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = False):
     """Карточка-вопрос владельцу. Возвращает id сообщения — признак «уже спросили».
 
     Если Telegram недоступен, возвращаем None: карточка стала долгом почты.
@@ -1093,7 +1100,8 @@ def _make_question_sender(mail: OwnerMail, dry_run: bool = False):
     """
 
     async def send(order, link) -> Optional[int]:
-        text, keyboard = question_card(order, link.question, dry_run=dry_run)
+        text, keyboard = question_card(order, link.question, dry_run=dry_run,
+                                       base_url=amo_base_url)
         return await mail.send(text, kind=MAIL_ORDER_QUESTION, ref=order.order_id,
                                reply_markup=keyboard)
 
