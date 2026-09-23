@@ -14182,6 +14182,10 @@ async def show_confirm(msg: Message, state: FSMContext):
         f"👤 {name}\n"
         f"📞 {data['phone_in']}\n"
     )
+    if data.get("calendar_event_id"):
+        # Задача 9 ТЗ «цепочка заказа» (2026-09-22): запись выбрана — мастер
+        # видит, к какому адресу привязывается заказ.
+        text += f"📍 из календаря: {data.get('calendar_address') or '—'}\n"
     text += (
         f"💈 Чек: {amount} (доп: {upsell})\n"
         f"{payment_line}\n"
@@ -14234,6 +14238,10 @@ async def commit_order(msg: Message, state: FSMContext):
     order_bonus_expires_utc = (order_created_local + timedelta(days=365)).astimezone(timezone.utc)
     name = data.get("client_name")
     new_bday = data.get("new_birthday")  # date|None
+    # Задача 9 ТЗ «цепочка заказа» (2026-09-22): связка со стороны записи
+    # календаря, если мастер её выбрал (или она была одна).
+    calendar_event_id = data.get("calendar_event_id")
+    deal_lead_id = data.get("deal_lead_id")
     client_birthday_val: date | None = data.get("birthday")
     if isinstance(client_birthday_val, str):
         client_birthday_val = parse_birthday_str(client_birthday_val)
@@ -14273,13 +14281,14 @@ async def commit_order(msg: Message, state: FSMContext):
 
             order = await conn.fetchrow(
                 "INSERT INTO orders (client_id, master_id, phone_digits, amount_total, amount_cash, amount_upsell, "
-                " bonus_spent, bonus_earned, payment_method, address) "
+                " bonus_spent, bonus_earned, payment_method, address, calendar_event_id, deal_lead_id) "
                 "VALUES ($1, "
                 "       (SELECT id FROM staff WHERE tg_user_id=$2 AND is_active LIMIT 1), "
-                "       regexp_replace($3,'[^0-9]+','','g'), $4, $5, $6, $7, $8, $9, $10) "
+                "       regexp_replace($3,'[^0-9]+','','g'), $4, $5, $6, $7, $8, $9, $10, $11, $12) "
                 "RETURNING id, master_id",
                 client_id, msg.from_user.id, phone_in, amount_total, cash_payment, upsell,
-                bonus_spent, bonus_earned, payment_method, order_address_val
+                bonus_spent, bonus_earned, payment_method, order_address_val,
+                calendar_event_id, deal_lead_id,
             )
             order_id = order["id"]
             master_db_id = order["master_id"]
