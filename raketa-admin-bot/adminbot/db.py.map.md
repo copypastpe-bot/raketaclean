@@ -1,12 +1,17 @@
 # Карта функций: adminbot/db.py
 
-Обновлено 2026-09-22 (задача 6 ТЗ `2026-09-22-order-chain.md`: «занято» считается
+Обновлено 2026-09-23 (задача 5 ТЗ `2026-09-22-order-chain.md`: сверка «номер +
+имя» записи календаря с контактом сделки — `_calendar_from_row` читает четыре
+новых поля (`contact_mismatch`, `contact_reminder_count/sent_at/muted`),
+`_UPDATABLE_GCAL_FIELDS` их разрешает, добавлена `fetch_calendar_links_needing_contact_reminder`
+по образцу `fetch_links_needing_address_reminder`).
+Раньше — задача 6 ТЗ `2026-09-22-order-chain.md`: «занято» считается
 по номеру сделки-кандидата, а не по телефону — `fetch_taken_lead_ids`,
 `fetch_carpet_taken_leads`, `fetch_calendar_taken_leads` принимают список
 кандидатов `lead_ids` вместо `phone10`; круг правок по ревью — `fetch_carpet_taken_leads`
 теперь смотрит обе колонки, `lead_id` и `primary_lead_id`, как и «зеркальные»
 функции заказов и календаря).
-Строк в файле: 1678.
+Строк в файле: 1714.
 
 Правило файла: в схему `public` (таблицы рабочего бота) не пишем никогда —
 для неё здесь только SELECT. Всё собственное состояние живёт в схеме `adminbot`.
@@ -124,19 +129,20 @@ EXISTS-условие против `public.orders` (химчистка — фи�
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1000 | `_as_dict` / 1096 `_gcal_value` | jsonb и text[] в виде, который принимает asyncpg |
-| 1007 | `_calendar_from_row` | строка → `CalendarLink` |
-| 1041–1131 | `get_/create_/update_calendar_link`, `mark_calendar_step`, `log_calendar_action` | ход работы по записи |
-| 1132 | `update_calendar_link_and_log` | задача 8: то же самое, что `update_link_and_log`, но для записи календаря |
-| 1165 | `count_calendar_created` | задача 2 (ТЗ 2026-09-21): сколько событий получили `create_lead` в журнале за окно суток — источник «Завёл из календаря» |
-| 1182 | `count_calendar_owner_handled` | задача 8: то же самое, что `count_owner_handled`, но по журналу календаря — подмешивается снаружи в «Передано администратору», как и `count_calendar_created` в «Завёл из календаря» |
-| 1198 | `fetch_calendar_taken_leads` | из переданных `lead_ids` — сделки, занятые ДРУГИМИ записями (задача 6 ТЗ 2026-09-22 — по номеру сделки, не по телефону записи) |
-| 1229 | `fetch_pending_calendar_links` | записи, работа по которым не закончена |
-| 1243 | `fetch_calendar_links_without_report` | сделано, а владельцу не отчитались |
-| 1266 | `count_calendar_links_by_status` | очередь календаря |
-| 1273 | `get_calendar_cursor` / 1302 `save_calendar_cursor` | закладка обмена, своя у каждого календаря |
-| 1319 | `find_calendar_link_by_question_msg` | запись по номеру карточки в Telegram |
-| 1335 | `delete_calendar_link` | забыть запись (ручной разбор последствий) |
+| 1003 | `_as_dict` / 1103 `_gcal_value` | jsonb и text[] в виде, который принимает asyncpg |
+| 1010 | `_calendar_from_row` | строка → `CalendarLink`; с задачи 5 (ТЗ 2026-09-22) читает и четыре поля сверки контакта |
+| 1048–1139 | `get_/create_/update_calendar_link`, `mark_calendar_step`, `log_calendar_action` | ход работы по записи |
+| 1139 | `update_calendar_link_and_log` | задача 8: то же самое, что `update_link_and_log`, но для записи календаря |
+| 1172 | `count_calendar_created` | задача 2 (ТЗ 2026-09-21): сколько событий получили `create_lead` в журнале за окно суток — источник «Завёл из календаря» |
+| 1189 | `count_calendar_owner_handled` | задача 8: то же самое, что `count_owner_handled`, но по журналу календаря — подмешивается снаружи в «Передано администратору», как и `count_calendar_created` в «Завёл из календаря» |
+| 1205 | `fetch_calendar_taken_leads` | из переданных `lead_ids` — сделки, занятые ДРУГИМИ записями (задача 6 ТЗ 2026-09-22 — по номеру сделки, не по телефону записи) |
+| 1236 | `fetch_pending_calendar_links` | записи, работа по которым не закончена |
+| 1250 | `fetch_calendar_links_without_report` | сделано, а владельцу не отчитались |
+| 1273 | `fetch_calendar_links_needing_contact_reminder` | задача 5 (ТЗ 2026-09-22): записи с расхождением «номер + имя», которым пора напомнить владельцу — по образцу `fetch_links_needing_address_reminder`; самоостановка не флагом, а снятым `contact_mismatch` |
+| 1302 | `count_calendar_links_by_status` | очередь календаря |
+| 1309 | `get_calendar_cursor` / 1338 `save_calendar_cursor` | закладка обмена, своя у каждого календаря |
+| 1355 | `find_calendar_link_by_question_msg` | запись по номеру карточки в Telegram |
+| 1371 | `delete_calendar_link` | забыть запись (ручной разбор последствий) |
 | 1341 | `fetch_calendar_actions` | что робот делал по записи |
 
 ## Автозвонок (`autocall_leads`, курсор опроса)

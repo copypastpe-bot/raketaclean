@@ -993,7 +993,10 @@ async def apply_migration(pool: asyncpg.Pool, sql_path: str) -> None:
 _UPDATABLE_GCAL_FIELDS = frozenset(
     {"kind", "status", "skip_reason", "path", "phone10", "client_name", "district",
      "services", "order_date", "event_data", "primary_lead_id", "real_lead_id",
-     "order_id", "question", "question_msg_id", "done_msg_id", "last_error"}
+     "order_id", "question", "question_msg_id", "done_msg_id", "last_error",
+     # Сверка «номер + имя» с контактом сделки (задача 5, ТЗ 2026-09-22).
+     "contact_mismatch", "contact_reminder_count", "contact_reminder_sent_at",
+     "contact_reminder_muted"}
 )
 
 
@@ -1033,6 +1036,10 @@ def _calendar_from_row(row: Optional[asyncpg.Record]) -> Optional[CalendarLink]:
         question_msg_id=row["question_msg_id"],
         done_msg_id=row["done_msg_id"],
         last_error=row["last_error"],
+        contact_mismatch=row["contact_mismatch"],
+        contact_reminder_count=row["contact_reminder_count"],
+        contact_reminder_sent_at=row["contact_reminder_sent_at"],
+        contact_reminder_muted=row["contact_reminder_muted"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -1259,6 +1266,35 @@ async def fetch_calendar_links_without_report(own_pool: asyncpg.Pool,
             ORDER BY updated_at
             """,
             since,
+        )
+    return [_calendar_from_row(row) for row in rows]
+
+
+async def fetch_calendar_links_needing_contact_reminder(
+    own_pool: asyncpg.Pool, *, cap: int = 7, limit: int = 50,
+) -> list[CalendarLink]:
+    """Записи с расхождением «номер + имя», которым пора напомнить владельцу.
+
+    Тот же приём, что у `fetch_links_needing_address_reminder` (задача 5,
+    ТЗ 2026-09-22): раз в сутки, пока не отметят «Я разобрался» или не дойдут
+    до потолка. Самоостановка «сошлось» — не флагом, а самим полем: движок
+    (сверка) и цикл напоминаний (перепроверка перед повтором) снимают
+    `contact_mismatch`, и запись перестаёт сюда попадать — так же, как
+    заполненный `deal_address` останавливает напоминание про адрес.
+    """
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM adminbot.gcal_events
+            WHERE contact_mismatch IS NOT NULL
+              AND contact_reminder_muted = false
+              AND contact_reminder_count < $1
+              AND (contact_reminder_sent_at IS NULL
+                   OR contact_reminder_sent_at <= now() - interval '1 day')
+            ORDER BY updated_at
+            LIMIT $2
+            """,
+            cap, limit,
         )
     return [_calendar_from_row(row) for row in rows]
 
