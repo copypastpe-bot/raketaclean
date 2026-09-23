@@ -26,8 +26,8 @@ from adminbot.amo.fields import fetch_lead_address
 from adminbot.control import ControlPanel
 from adminbot.gcal.engine import OWNER_HANDLES_REASON, OWNER_KEEPS_REASON
 from adminbot.tg.calendar_cards import (
-    CHOICE_PREFIX as GCAL_PREFIX, calendar_status_text, calendar_summary_text,
-    parse_calendar_choice)
+    CHOICE_PREFIX as GCAL_PREFIX, CONTACT_PREFIX, calendar_status_text, calendar_summary_text,
+    parse_calendar_choice, parse_contact_choice)
 from adminbot.tg.cards import (
     ADDR_PREFIX, CARPET_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX,
     carpet_report_text, parse_carpet_choice,
@@ -554,12 +554,52 @@ class AddressAnswers:
         return bool(user and user.id == self.owner_tg_id)
 
 
+class ContactAnswers:
+    """Нажатие «✅ Я разобрался» на карточке расхождения «номер + имя»
+
+    (задача 5, ТЗ 2026-09-22). Проще, чем `AddressAnswers`: сверять с CRM
+    заново тут нечего — владелец просто говорит «дальше без меня», и это
+    решение просто пишется в связку, тем же приёмом, что у `CalendarAnswers`.
+    """
+
+    def __init__(self, *, owner_tg_id: int, store: Any) -> None:
+        self.owner_tg_id = owner_tg_id
+        self.store = store
+
+    async def on_choice(self, callback: Any) -> None:
+        user = getattr(callback, "from_user", None)
+        if not (user and user.id == self.owner_tg_id):
+            return
+        event_id = parse_contact_choice(getattr(callback, "data", None))
+        if event_id is None:
+            await callback.answer()
+            return
+
+        link = await self.store.get(event_id)
+        if link is None:
+            await callback.answer("Этой записи у меня уже нет.")
+            return
+
+        # Не «manual» (задача 8, ТЗ 2026-09-21): тот choice считается в
+        # «Передано администратору» вечерней сводки — это не тот случай,
+        # владелец не берёт заказ на себя, а закрывает вопрос о контакте.
+        await self.store.update_and_log(
+            event_id, action="answer_owner", dry_run=False,
+            payload={"choice": "contact_ack"}, contact_reminder_muted=True)
+        log.info("Календарь, запись %s: владелец сказал, что разобрался с контактом",
+                 event_id)
+        await callback.answer()
+        await callback.message.edit_text(
+            "Запись календаря: расхождение контакта — больше не напоминаю.")
+
+
 def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None,
                  carpets: Optional[CarpetAnswers] = None,
                  calendar: Optional[CalendarAnswers] = None,
                  cleaning: Optional[OwnerAnswers] = None,
                  address: Optional[AddressAnswers] = None,
-                 cleaning_address: Optional[AddressAnswers] = None) -> Router:
+                 cleaning_address: Optional[AddressAnswers] = None,
+                 contact: Optional[ContactAnswers] = None) -> Router:
     """Собрать роутер: сначала команды владельца, последним — отказ всем прочим."""
     router = Router(name="owner")
     owner = OwnerOnly(commands.owner_tg_id)
@@ -595,6 +635,9 @@ def build_router(commands: OwnerCommands, answers: Optional[OwnerAnswers] = None
     if cleaning_address is not None:
         router.callback_query.register(cleaning_address.on_choice, owner,
                                        F.data.startswith(f"{CLEANING_ADDR_PREFIX}:"))
+    if contact is not None:
+        router.callback_query.register(contact.on_choice, owner,
+                                       F.data.startswith(f"{CONTACT_PREFIX}:"))
     return router
 
 
