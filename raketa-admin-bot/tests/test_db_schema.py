@@ -466,6 +466,38 @@ async def test_fetch_orders_by_ids_returns_only_requested(pool):
     assert await db.fetch_orders_by_ids(pool, []) == []
 
 
+async def test_order_reads_calendar_link_columns(pool):
+    """Задача 9/10 (ТЗ 2026-09-22): заказ несёт связку с записью календаря, если
+    мастер выбрал её в сценарии рабочего бота — миграция 0013 добавила обе
+    колонки в `public.orders`, движок читает их вместе с остальным заказом.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE public.orders SET calendar_event_id = $1, deal_lead_id = $2 WHERE id = 596",
+            "evt-596", 41400099,
+        )
+
+    orders = await db.fetch_orders_by_ids(pool, [500, 596])
+    by_id = {order.order_id: order for order in orders}
+
+    assert by_id[596].calendar_event_id == "evt-596"
+    assert by_id[596].deal_lead_id == 41400099
+    assert by_id[500].calendar_event_id is None and by_id[500].deal_lead_id is None
+
+
+async def test_calendar_link_order_id_roundtrip(pool):
+    """После проведения заказа наблюдатель пишет его номер обратно в запись
+    календаря (задача 10) — круг замкнут в обе стороны, `order_id` уже
+    разрешённое поле `update_calendar_link`.
+    """
+    await db.create_calendar_link(pool, "evt-10", kind="order", phone10="9601861067")
+
+    link = await db.update_calendar_link(pool, "evt-10", order_id=596)
+
+    assert link.order_id == 596
+    assert (await db.get_calendar_link(pool, "evt-10")).order_id == 596
+
+
 async def test_active_links_and_summary_rows(pool):
     await db.create_link(pool, order_id=596, phone10="9601861067")
     await db.update_link(pool, 596, status="waiting_salesbot", path="B", primary_lead_id=41400001)
