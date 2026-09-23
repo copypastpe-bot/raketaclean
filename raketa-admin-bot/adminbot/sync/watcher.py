@@ -120,6 +120,8 @@ class Watcher:
             if link is None:
                 continue
             statuses[link.status] += 1
+            if link.status == "done" and order.calendar_event_id:
+                await self._link_calendar_order(order)
             if await self._maybe_ask(order, link):
                 questions.append(order.order_id)
             elif link.status == "done" and self.on_done is not None:
@@ -167,6 +169,21 @@ class Watcher:
             await self.on_done(order, link)
         except Exception:                              # noqa: BLE001
             log.exception("%s №%s: сообщение о работе не ушло", order.label, order.order_id)
+
+    async def _link_calendar_order(self, order: Order) -> None:
+        """После проведения — вписать номер заказа обратно в запись календаря
+        (задача 10, ТЗ 2026-09-22): круг замкнут в обе стороны, рабочий бот по
+        своему представлению `adminbot.calendar_jobs` увидит, что запись уже
+        занята заказом. Сбой не должен ронять тик — то же правило, что у `_report_done`.
+        """
+        try:
+            calendar_link = await self.engine.store.get_calendar_link(order.calendar_event_id)
+            if calendar_link is not None and calendar_link.order_id is None:
+                await self.engine.store.update_calendar_link(
+                    order.calendar_event_id, order_id=order.order_id)
+        except Exception:                              # noqa: BLE001
+            log.exception("%s №%s: не удалось записать номер заказа в запись календаря",
+                          order.label, order.order_id)
 
     async def _maybe_ask(self, order: Order, link: AmoLink) -> bool:
         """Отправить карточку-вопрос, если она ещё не отправлена. True — отправили."""

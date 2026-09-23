@@ -11,15 +11,16 @@ from datetime import datetime
 from decimal import Decimal
 
 from adminbot.amo.fields import MOSCOW_TZ
-from adminbot.models import AmoLink, Order
+from adminbot.models import AmoLink, CalendarLink, Order
 from adminbot.sync.watcher import Watcher
 
 ORDER_MOMENT = datetime(2026, 8, 24, 17, 53, tzinfo=MOSCOW_TZ)
 
 
-def make_order(order_id=596):
+def make_order(order_id=596, calendar_event_id=None):
     return Order(order_id=order_id, phone10="9601861067", created_at=ORDER_MOMENT,
-                 amount_total=Decimal("5950"), client_name="Ирина")
+                 amount_total=Decimal("5950"), client_name="Ирина",
+                 calendar_event_id=calendar_event_id)
 
 
 def make_link(order_id=596, status="done", **extra):
@@ -59,10 +60,21 @@ class FakeEngine:
 class FakeLinkStore:
     def __init__(self):
         self.links = {}
+        self.calendar_links = {}
 
     async def update(self, order_id, **fields):
         self.links[order_id] = replace(self.links[order_id], **fields)
         return self.links[order_id]
+
+    async def get_calendar_link(self, event_id):
+        return self.calendar_links.get(event_id)
+
+    async def update_calendar_link(self, event_id, **fields):
+        link = self.calendar_links.get(event_id)
+        if link is None:
+            return None
+        self.calendar_links[event_id] = replace(link, **fields)
+        return self.calendar_links[event_id]
 
 
 async def test_tick_processes_pending_orders():
@@ -293,6 +305,34 @@ async def test_watcher_without_deletions_handler_behaves_as_before():
 
     assert report.scanned == 1
     assert report.by_status == {"done": 1}
+
+
+async def test_finished_calendar_order_writes_order_id_back():
+    """Круг замкнут в обе стороны (задача 10, ТЗ 2026-09-22): заказ проведён —
+    номер уходит в запись календаря, рабочий бот увидит его в своём
+    представлении."""
+    order = make_order(596, calendar_event_id="evt1")
+    source = FakeSource([order])
+    engine = FakeEngine({596: make_link(596, "done")})
+    engine.store.calendar_links["evt1"] = CalendarLink(
+        event_id="evt1", kind="order", status="in_progress")
+
+    await Watcher(engine=engine, source=source).tick()
+
+    assert engine.store.calendar_links["evt1"].order_id == 596
+
+
+async def test_calendar_order_id_written_once():
+    """Запись, у которой номер уже стоит, второй раз не перезаписывается."""
+    order = make_order(596, calendar_event_id="evt1")
+    source = FakeSource([order])
+    engine = FakeEngine({596: make_link(596, "done")})
+    engine.store.calendar_links["evt1"] = CalendarLink(
+        event_id="evt1", kind="order", status="done", order_id=591)
+
+    await Watcher(engine=engine, source=source).tick()
+
+    assert engine.store.calendar_links["evt1"].order_id == 591
 
 
 class _SourceStub:
