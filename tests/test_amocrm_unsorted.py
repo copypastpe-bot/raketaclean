@@ -161,6 +161,44 @@ class BuildCardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_unsorted_card(item, api_base=API_BASE, contact=None)
 
+    def test_phone_normalized_to_plus7_from_contact(self):
+        cases = {
+            "89601861067": "+79601861067",
+            "+7 (960) 186-10-67": "+79601861067",
+            "8 960 186 10 67": "+79601861067",
+            "9601861067": "+79601861067",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                contact = {
+                    "id": 10,
+                    "name": "Иван",
+                    "custom_fields_values": [
+                        {"field_code": "PHONE", "values": [{"value": raw}]},
+                    ],
+                }
+                card = build_unsorted_card(_call_item(), api_base=API_BASE, contact=contact)
+
+                self.assertEqual(card.phone, expected)
+
+    def test_foreign_phone_stays_as_is(self):
+        contact = {
+            "id": 10,
+            "name": "Иван",
+            "custom_fields_values": [
+                {"field_code": "PHONE", "values": [{"value": "+375 29 123-45-67"}]},
+            ],
+        }
+
+        card = build_unsorted_card(_call_item(), api_base=API_BASE, contact=contact)
+
+        self.assertEqual(card.phone, "+375 29 123-45-67")
+
+    def test_no_phone_stays_none(self):
+        card = build_unsorted_card(_chat_item(), api_base=API_BASE, contact=CONTACT_NO_PHONE)
+
+        self.assertIsNone(card.phone)
+
 
 class RenderCardTests(unittest.TestCase):
     def test_call_card_text(self):

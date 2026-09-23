@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Mapping
@@ -102,10 +103,12 @@ def build_unsorted_card(
         sender.strip() if not _extract_phone(sender) else None,
         str(metadata.get("name") or "").strip(),
     )
-    phone = _first_text(
-        extract_contact_phone(contact),
-        _extract_phone(str(metadata.get("phone") or "")),
-        _extract_phone(sender),
+    phone = _normalize_ru_phone(
+        _first_text(
+            extract_contact_phone(contact),
+            _extract_phone(str(metadata.get("phone") or "")),
+            _extract_phone(sender),
+        )
     )
     event_ts = _positive_int(metadata.get(_EVENT_TIME_FIELD[kind])) or _positive_int(
         item.get("created_at")
@@ -178,6 +181,22 @@ def _to_moscow(moment: datetime) -> datetime:
     if moment.tzinfo is None or moment.utcoffset() is None:
         raise ValueError("datetime without timezone")
     return moment.astimezone(MOSCOW_TZ)
+
+
+def _normalize_ru_phone(raw: str | None) -> str | None:
+    """Российский номер — к виду `+7XXXXXXXXXX`, остальное (иностранный, мусор) — как пришло.
+
+    Российский = после отбрасывания всего, кроме цифр: 11 цифр с первой 7 или 8,
+    либо 10 цифр с первой 9. Пусто на входе — пусто на выходе.
+    """
+    if not raw:
+        return raw
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 11 and digits[0] in "78":
+        return f"+7{digits[1:]}"
+    if len(digits) == 10 and digits[0] == "9":
+        return f"+7{digits}"
+    return raw
 
 
 def _line(label: str, value: str | None) -> str:
