@@ -94,6 +94,14 @@ def test_question_card_when_salesbot_is_silent_offers_a_retry():
     assert "amosync:596:retry" in [button.callback_data for button in buttons(keyboard)]
 
 
+def test_question_card_for_lead_missing_in_crm():
+    """Задача 10 (ревью 23.09): сделка из заказа (`deal_lead_id`) пропала в CRM
+    между выбором мастера и проходом робота — понятный текст владельцу."""
+    text, _ = question_card(make_order(), {"reason": "сделка из заказа не найдена в CRM"})
+
+    assert "удалена" in text.lower()
+
+
 def test_question_card_without_a_known_reason_still_works():
     text, keyboard = question_card(make_order(), None)
 

@@ -287,6 +287,13 @@ class Engine:
         заново и берём её `real_lead_id`. Не готова и она — ждём, пока движок
         календаря её заведёт, тем же таймером, что и путь Б (задача 2), но от
         `created_at` связки: чек-листа здесь ещё нет, отметки шага — тоже.
+
+        Названная сделка могла измениться между выбором мастера и этим проходом
+        (ревью 23.09): читаем её заново, прежде чем назначать путь A. Удалена —
+        спрашиваем владельца, матчер не запускаем (гадать по телефону здесь так
+        же не нужно, как и раньше). Закрыта руками — привязываем как
+        `already_done` обычного матчера: в CRM ничего не пишем, чек-лист не
+        исполняем.
         """
         real_lead_id = order.deal_lead_id
         if real_lead_id is None and order.calendar_event_id is not None:
@@ -294,6 +301,19 @@ class Engine:
             real_lead_id = calendar_link.real_lead_id if calendar_link is not None else None
 
         if real_lead_id is not None:
+            lead = await self._get_lead(real_lead_id)
+            if lead is None:
+                return await self._ask_owner(order, link, "сделка из заказа не найдена в CRM")
+
+            if int(lead.get("status_id") or 0) in ids.STATUSES_FINAL:
+                link = await self.store.update(
+                    order.order_id, path="done", status="done", real_lead_id=real_lead_id,
+                    deal_address=field_value(lead, ids.FIELD_ADDRESS))
+                await self.store.log(order.order_id, "linked_by_master", dry_run=self.dry_run,
+                                     payload={"lead_id": real_lead_id, "closed": True,
+                                              "calendar_event_id": order.calendar_event_id})
+                return link
+
             link = await self.store.update(order.order_id, path="A", status="in_progress",
                                            real_lead_id=real_lead_id)
             await self.store.log(order.order_id, "linked_by_master", dry_run=self.dry_run,

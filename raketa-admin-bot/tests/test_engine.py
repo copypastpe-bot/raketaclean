@@ -567,6 +567,44 @@ async def test_deal_lead_id_goes_straight_to_path_a_without_the_matcher():
     assert logged and logged[0]["payload"]["lead_id"] == lead_id
 
 
+async def test_deal_lead_id_already_closed_is_linked_without_touching_crm():
+    """Ревью 23.09: сделка могла закрыться руками между выбором мастера и
+    проходом робота — привязываем как есть (тот же приём, что у `already_done`
+    обычного матчера), в CRM ничего не пишем.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = 41463832_20
+    amo.add_lead(lead_id, ids.PIPELINE_REALIZATION, ids.STATUS_SUCCESS,
+                 created_at=int(ORDER_MOMENT.timestamp()) - 3600,
+                 closed_at=int(ORDER_MOMENT.timestamp()),
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "ул. Мира, 10"}]}])
+    order = make_order(deal_lead_id=lead_id)
+
+    link = await make_engine(amo, store).process_order(order)
+
+    assert link.status == "done" and link.path == "done" and link.real_lead_id == lead_id
+    assert link.deal_address == "ул. Мира, 10"
+    assert not amo.calls_of("update_lead") and not amo.calls_of("move_lead")
+    logged = store.actions_of("linked_by_master")
+    assert logged and logged[0]["payload"] == {
+        "lead_id": lead_id, "closed": True, "calendar_event_id": None}
+
+
+async def test_deal_lead_id_missing_in_crm_asks_owner():
+    """Ревью 23.09: сделка удалена (`get_lead` → None) — спрашиваем владельца,
+    матчер не запускаем."""
+    amo, store = FakeAmo(), FakeStore()
+    order = make_order(deal_lead_id=41463832_21)
+
+    link = await make_engine(amo, store).process_order(order)
+
+    assert link.status == "waiting_owner"
+    assert amo.calls_of("find_leads_by_phone") == []
+    logged = store.actions_of("ask_owner")
+    assert logged and logged[-1]["payload"] == {"reason": "сделка из заказа не найдена в CRM"}
+
+
 async def test_calendar_event_without_lead_waits_then_asks_owner():
     """Известна только запись (`calendar_event_id`), а её сделку движок
     календаря ещё не завёл — ждём тем же таймером, что и путь Б, и спрашиваем
