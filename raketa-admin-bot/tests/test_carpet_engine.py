@@ -211,6 +211,22 @@ async def test_two_open_deals_wait_for_the_owner():
     assert amo.calls_of("move_lead") == []
 
 
+async def test_ask_owner_options_carry_the_deal_address():
+    """Задача 7 (ТЗ 2026-09-22): карточка-вопрос различает варианты адресом —
+    `CarpetLead.address` должен долетать до `question["options"]`.
+    """
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    open_carpet_lead(amo, 31516051, custom_fields_values=[
+        {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "ул. Мира, 10"}]}])
+    open_carpet_lead(amo, 31516052)
+
+    link = await make_engine(amo, store).process_row(row())
+
+    assert link.status == "waiting_owner"
+    addresses = {option["lead_id"]: option["address"] for option in link.question["options"]}
+    assert addresses == {31516051: "ул. Мира, 10", 31516052: None}
+
+
 async def test_row_without_phone_waits_for_the_owner():
     amo, store = FakeAmo(), MemoryCarpetStore()
 

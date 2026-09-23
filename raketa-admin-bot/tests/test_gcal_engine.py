@@ -233,6 +233,24 @@ async def test_missing_salesbot_deal_asks_the_owner(amo):
     assert link.question["reason"] == "сейлзбот не создал автосделку"
 
 
+async def test_ask_owner_options_carry_the_deal_address(amo):
+    """Задача 7 (ТЗ 2026-09-22): карточка-вопрос различает варианты адресом —
+    `LeadInfo.address` должен долетать до `question["options"]`.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                custom_fields_values=[
+                    {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "ул. Мира, 10"}]}])
+    amo.add_lead(41400002, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+
+    link = await engine.process(an_order())
+
+    assert link.status == "waiting_owner"
+    addresses = {option["lead_id"]: option["address"] for option in link.question["options"]}
+    assert addresses == {41400001: "ул. Мира, 10", 41400002: None}
+
+
 async def test_wait_salesbot_timer_counts_from_move_primary_success_not_updated_at(amo):
     """Дефект 22.09 (задача 2 ТЗ `order-chain`): `_run_checklist` перед каждым
     `StepResult(wait=True)` зовёт `store.update(status="waiting_salesbot")` —

@@ -474,6 +474,22 @@ async def test_deal_taken_by_another_order_is_not_reused():
     assert third.real_lead_id == 902             # остаётся только вторая
 
 
+async def test_ask_owner_options_carry_the_deal_address():
+    """Задача 7 (ТЗ 2026-09-22): карточка-вопрос различает варианты адресом —
+    `LeadInfo.address` должен долетать до `question["options"]`.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    open_realization_lead(amo, lead_id=901, custom_fields_values=[
+        {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "ул. Мира, 10"}]}])
+    open_realization_lead(amo, lead_id=902)
+
+    link = await make_engine(amo, store).process_order(make_order())
+
+    assert link.status == "waiting_owner"
+    addresses = {option["lead_id"]: option["address"] for option in link.question["options"]}
+    assert addresses == {901: "ул. Мира, 10", 902: None}
+
+
 async def test_deal_taken_by_another_order_is_not_reused_across_different_phones():
     """Задача 6, ТЗ 2026-09-22: один и тот же человек с двумя номерами —
     «занято» считается по номеру сделки, а не по телефону заказа. Раньше

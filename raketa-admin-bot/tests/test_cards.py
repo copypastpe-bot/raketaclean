@@ -49,9 +49,14 @@ def test_question_card_shows_order_and_choices():
     assert "5 950" in text                      # чек с разделителем разрядов
     assert "24.08.2026" in text                 # дата заказа с годом
     assert "какая из них" in text.lower()       # причина вопроса словами
+    # Текст над кнопками различает варианты — кнопка несёт только номер
+    # (задача 7, ТЗ 2026-09-22, факт 22.09: у Натальи 20.09 три кнопки
+    # выглядели одинаково).
+    assert "1) 22.07 · 5 000 ₽" in text
+    assert "2) 24.07 · 6 000 ₽" in text
 
     labels = [button.text for button in buttons(keyboard)]
-    assert labels[:2] == ["Сделка 22.07 · 5 000 ₽", "Сделка 24.07 · 6 000 ₽"]
+    assert labels[:2] == ["1", "2"]
     assert "➕ Создать новую" in labels
     assert "✋ Сам разберусь" in labels
 
@@ -94,6 +99,74 @@ def test_question_card_without_a_known_reason_still_works():
 
     assert "Заказ №596" in text
     assert buttons(keyboard)                    # кнопки есть всегда: тупика быть не должно
+
+
+# --- задача 7 (ТЗ 2026-09-22): адреса текстом, номера на кнопках ---
+
+def test_question_card_lists_same_date_deals_by_address_with_numbered_buttons():
+    """Факт 22.09: у Натальи 20.09 три сделки — три одинаковые кнопки «Сделка
+    20.09». Теперь различает адрес в тексте, а кнопки — просто «1», «2», «3».
+    """
+    question = {"reason": "ask_owner", "options": [
+        {"lead_id": 41400001, "pipeline_id": ids.PIPELINE_REALIZATION,
+         "date": "2026-09-20", "address": "Гагарина, д 36 к 5", "name": None},
+        {"lead_id": 41400002, "pipeline_id": ids.PIPELINE_REALIZATION,
+         "date": "2026-09-20", "address": "Ленина, д 10", "name": None},
+        {"lead_id": 41400003, "pipeline_id": ids.PIPELINE_REALIZATION,
+         "date": "2026-09-20", "address": "Мира, д 1", "name": None},
+    ]}
+
+    text, keyboard = question_card(make_order(), question,
+                                   base_url="https://example.amocrm.ru")
+
+    assert "1) 20.09 · Гагарина, д 36 к 5 · https://example.amocrm.ru/leads/detail/41400001" in text
+    assert "2) 20.09 · Ленина, д 10 · https://example.amocrm.ru/leads/detail/41400002" in text
+    assert "3) 20.09 · Мира, д 1 · https://example.amocrm.ru/leads/detail/41400003" in text
+
+    labels = [button.text for button in buttons(keyboard)]
+    assert labels[:3] == ["1", "2", "3"]
+    # Callback несёт id сделки, как и раньше — от нумерации кнопок не зависит.
+    data = [button.callback_data for button in buttons(keyboard)]
+    assert data[:3] == ["amosync:596:41400001", "amosync:596:41400002", "amosync:596:41400003"]
+
+
+def test_question_card_option_without_address_has_no_stray_none():
+    question = {"reason": "ask_owner", "options": [
+        {"lead_id": 41400001, "pipeline_id": ids.PIPELINE_REALIZATION,
+         "date": "2026-09-20", "address": None, "name": None},
+    ]}
+
+    text, _ = question_card(make_order(), question)
+
+    assert "1) 20.09" in text
+    assert "None" not in text
+
+
+def test_question_card_placeholder_price_is_not_shown():
+    """< 100 ₽ — заглушка (`PLACEHOLDER_PRICE`), а не настоящая сумма сделки."""
+    question = {"reason": "ask_owner", "options": [
+        {"lead_id": 41400001, "pipeline_id": ids.PIPELINE_REALIZATION,
+         "date": "2026-09-20", "price": 1, "address": None, "name": None},
+    ]}
+
+    text, _ = question_card(make_order(), question)
+
+    assert "1 ₽" not in text
+
+
+def test_question_card_renders_legacy_options_without_address_field():
+    """Старые вопросы в базе заведены до задачи 7 — в options поля `address`
+    ещё нет вовсе. Рендер не должен падать.
+    """
+    question = {"reason": "ask_owner", "options": [
+        {"lead_id": 41400001, "pipeline_id": ids.PIPELINE_REALIZATION,
+         "date": "2026-09-20", "price": 5000, "name": None},
+    ]}
+
+    text, keyboard = question_card(make_order(), question)
+
+    assert "1) 20.09 · 5 000 ₽" in text
+    assert [button.text for button in buttons(keyboard)][:1] == ["1"]
 
 
 # --- разбор нажатия ---
@@ -418,6 +491,26 @@ def test_carpet_question_card_shows_the_order_and_choices():
     data = [button.callback_data for row_ in keyboard.inline_keyboard for button in row_]
     assert "carpet:44426:31516051" in data
     assert "carpet:44426:new" in data and "carpet:44426:manual" in data
+
+
+def test_carpet_question_card_lists_addresses_with_numbered_buttons():
+    """Задача 7 (ТЗ 2026-09-22): та же различимость вариантов, что и у заказов."""
+    from adminbot.tg.cards import carpet_question_card
+
+    question = {"reason": "какая сделка про этот заказ", "options": [
+        {"lead_id": 31516051, "pipeline_id": ids.PIPELINE_CARPETS,
+         "date": "2026-08-12", "address": "Гагарина, д 36 к 5", "name": None},
+        {"lead_id": 31516052, "pipeline_id": ids.PIPELINE_CARPETS,
+         "date": "2026-08-12", "address": "Ленина, д 10", "name": None},
+    ]}
+
+    text, keyboard = carpet_question_card(carpet_row(), question,
+                                          base_url="https://example.amocrm.ru")
+
+    assert "1) 12.08 · Гагарина, д 36 к 5 · https://example.amocrm.ru/leads/detail/31516051" in text
+    assert "2) 12.08 · Ленина, д 10 · https://example.amocrm.ru/leads/detail/31516052" in text
+    buttons = [button.text for row_ in keyboard.inline_keyboard for button in row_]
+    assert buttons[:2] == ["1", "2"]
 
 
 def test_carpet_refusal_card_says_it_is_a_refusal():

@@ -94,6 +94,8 @@ def test_boat_card_offers_to_create():
 
 
 def test_question_card_lists_candidate_deals():
+    """Задача 7 (ТЗ 2026-09-22): кнопка несёт только номер, дата — в тексте
+    над кнопками, чтобы одинаковые варианты можно было различить."""
     link = a_link(question={"reason": "ask_owner", "options": [
         {"lead_id": 41400001, "pipeline_id": 4482787, "date": "2026-08-27"},
         {"lead_id": 41400002, "pipeline_id": 4482751, "date": None},
@@ -102,14 +104,15 @@ def test_question_card_lists_candidate_deals():
     text, keyboard = calendar_question_card(link)
 
     assert "несколько" in text.lower()
+    assert "1) 27.08" in text                        # дата помогает выбрать
+    assert "2) #41400002" in text                    # без даты — номер сделки
     buttons = [b.text for row in keyboard.inline_keyboard for b in row]
-    assert "Сделка #41400001 · 27.08" in buttons     # дата помогает выбрать
-    assert "Сделка #41400002" in buttons
+    assert buttons[:2] == ["1", "2"]
     assert any("Сам разберусь" in b for b in buttons)
 
 
-def test_an_old_deal_shows_its_year_on_the_button():
-    """Сделка не этого года — на кнопке год обязателен.
+def test_an_old_deal_shows_its_year_in_the_text():
+    """Сделка не этого года — в тексте над кнопкой год обязателен.
 
     2026-09-02 владелец увидел «Сделка #29174771 · 11.09» и принял её за свежую,
     хотя это сентябрь 2024-го.
@@ -118,10 +121,48 @@ def test_an_old_deal_shows_its_year_on_the_button():
         {"lead_id": 29174771, "pipeline_id": 4482787, "date": "2024-09-11"},
     ]})
 
-    _text, keyboard = calendar_question_card(link)
+    text, keyboard = calendar_question_card(link)
 
+    assert "1) 11.09.2024" in text
     buttons = [b.text for row in keyboard.inline_keyboard for b in row]
-    assert "Сделка #29174771 · 11.09.2024" in buttons
+    assert buttons[:1] == ["1"]
+
+
+def test_question_card_shows_address_and_deal_link():
+    link = a_link(question={"reason": "ask_owner", "options": [
+        {"lead_id": 41400001, "pipeline_id": 4482787, "date": "2026-08-27",
+         "address": "Гагарина, д 36 к 5"},
+    ]})
+
+    text, _ = calendar_question_card(link, base_url="https://example.amocrm.ru")
+
+    assert ("1) 27.08 · Гагарина, д 36 к 5 · "
+           "https://example.amocrm.ru/leads/detail/41400001") in text
+
+
+def test_question_card_option_without_address_has_no_stray_none():
+    link = a_link(question={"reason": "ask_owner", "options": [
+        {"lead_id": 41400001, "pipeline_id": 4482787, "date": "2026-08-27",
+         "address": None},
+    ]})
+
+    text, _ = calendar_question_card(link)
+
+    assert "1) 27.08" in text
+    assert "None" not in text
+
+
+def test_question_card_renders_legacy_options_without_address_field():
+    """Старые записи в базе заведены до задачи 7 — поля `address` в options
+    ещё нет вовсе. Рендер не должен падать."""
+    link = a_link(question={"reason": "ask_owner", "options": [
+        {"lead_id": 41400001, "pipeline_id": 4482787, "date": "2026-08-27"},
+    ]})
+
+    text, keyboard = calendar_question_card(link)
+
+    assert "1) 27.08" in text
+    assert [b.text for row in keyboard.inline_keyboard for b in row][:1] == ["1"]
 
 
 def test_choice_is_short_enough_for_telegram():
@@ -446,8 +487,9 @@ def test_closed_deal_question_offers_to_confirm_not_to_work():
     text, keyboard = calendar_question_card(link)
 
     assert "закрыт" in text.lower() and "сами" in text.lower()
+    assert "Это она" in text
     buttons = [b.text for row in keyboard.inline_keyboard for b in row]
-    assert any("Это она" in b for b in buttons)
+    assert buttons[:1] == ["1"]
     assert any("Создать новую" in b for b in buttons)
 
 
