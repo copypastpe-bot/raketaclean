@@ -130,6 +130,38 @@ async def test_create_lead_without_contact(amo_write):
     assert "_embedded" not in fake.requests[0].body[0]
 
 
+async def test_create_lead_with_tag_sends_it_next_to_contact(amo_write):
+    """Тег «Отклик на промо» — в `_embedded.tags` рядом с контактом (ТЗ 2026-09-23)."""
+    client, fake = amo_write
+    fake.stub("/api/v4/leads", {"_embedded": {"leads": [{"id": 779}]}})
+
+    intent = await client.create_lead(name="Отклик на промо — Ирина",
+                                      pipeline_id=ids.PIPELINE_PRIMARY,
+                                      status_id=ids.PRIM_STAGE_NEW_LEAD,
+                                      contact_id=111, tags=["Отклик на промо"])
+
+    assert fake.requests[0].body == [{
+        "name": "Отклик на промо — Ирина",
+        "pipeline_id": ids.PIPELINE_PRIMARY,
+        "status_id": ids.PRIM_STAGE_NEW_LEAD,
+        "_embedded": {"contacts": [{"id": 111}], "tags": [{"name": "Отклик на промо"}]},
+    }]
+    assert intent.entity_id == 779
+
+
+async def test_create_lead_rehearsal_with_tag_sends_nothing(amo_dry):
+    client, fake = amo_dry
+
+    intent = await client.create_lead(name="Отклик на промо — Ирина",
+                                      pipeline_id=ids.PIPELINE_PRIMARY,
+                                      status_id=ids.PRIM_STAGE_NEW_LEAD,
+                                      contact_id=111, tags=["Отклик на промо"])
+
+    assert fake.requests == []
+    assert intent.performed is False
+    assert intent.payload[0]["_embedded"]["tags"] == [{"name": "Отклик на промо"}]
+
+
 # --- создание контакта ---
 
 async def test_create_contact_sends_phone_in_standard_field(amo_write):

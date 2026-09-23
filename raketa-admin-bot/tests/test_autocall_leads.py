@@ -3,7 +3,7 @@
 Все данные вымышленные: телефоны несуществующие, имена нейтральные.
 """
 
-from adminbot.autocall.leads import SITE_TAG, is_site_lead, lead_phone10
+from adminbot.autocall.leads import PROMO_TAG, SITE_TAG, is_site_lead, lead_phone10
 
 
 def _lead_with_tags(*names):
@@ -49,6 +49,20 @@ def test_lead_without_tags_is_not_site_lead():
     assert not is_site_lead({})
     assert not is_site_lead({"_embedded": {}})
     assert not is_site_lead(None)
+
+
+def test_promo_tag_is_taken_like_site_tag():
+    """Сделку по отклику на промо автозвонок берёт наравне с заявкой с сайта
+    (решение владельца 7, ТЗ 2026-09-23)."""
+    assert PROMO_TAG == "Отклик на промо"
+    assert is_site_lead(_lead_with_tags(PROMO_TAG))
+    assert is_site_lead(_lead_with_tags("  отклик на промо "))
+    assert is_site_lead(_lead_with_tags("Повтор", PROMO_TAG))
+
+
+def test_lead_without_either_tag_is_still_not_taken():
+    assert not is_site_lead(_lead_with_tags("Повтор", "VIP"))
+    assert not is_site_lead(_lead_with_tags("Отклик"))            # часть имени — не совпадение
 
 
 # --- lead_phone10 ---

@@ -386,15 +386,27 @@ class AmoClient:
         price: Optional[Decimal] = None,
         contact_id: Optional[int] = None,
         custom_fields: Optional[Sequence[dict]] = None,
+        tags: Optional[Sequence[str]] = None,
     ) -> Intent:
-        """Завести сделку. Контакт привязывается сразу, отдельным запросом не надо."""
+        """Завести сделку. Контакт привязывается сразу, отдельным запросом не надо.
+
+        `tags` — имена тегов (`_embedded.tags=[{"name": …}]` рядом с контактами):
+        так сделка по отклику на промо получает тег «Отклик на промо», по которому
+        её берёт автозвонок (ТЗ 2026-09-23, задача 5). Формат — по документации
+        amoCRM v4; на боевой сделке проверяется глазами при первом включении.
+        """
         entity: dict[str, Any] = {"name": name, "pipeline_id": pipeline_id, "status_id": status_id}
         if price is not None:
             entity["price"] = int(price)
         if custom_fields:
             entity["custom_fields_values"] = list(custom_fields)
+        embedded: dict[str, Any] = {}
         if contact_id is not None:
-            entity["_embedded"] = {"contacts": [{"id": contact_id}]}
+            embedded["contacts"] = [{"id": contact_id}]
+        if tags:
+            embedded["tags"] = [{"name": tag} for tag in tags]
+        if embedded:
+            entity["_embedded"] = embedded
 
         intent = Intent(action="create_lead", entity="lead", entity_id=None, payload=[entity])
         return await self._perform(intent, "POST", "/api/v4/leads", result_key="leads")

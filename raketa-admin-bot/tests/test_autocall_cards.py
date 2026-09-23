@@ -46,7 +46,7 @@ def test_manager_text_manager_unreachable():
     text = manager_text("manager_unreachable", LEAD_ID, base_url=BASE_URL)
 
     assert text == (
-        "Не дозвонились до менеджера по заявке с сайта. Робот больше не "
+        "Не дозвонились до менеджера по заявке. Робот больше не "
         f"звонит по ней.\n{DEAL_URL}"
     )
 
@@ -98,7 +98,7 @@ def test_rehearsal_text_exact():
     text = rehearsal_text(LEAD_ID, PHONE10, base_url=BASE_URL)
 
     assert text == (
-        "Репетиция: позвонил бы сейчас менеджеру по заявке с сайта.\n"
+        "Репетиция: позвонил бы сейчас менеджеру по заявке.\n"
         "Телефон клиента: +79001234567\n"
         f"{DEAL_URL}"
     )
@@ -119,7 +119,7 @@ def test_rehearsal_text_without_phone_skips_the_line():
     text = rehearsal_text(LEAD_ID, None, base_url=BASE_URL)
 
     assert text == (
-        "Репетиция: позвонил бы сейчас менеджеру по заявке с сайта.\n"
+        "Репетиция: позвонил бы сейчас менеджеру по заявке.\n"
         f"{DEAL_URL}"
     )
     assert "Телефон клиента" not in text
@@ -132,7 +132,7 @@ def test_connected_text_exact():
     text = connected_text(LEAD_ID, PHONE10, base_url=BASE_URL)
 
     assert text == (
-        "Автозвонок: соединил менеджера с клиентом по заявке с сайта.\n"
+        "Автозвонок: соединил менеджера с клиентом по заявке.\n"
         "Телефон клиента: +79001234567\n"
         f"{DEAL_URL}"
     )
@@ -150,7 +150,7 @@ def test_connected_text_without_phone_skips_the_line():
     text = connected_text(LEAD_ID, None, base_url=BASE_URL)
 
     assert text == (
-        "Автозвонок: соединил менеджера с клиентом по заявке с сайта.\n"
+        "Автозвонок: соединил менеджера с клиентом по заявке.\n"
         f"{DEAL_URL}"
     )
     assert "Телефон клиента" not in text
@@ -163,7 +163,7 @@ def test_no_phone_text_exact():
     text = no_phone_text(LEAD_ID, base_url=BASE_URL)
 
     assert text == (
-        "Заявка с сайта без телефона — робот звонить не может, посмотрите сделку.\n"
+        "Заявка без телефона — робот звонить не может, посмотрите сделку.\n"
         f"{DEAL_URL}"
     )
 
