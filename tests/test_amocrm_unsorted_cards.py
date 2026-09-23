@@ -331,5 +331,73 @@ class DispatchTests(_CardsCase):
         self.assertEqual(json.loads(row["messages"]), {})
 
 
+class FakeQuery:
+    def __init__(self, user_id, card_id, *, chat_id=None, message_id=0):
+        self.from_user = mock.Mock(id=user_id)
+        self.data = f"unsorted_done:{card_id}"
+        self.message = mock.Mock(chat=mock.Mock(id=chat_id or user_id), message_id=message_id)
+        self.answer = mock.AsyncMock()
+
+
+@unittest.skipUnless(TEST_DB_DSN, "TEST_DB_DSN не задан — нужен настоящий Postgres")
+class PressTests(_CardsCase):
+    def _edits(self):
+        return {
+            (c.kwargs["chat_id"], c.kwargs["message_id"]): c.kwargs
+            for c in self.edit_message_text.await_args_list
+        }
+
+    def _assert_closed_view(self, kwargs):
+        self.assertTrue(kwargs["text"].endswith("\n✅ Перезвонил"))
+        self.assertIsNone(kwargs["parse_mode"])
+        self.assertEqual(kwargs["reply_markup"].inline_keyboard, [])
+
+    async def test_non_admin_cannot_close(self):
+        card_id = await self._insert_card(messages={str(ADMIN_A): 11})
+        query = FakeQuery(4242, card_id)
+
+        await bot.unsorted_card_done_cb(query)
+
+        query.answer.assert_awaited_once_with("Недостаточно прав.")
+        self.assertEqual((await self._card(card_id))["status"], "open")
+        self.edit_message_text.assert_not_awaited()
+
+    async def test_admin_press_closes_case_and_both_cards(self):
+        card_id = await self._insert_card(messages={str(ADMIN_A): 11, str(ADMIN_B): 22})
+        query = FakeQuery(ADMIN_B, card_id, message_id=22)
+
+        with self.assertLogs(bot.logger, level="INFO") as logs:
+            await bot.unsorted_card_done_cb(query)
+
+        row = await self._card(card_id)
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["done_by"], ADMIN_B)
+        self.assertIsNotNone(row["done_at"])
+        self.assertTrue(any(f"дело {card_id}" in line and str(ADMIN_B) in line for line in logs.output))
+        query.answer.assert_awaited_once_with()
+        edits = self._edits()
+        self.assertEqual(set(edits), {(ADMIN_A, 11), (ADMIN_B, 22)})
+        for kwargs in edits.values():
+            self._assert_closed_view(kwargs)
+        # Закрытое дело больше не напоминает.
+        await bot.run_unsorted_cards_dispatch(NOW + timedelta(hours=3))
+        self.send_message.assert_not_awaited()
+        self.delete_message.assert_not_awaited()
+
+    async def test_second_press_answers_already_marked_and_drops_buttons(self):
+        card_id = await self._insert_card(messages={str(ADMIN_A): 11, str(ADMIN_B): 22})
+        await bot.unsorted_card_done_cb(FakeQuery(ADMIN_B, card_id, message_id=22))
+        self.edit_message_text.reset_mock()
+        late = FakeQuery(ADMIN_A, card_id, message_id=11)
+
+        await bot.unsorted_card_done_cb(late)
+
+        late.answer.assert_awaited_once_with("Уже отмечено")
+        edits = self._edits()
+        self.assertEqual(set(edits), {(ADMIN_A, 11)})
+        self._assert_closed_view(edits[(ADMIN_A, 11)])
+        self.assertEqual((await self._card(card_id))["done_by"], ADMIN_B)
+
+
 if __name__ == "__main__":
     unittest.main()

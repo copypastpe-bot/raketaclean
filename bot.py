@@ -2625,6 +2625,66 @@ async def run_unsorted_cards_dispatch(now: datetime | None = None) -> None:
             logger.exception("Неразобранное: дело %s, рассылка не удалась: %s", record["id"], exc)
 
 
+# Регистрируется здесь, а не рядом с остальными кнопками ниже по файлу: там есть
+# обработчики, отобранные только по состоянию сценария (например,
+# `IncomeFSM.waiting_confirm`), — они перехватили бы нажатие админа, который
+# в этот момент стоит в таком сценарии. Обработчики проверяются по порядку
+# регистрации, этот — раньше их.
+@dp.callback_query(F.data.startswith(UNSORTED_DONE_CB_PREFIX))
+async def unsorted_card_done_cb(query: CallbackQuery):
+    """Нажатие «Я перезвонил» / «Ответил» на карточке «Неразобранного» (задача 4 ТЗ 2026-09-23).
+
+    Нажимать может только админ из `ADMIN_TG_IDS`. Дело закрывается одним
+    обновлением «только если открыто» (ждёт, если строку держит рассылка, и
+    получает её свежие номера сообщений); удалось — у обоих админов карточка
+    переходит в закрытый вид. Уже закрыто — «Уже отмечено», у нажатого сообщения
+    кнопки убираются (закрытый вид).
+    """
+    user_id = query.from_user.id
+    if user_id not in ADMIN_TG_IDS:
+        await query.answer("Недостаточно прав.")
+        return
+    card_id = _to_int((query.data or "")[len(UNSORTED_DONE_CB_PREFIX):], 0)
+    if not card_id or pool is None:
+        await query.answer("Дело не найдено.")
+        return
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE amocrm_unsorted_cards
+            SET status='done', done_by=$2, done_at=NOW()
+            WHERE id=$1 AND status='open'
+            RETURNING *
+            """,
+            card_id,
+            user_id,
+        )
+        closed_now = row is not None
+        if row is None:
+            row = await conn.fetchrow("SELECT * FROM amocrm_unsorted_cards WHERE id=$1", card_id)
+    if row is None:
+        await query.answer("Дело не найдено.")
+        return
+    pressed = (
+        (query.message.chat.id, query.message.message_id) if query.message is not None else None
+    )
+    if closed_now:
+        logger.info(
+            "Неразобранное: дело %s (%s, сделка %s) закрыл админ %s в %s",
+            card_id, row["kind"], row["lead_id"], user_id, row["done_at"].isoformat(),
+        )
+        await query.answer()
+        targets = _unsorted_card_messages(row["messages"])
+        if pressed is not None and pressed not in targets:
+            # Нажали на карточку, которой нет в деле (прежняя не удалилась
+            # или номер не успел записаться), — её тоже закрыть.
+            targets.append(pressed)
+    else:
+        await query.answer("Уже отмечено")
+        targets = [pressed] if pressed is not None else []
+    await _unsorted_card_deliver(_unsorted_card_from_row(row), card_id, previous=targets, closed=True)
+
+
 async def _amocrm_close_pending_for_outgoing(conn: asyncpg.Connection, identity: Mapping[str, Any]) -> int:
     talk_id = str(identity.get("talk_id") or "").strip()
     lead_id = _to_int(identity.get("lead_id"), 0)
