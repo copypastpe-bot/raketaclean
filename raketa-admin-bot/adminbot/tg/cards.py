@@ -586,3 +586,22 @@ def order_done_text(order: Any, link: Any, *, base_url: str, dry_run: bool = Fal
     if lead_id:
         lines += ["", f"{base_url.rstrip('/')}/leads/detail/{lead_id}"]
     return mark_rehearsal("\n".join(lines), dry_run)
+
+
+def wire_payment_synced_text(order: Any, link: Any, *, base_url: str, tasks_closed: int,
+                             dry_run: bool = False) -> str:
+    """Сделка доведена до конца после оплаты по счёту (задача 11, ТЗ 2026-09-22)."""
+    label = getattr(order, "label", "Заказ")
+    parts = [f"{label} №{order.order_id}"]
+    if getattr(order, "client_name", None):
+        parts.append(order.client_name)
+    parts.append(for_owner(order.phone10))
+    parts.append(f"{money(order.amount_total)} ₽ по счёту")
+    lead_id = link.real_lead_id
+    if lead_id:
+        parts.append(f"сделка #{lead_id} → «выполнено и оплата получена»")
+    parts.append(f"закрыто задач: {tasks_closed}")
+    lines = ["💸 " + " · ".join(parts)]
+    if lead_id:
+        lines += ["", _deal_url(base_url, lead_id)]
+    return mark_rehearsal("\n".join(lines), dry_run)

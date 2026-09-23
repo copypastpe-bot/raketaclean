@@ -659,3 +659,39 @@ def test_carpet_cards_mark_rehearsal():
     # По умолчанию (боевой режим) пометки нет ни у одной карточки.
     live_question, _ = carpet_question_card(carpet_row(), None)
     assert not live_question.startswith("🎭")
+
+
+def test_wire_payment_synced_message_names_the_deal_and_tasks_closed():
+    """Задача 11 (ТЗ 2026-09-22): отчёт о доводке сделки после оплаты по счёту."""
+    from adminbot.models import AmoLink
+    from adminbot.tg.cards import wire_payment_synced_text
+    from tests.test_watcher import make_order
+
+    order = make_order(588)
+    link = AmoLink(order_id=588, phone10=order.phone10, status="done", path="A",
+                   real_lead_id=31665059)
+
+    text = wire_payment_synced_text(order, link, base_url="https://x", tasks_closed=2)
+
+    assert "Заказ №588" in text
+    assert "по счёту" in text
+    assert "выполнено и оплата получена" in text
+    assert "закрыто задач: 2" in text
+    assert "https://x/leads/detail/31665059" in text
+
+
+def test_wire_payment_synced_message_marks_rehearsal():
+    from adminbot.models import AmoLink
+    from adminbot.tg.cards import wire_payment_synced_text
+    from tests.test_watcher import make_order
+
+    link = AmoLink(order_id=588, phone10="9601861067", status="done", path="A",
+                   real_lead_id=31665059)
+
+    live_text = wire_payment_synced_text(make_order(588), link, base_url="https://x",
+                                         tasks_closed=1)
+    rehearsal = wire_payment_synced_text(make_order(588), link, base_url="https://x",
+                                         tasks_closed=1, dry_run=True)
+
+    assert not live_text.startswith("🎭")
+    assert rehearsal.startswith("🎭 РЕПЕТИЦИЯ")
