@@ -40,6 +40,8 @@ from adminbot.autocall.store import MemoryAutocallStore, PgAutocallStore
 from adminbot.autocall.watcher import AutocallWatcher
 from adminbot.autocall.window import validate_window
 from adminbot.carpets.engine import CarpetEngine
+from adminbot.gcal.contact_reminder import (
+    DEFAULT_CAP as CONTACT_REMINDER_CAP, ContactReminder, PgContactReminderSource)
 from adminbot.gcal.engine import CalendarEngine
 from adminbot.gcal.store import MemoryCalendarStore, PgCalendarStore
 from adminbot.gcal.watcher import CalendarWatcher
@@ -61,9 +63,10 @@ from adminbot.sync.watcher import PgCleaningSource, PgOrderSource, Watcher
 from adminbot.tg.autocall_cards import (
     connected_text, manager_text, no_phone_text, rehearsal_text as autocall_rehearsal_text)
 from adminbot.tg.bot import (
-    AddressAnswers, CalendarAnswers, CarpetAnswers, OwnerAnswers, OwnerCommands, build_router)
+    AddressAnswers, CalendarAnswers, CarpetAnswers, ContactAnswers, OwnerAnswers,
+    OwnerCommands, build_router)
 from adminbot.tg.calendar_cards import (
-    boat_card, calendar_question_card, cancellation_card,
+    boat_card, calendar_question_card, cancellation_card, contact_mismatch_card,
     done_text, no_realization_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
@@ -95,6 +98,7 @@ MAIL_CARPET_REPORT = "carpet_report"
 MAIL_CARPET_HELD = "carpet_held"
 MAIL_ADDRESS_REMINDER = "address_reminder"
 MAIL_CLEANING_ADDRESS_REMINDER = "cleaning_address_reminder"
+MAIL_GCAL_CONTACT_MISMATCH = "gcal_contact_mismatch"
 MAIL_ORDER_DELETION = "order_deletion"
 MAIL_AUTOCALL_REHEARSAL = "autocall_rehearsal"
 MAIL_AUTOCALL_CONNECTED = "autocall_connected"
@@ -128,6 +132,9 @@ class App:
     # оба поля обычно пусты, даже когда amo_sync и уборки уже в бою.
     address_reminder: Optional[Any] = None
     cleaning_address_reminder: Optional[Any] = None
+    # Напоминание про расхождение «номер + имя» (задача 5, ТЗ 2026-09-22):
+    # свой выключатель, поэтому обычно пусто, даже когда календарь уже в бою.
+    contact_reminder: Optional[Any] = None
     # Отдельный send-only бот для сообщений менеджеру (WORKER_TG_TOKEN) — не участвует
     # в опросе, но его aiohttp-сессия открывается лениво при первой отправке и должна
     # закрыться вместе с сервисом, как и сессия self.bot.
@@ -168,6 +175,9 @@ class App:
             background.append(asyncio.create_task(
                 self.cleaning_address_reminder.run_forever(self.stop),
                 name="cleaning_address_reminder"))
+        if self.contact_reminder is not None:
+            background.append(asyncio.create_task(
+                self.contact_reminder.run_forever(self.stop), name="contact_reminder"))
         if self.mail is not None:
             background.append(asyncio.create_task(
                 self.mail.run_forever(self.stop), name="mail"))
@@ -363,9 +373,18 @@ async def build_app(settings: Settings) -> App:
     # календарь просто не поднимается, остальные функции работают.
     calendar_watcher, calendar_store, calendar_token = _build_calendar(
         settings, own_pool, mail, live_amo, rehearsal_amo)
+    contact_reminder = contact_answers = None
     if calendar_store is not None:
         mail.register(MAIL_GCAL_QUESTION, _question_purpose(calendar_store))
         mail.register(MAIL_GCAL_DONE, _gcal_done_purpose(calendar_store))
+
+        # Напоминание про расхождение «номер + имя» (задача 5, ТЗ 2026-09-22):
+        # своё хранилище, всегда боевое — та же причина, что у address_reminder.
+        contact_store = PgCalendarStore(own_pool)
+        contact_reminder, contact_answers = _build_contact_reminder(
+            settings, own_pool, mail, live_amo, store=contact_store)
+        if contact_reminder is not None:
+            mail.register(MAIL_GCAL_CONTACT_MISMATCH, _contact_reminder_purpose(contact_store))
     # Числа календарного контура вплетаются в единую вечернюю сводку, вторым
     # сообщением больше не уходят (задача 6, ТЗ 2026-09-21-evening-summary-rework.md).
     # Функция выключена — calendar_watcher is None, и reconciler просто не считает
@@ -413,6 +432,7 @@ async def build_app(settings: Settings) -> App:
         if cleaning_store else None,
         address=address_answers,
         cleaning_address=cleaning_address_answers,
+        contact=contact_answers,
     ))
 
     # Пульс админ-бота (оповещения, задача 6): своя таблица notify.
@@ -435,6 +455,7 @@ async def build_app(settings: Settings) -> App:
                cleaning_watcher=cleaning_watcher,
                address_reminder=address_reminder,
                cleaning_address_reminder=cleaning_address_reminder,
+               contact_reminder=contact_reminder,
                mail=mail,
                heartbeat=heartbeat,
                stop=asyncio.Event())
@@ -555,6 +576,30 @@ def _build_address_reminder(settings: Settings, own_pool: Any, mail: OwnerMail,
     return reminder, answers
 
 
+def _build_contact_reminder(settings: Settings, own_pool: Any, mail: OwnerMail,
+                            live_amo: AmoClient, *, store: Any):
+    """Собрать напоминание про расхождение «номер + имя» (задача 5, ТЗ 2026-09-22).
+
+    Возвращает (цикл, обработчик кнопки) или (None, None). Свой выключатель,
+    по умолчанию выключен. Хранилище — всегда боевое (Postgres), та же причина,
+    что у `_build_address_reminder`: счётчик не должен обнуляться из-за
+    репетиции календаря (`gcal_dry_run`).
+    """
+    if not settings.gcal_contact_check_enabled:
+        return None, None
+
+    reminder = ContactReminder(
+        source=PgContactReminderSource(own_pool),
+        store=store,
+        amo=live_amo,
+        on_reminder=_make_contact_reminder_sender(mail, amo_base_url=settings.amo_base_url),
+    )
+    answers = ContactAnswers(owner_tg_id=settings.owner_tg_id, store=store)
+    log.info("Напоминание про контакт: включено, потолок %s напоминаний",
+             CONTACT_REMINDER_CAP)
+    return reminder, answers
+
+
 def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
                    live_amo: AmoClient, rehearsal_amo: AmoClient):
     """Собрать разбор ковров. Возвращает (наблюдатель, хранилище) или (None, None).
@@ -639,6 +684,7 @@ def _build_calendar(settings: Settings, own_pool: Any, mail: OwnerMail,
         dry_run=settings.gcal_dry_run,
         salesbot_wait_sec=settings.salesbot_wait_sec,
         child_by_note=settings.amo_child_by_note,
+        contact_check=settings.gcal_contact_check_enabled,
     )
     watcher = CalendarWatcher(
         calendars=[GoogleCalendar(calendar_id=calendar_id, token=token)
@@ -783,6 +829,21 @@ def _address_reminder_purpose(store: Any) -> Purpose:
     return Purpose(still_needed=still_needed)
 
 
+def _contact_reminder_purpose(store: Any) -> Purpose:
+    """То же самое (задача 5, ТЗ 2026-09-22), но для расхождения контакта.
+
+    Нужда отпала — владелец нажал «Я разобрался» или контакт сошёлся при
+    перепроверке цикла (тогда `contact_mismatch` уже снят).
+    """
+
+    async def still_needed(ref: str) -> bool:
+        link = await store.get(_ref_key(ref))
+        return (link is not None and not link.contact_reminder_muted
+                and bool(link.contact_mismatch))
+
+    return Purpose(still_needed=still_needed)
+
+
 def _make_calendar_counts(calendar_watcher: Any, own_pool: Any, *,
                           touched_window_hours: int = TOUCHED_WINDOW_HOURS,
                           now=lambda: datetime.now(MOSCOW_TZ)):
@@ -877,6 +938,18 @@ def _make_address_reminder_sender(mail: OwnerMail, *, kind: str, prefix: str, la
                                               base_url=amo_base_url, reminder_no=count,
                                               cap=DEFAULT_CAP)
         await mail.send(text, kind=kind, ref=link.order_id, reply_markup=keyboard)
+
+    return send
+
+
+def _make_contact_reminder_sender(mail: OwnerMail, *, amo_base_url: str):
+    """Карточка расхождения «номер + имя» — та же на каждое напоминание (задача 5)."""
+
+    async def send(link, count: int) -> None:
+        text, keyboard = contact_mismatch_card(link, base_url=amo_base_url,
+                                               reminder_no=count, cap=CONTACT_REMINDER_CAP)
+        await mail.send(text, kind=MAIL_GCAL_CONTACT_MISMATCH, ref=link.event_id,
+                        reply_markup=keyboard)
 
     return send
 
