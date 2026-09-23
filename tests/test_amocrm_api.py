@@ -5,13 +5,9 @@ from notifications.amocrm_api import (
     AmoCRMAPIClient,
     AmoCRMAPIError,
     AmoCRMAPIRateLimitError,
-    AmoCRMAlert,
     build_lead_link,
-    build_unsorted_alert,
     extract_contact_phone,
     extract_lead_contact_ids,
-    format_amocrm_api_alert,
-    is_accepted_call_note,
     normalize_lead,
 )
 
@@ -43,22 +39,6 @@ class AmoCRMApiExtractionTests(unittest.TestCase):
         }
 
         self.assertEqual(extract_lead_contact_ids(lead), [10, 11])
-
-    def test_identifies_accepted_call_note(self):
-        note = {
-            "note_type": "call_in",
-            "params": {
-                "duration": 35,
-                "phone": "+79991234567",
-            },
-        }
-
-        self.assertTrue(is_accepted_call_note(note, min_duration_sec=20))
-
-    def test_rejects_short_call_note(self):
-        note = {"note_type": "call_in", "params": {"duration": 0}}
-
-        self.assertFalse(is_accepted_call_note(note, min_duration_sec=20))
 
     def test_builds_lead_link(self):
         self.assertEqual(
@@ -201,30 +181,6 @@ class AmoCRMFetchersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["filter[created_at][from]"], 100)
 
 
-class AmoCRMAlertRulesTests(unittest.TestCase):
-    def test_formats_unanswered_message_alert(self):
-        alert = AmoCRMAlert(
-            alert_type="unanswered_message",
-            title="Открытая сделка",
-            lead_id=123,
-            contact_id=10,
-            contact_name="Иван",
-            phone="+79991234567",
-            source="WhatsApp",
-            text="Хочу уборку",
-            comment=None,
-            link="https://example.amocrm.ru/leads/detail/123",
-        )
-
-        text = format_amocrm_api_alert(alert)
-
-        self.assertIn("Тип: новое входящее сообщение без ответа 10 минут", text)
-        self.assertIn("Сделка: #123", text)
-        self.assertIn("Клиент: Иван", text)
-        self.assertIn("Телефон: +79991234567", text)
-        self.assertIn("Текст: Хочу уборку", text)
-
-
 class AmoCRMPollingAlertBuildTests(unittest.TestCase):
     def test_normalize_lead_keeps_pipeline_status_and_contacts(self):
         lead = normalize_lead(
@@ -242,60 +198,6 @@ class AmoCRMPollingAlertBuildTests(unittest.TestCase):
         self.assertEqual(lead.pipeline_id, 55)
         self.assertEqual(lead.status_id, 777)
         self.assertEqual(lead.contact_ids, [10])
-
-    def test_build_unsorted_alert_uses_uid_and_phone(self):
-        item = {
-            "uid": "u-1",
-            "pipeline_id": 55,
-            "source_name": "SIP",
-            "_embedded": {"leads": [{"id": 123}]},
-            "metadata": {"phone": "+79991234567"},
-        }
-
-        alert = build_unsorted_alert(item, api_base="https://example.amocrm.ru")
-
-        self.assertEqual(alert.alert_type, "new_unsorted")
-        self.assertEqual(alert.lead_id, 123)
-        self.assertEqual(alert.phone, "+79991234567")
-        self.assertEqual(alert.source, "Телефония")
-        self.assertEqual(alert.comment, "звонок")
-
-    def test_build_unsorted_chat_alert_uses_contact_phone_and_human_source(self):
-        item = {
-            "uid": "u-2",
-            "category": "chats",
-            "source_name": "wahelp.whatbot:31207071-b4af-4f73-affd-f713223faba5",
-            "metadata": {
-                "from": "Сергей",
-                "service": "wahelp.whatbot",
-                "source_name": "max",
-                "client": {"name": "Сергей"},
-            },
-            "_embedded": {
-                "leads": [{"id": 31252599}],
-                "contacts": [{"id": 38665409}],
-            },
-        }
-        contact = {
-            "id": 38665409,
-            "name": "Сергей",
-            "custom_fields_values": [
-                {"field_code": "PHONE", "values": [{"value": "+79991234567"}]},
-            ],
-        }
-
-        alert = build_unsorted_alert(item, api_base="https://example.amocrm.ru", contact=contact)
-        text = format_amocrm_api_alert(alert)
-
-        self.assertEqual(alert.title, None)
-        self.assertEqual(alert.contact_name, "Сергей")
-        self.assertEqual(alert.phone, "+79991234567")
-        self.assertEqual(alert.source, "MAX")
-        self.assertEqual(alert.comment, "сообщение")
-        self.assertNotIn("Название:", text)
-        self.assertNotIn("Телефон: Сергей", text)
-        self.assertIn("Телефон: +79991234567", text)
-
 
 class AmoCRMPhoneLookupTests(unittest.IsolatedAsyncioTestCase):
     """Поиск сделок клиента по телефону — через контакт, а не через фильтр

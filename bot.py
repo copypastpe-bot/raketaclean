@@ -183,10 +183,8 @@ from notifications.amocrm_api import (
     AmoCRMAPIClient,
     AmoCRMAPIError,
     AmoCRMAPIRateLimitError,
-    AmoCRMAlert,
     build_lead_link,
     extract_event_entity_id,
-    format_amocrm_api_alert,
     normalize_lead,
 )
 from notifications.amocrm_unsorted import (
@@ -1186,20 +1184,6 @@ async def _amocrm_mark_event_action(
         error,
         notified,
     )
-
-
-async def _notify_admins_amocrm_api_alert(alert: AmoCRMAlert) -> bool:
-    if not ADMIN_TG_IDS:
-        return False
-    text = format_amocrm_api_alert(alert)
-    sent = 0
-    for admin_id in ADMIN_TG_IDS:
-        try:
-            await bot.send_message(admin_id, text, disable_web_page_preview=True)
-            sent += 1
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to notify admin %s about amoCRM API alert: %s", admin_id, exc)
-    return sent > 0
 
 
 async def _amocrm_fetch_first_contact(

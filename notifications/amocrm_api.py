@@ -8,17 +8,6 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import aiohttp
 
-
-@dataclass(slots=True, frozen=True)
-class AmoCRMEvent:
-    event_id: str
-    event_type: str
-    entity_id: int | None
-    entity_type: str | None
-    created_at: int
-    payload: dict[str, Any]
-
-
 @dataclass(slots=True, frozen=True)
 class AmoCRMLead:
     lead_id: int
@@ -28,21 +17,6 @@ class AmoCRMLead:
     created_at: int | None
     contact_ids: list[int]
     payload: dict[str, Any]
-
-
-@dataclass(slots=True, frozen=True)
-class AmoCRMAlert:
-    alert_type: str
-    title: str | None
-    lead_id: int | None
-    contact_id: int | None
-    contact_name: str | None
-    phone: str | None
-    source: str | None
-    text: str | None
-    comment: str | None
-    link: str | None
-
 
 class AmoCRMAPIError(RuntimeError):
     def __init__(self, status: int, message: str):
@@ -269,18 +243,6 @@ def extract_lead_contact_ids(lead: Mapping[str, Any]) -> list[int]:
             continue
     return ids
 
-
-def is_accepted_call_note(note: Mapping[str, Any], *, min_duration_sec: int) -> bool:
-    if str(note.get("note_type") or "") != "call_in":
-        return False
-    params = note.get("params") if isinstance(note.get("params"), Mapping) else {}
-    try:
-        duration = int(params.get("duration") or 0)
-    except Exception:
-        duration = 0
-    return duration >= min_duration_sec
-
-
 def extract_event_entity_id(event: Mapping[str, Any]) -> int | None:
     for key in ("entity_id", "lead_id"):
         if event.get(key) is not None:
@@ -311,78 +273,6 @@ def normalize_lead(payload: Mapping[str, Any]) -> AmoCRMLead:
         payload=dict(payload),
     )
 
-
-def build_unsorted_alert(
-    item: Mapping[str, Any],
-    *,
-    api_base: str,
-    contact: Mapping[str, Any] | None = None,
-) -> AmoCRMAlert:
-    embedded = item.get("_embedded") if isinstance(item.get("_embedded"), Mapping) else {}
-    leads = embedded.get("leads") or []
-    lead_id = None
-    if leads and isinstance(leads[0], Mapping) and leads[0].get("id") is not None:
-        lead_id = int(leads[0]["id"])
-    contacts = embedded.get("contacts") or []
-    contact_id = None
-    if contacts and isinstance(contacts[0], Mapping) and contacts[0].get("id") is not None:
-        contact_id = int(contacts[0]["id"])
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
-    contact_name = _first_text(
-        _nested_text(metadata, "client", "name"),
-        str(contact.get("name") or "").strip() if contact else None,
-        str(metadata.get("from") or "").strip() if not _extract_phone(str(metadata.get("from") or "")) else None,
-        str(metadata.get("name") or "").strip(),
-    )
-    phone = _first_text(
-        extract_contact_phone(contact),
-        _extract_phone(str(metadata.get("phone") or "")),
-        _extract_phone(str(metadata.get("from") or "")),
-    )
-    return AmoCRMAlert(
-        alert_type="new_unsorted",
-        title=None,
-        lead_id=lead_id,
-        contact_id=contact_id,
-        contact_name=contact_name,
-        phone=phone,
-        source=_human_source_name(item, metadata),
-        text=str(metadata.get("text") or metadata.get("message") or "").strip() or None,
-        comment=_unsorted_comment(item, metadata),
-        link=build_lead_link(api_base, lead_id),
-    )
-
-
-def format_amocrm_api_alert(alert: AmoCRMAlert) -> str:
-    labels = {
-        "new_unsorted": "новое неразобранное",
-        "unanswered_message": "новое входящее сообщение без ответа 10 минут",
-    }
-    lines = [
-        "🚨 amoCRM: новая входящая заявка",
-        "",
-        f"Тип: {labels.get(alert.alert_type, alert.alert_type)}",
-    ]
-    if alert.lead_id:
-        lines.append(f"Сделка: #{alert.lead_id}")
-    if alert.title and alert.alert_type != "new_unsorted":
-        lines.append(f"Название: {alert.title}")
-    if alert.contact_name:
-        lines.append(f"Клиент: {alert.contact_name}")
-    if alert.phone:
-        lines.append(f"Телефон: {alert.phone}")
-    if alert.source:
-        lines.append(f"Источник: {alert.source}")
-    if alert.text:
-        lines.append(f"Текст: {alert.text[:700]}")
-    if alert.comment:
-        lines.append(f"Комментарий: {alert.comment[:700]}")
-    if alert.link:
-        lines.append(f"Ссылка: {alert.link}")
-    lines.extend(["", "Нужно ответить или позвонить."])
-    return "\n".join(lines)
-
-
 def build_lead_link(api_base: str, lead_id: int | str | None) -> str | None:
     if not api_base or not lead_id:
         return None
@@ -411,55 +301,15 @@ def _nested_text(payload: Mapping[str, Any], *path: str) -> str | None:
         current = current.get(key)
     return str(current).strip() if current else None
 
-
-def _human_source_name(item: Mapping[str, Any], metadata: Mapping[str, Any]) -> str | None:
-    raw = _first_text(
-        str(metadata.get("source_name") or "").strip(),
-        str(metadata.get("service") or "").strip(),
-        str(item.get("source_name") or "").strip(),
-        str(item.get("category") or "").strip(),
-    )
-    if not raw:
-        return None
-    lowered = raw.casefold()
-    if lowered == "max":
-        return "MAX"
-    if "telegram" in lowered or "телеграм" in lowered:
-        return "Telegram"
-    if "whatsapp" in lowered or "wahelp" in lowered:
-        return "WhatsApp/мессенджер"
-    if lowered == "sip" or "onlinepbx" in lowered:
-        return "Телефония"
-    return raw
-
-
-def _unsorted_comment(item: Mapping[str, Any], metadata: Mapping[str, Any]) -> str:
-    category = str(item.get("category") or "").casefold()
-    service = str(metadata.get("service") or "").casefold()
-    source = str(metadata.get("source_name") or item.get("source_name") or "").casefold()
-    if category == "sip" or "onlinepbx" in service or source == "sip":
-        return "звонок"
-    if category == "chats" or "whatbot" in service:
-        return "сообщение"
-    if "site" in source or "сайт" in source:
-        return "заявка с сайта"
-    return "заявка"
-
-
 __all__ = [
-    "AmoCRMAlert",
     "AmoCRMAPIAuthError",
     "AmoCRMAPIClient",
     "AmoCRMAPIError",
     "AmoCRMAPIRateLimitError",
-    "AmoCRMEvent",
     "AmoCRMLead",
     "build_lead_link",
-    "build_unsorted_alert",
     "extract_contact_phone",
     "extract_event_entity_id",
     "extract_lead_contact_ids",
-    "format_amocrm_api_alert",
-    "is_accepted_call_note",
     "normalize_lead",
 ]
