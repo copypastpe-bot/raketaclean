@@ -60,6 +60,7 @@ from adminbot.sync.reconcile import (
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import MemoryLinkStore, PgCleaningLinkStore, PgLinkStore
 from adminbot.sync.watcher import PgCleaningSource, PgOrderSource, Watcher
+from adminbot.sync.wire_payment import PgWirePaymentSource, WirePaymentSync
 from adminbot.tg.autocall_cards import (
     connected_text, manager_text, no_phone_text, rehearsal_text as autocall_rehearsal_text)
 from adminbot.tg.bot import (
@@ -71,7 +72,7 @@ from adminbot.tg.calendar_cards import (
 from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
     carpet_held_text, carpet_question_card, carpet_report_text, mark_rehearsal,
-    order_done_text, question_card, summary_text)
+    order_done_text, question_card, summary_text, wire_payment_synced_text)
 from adminbot.tg.outbox import (
     SUMMARY_TTL_SEC, MemoryMailStore, OwnerMail, PgMailStore, Purpose)
 from adminbot.tg.session import build_session
@@ -104,6 +105,7 @@ MAIL_AUTOCALL_REHEARSAL = "autocall_rehearsal"
 MAIL_AUTOCALL_CONNECTED = "autocall_connected"
 MAIL_AUTOCALL_NO_PHONE = "autocall_no_phone"
 MAIL_AUTOCALL_MANAGER = "autocall_manager"
+MAIL_WIRE_PAYMENT_SYNCED = "wire_payment_synced"
 
 
 @dataclass
@@ -135,6 +137,9 @@ class App:
     # Напоминание про расхождение «номер + имя» (задача 5, ТЗ 2026-09-22):
     # свой выключатель, поэтому обычно пусто, даже когда календарь уже в бою.
     contact_reminder: Optional[Any] = None
+    # Доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22): свой
+    # выключатель, поэтому обычно пусто, даже когда amo_sync уже в бою.
+    wire_payment: Optional[Any] = None
     # Отдельный send-only бот для сообщений менеджеру (WORKER_TG_TOKEN) — не участвует
     # в опросе, но его aiohttp-сессия открывается лениво при первой отправке и должна
     # закрыться вместе с сервисом, как и сессия self.bot.
@@ -178,6 +183,9 @@ class App:
         if self.contact_reminder is not None:
             background.append(asyncio.create_task(
                 self.contact_reminder.run_forever(self.stop), name="contact_reminder"))
+        if self.wire_payment is not None:
+            background.append(asyncio.create_task(
+                self.wire_payment.run_forever(self.stop), name="wire_payment"))
         if self.mail is not None:
             background.append(asyncio.create_task(
                 self.mail.run_forever(self.stop), name="mail"))
@@ -286,6 +294,12 @@ async def build_app(settings: Settings) -> App:
     # (решение владельца 4), поэтому подключается к Watcher параметром, а не
     # своей задачей в App.run.
     deletions_handler = _build_deletions(settings, own_pool, mail, live_amo, rehearsal_amo)
+
+    # Доводка сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22): свой
+    # выключатель и свой цикл (не часть watcher.tick) — источник у неё другой,
+    # опрашивать реже, отчёт владельцу свой.
+    wire_payment = _build_wire_payment(settings, bot_pool, own_pool, mail,
+                                       specialists, services, live_amo, rehearsal_amo)
 
     source = PgOrderSource(bot_pool, own_pool, settings.backlog_from)
     watcher = Watcher(
@@ -456,6 +470,7 @@ async def build_app(settings: Settings) -> App:
                address_reminder=address_reminder,
                cleaning_address_reminder=cleaning_address_reminder,
                contact_reminder=contact_reminder,
+               wire_payment=wire_payment,
                mail=mail,
                heartbeat=heartbeat,
                stop=asyncio.Event())
@@ -598,6 +613,36 @@ def _build_contact_reminder(settings: Settings, own_pool: Any, mail: OwnerMail,
     log.info("Напоминание про контакт: включено, потолок %s напоминаний",
              CONTACT_REMINDER_CAP)
     return reminder, answers
+
+
+def _build_wire_payment(settings: Settings, bot_pool: Any, own_pool: Any, mail: OwnerMail,
+                        specialists: SpecialistIndex, services: dict[str, int],
+                        live_amo: AmoClient, rehearsal_amo: AmoClient):
+    """Собрать доводку сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22).
+
+    Свой выключатель, по умолчанию выключен. Свой dry_run, а не общий
+    AMO_SYNC_DRY_RUN (основной обмен уже в бою — ронять его в репетицию ради
+    этой доводки нельзя): выбирает клиента амо (`rehearsal_amo`/`live_amo`), как
+    у `_build_deletions`, и хранилище движка — тот же приём, что у самого
+    Engine в build_app (`MemoryLinkStore` в репетиции, иначе связки, которые
+    репетиция «доводила», не достались бы боевому проходу).
+    """
+    if not settings.wire_payment_enabled:
+        log.info("Оплата по счёту: функция выключена настройкой WIRE_PAYMENT_ENABLED")
+        return None
+
+    dry_run = settings.wire_payment_dry_run
+    engine = Engine(amo=rehearsal_amo if dry_run else live_amo,
+                    store=MemoryLinkStore() if dry_run else PgLinkStore(own_pool),
+                    specialists=specialists, dry_run=dry_run, service_by_master=services)
+    sync = WirePaymentSync(
+        source=PgWirePaymentSource(bot_pool, own_pool, settings.backlog_from),
+        engine=engine,
+        on_synced=_make_wire_payment_sender(mail, settings.amo_base_url, dry_run=dry_run),
+    )
+    log.info("Оплата по счёту: включена, режим %s",
+             "репетиция" if dry_run else "БОЕВОЙ")
+    return sync
 
 
 def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
@@ -925,6 +970,18 @@ def _make_order_done_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = 
     async def send(order, link) -> None:
         await mail.send(order_done_text(order, link, base_url=amo_base_url, dry_run=dry_run),
                         kind=MAIL_ORDER_DONE, ref=order.order_id)
+
+    return send
+
+
+def _make_wire_payment_sender(mail: OwnerMail, amo_base_url: str, *, dry_run: bool = False):
+    """Отчёт о доводке сделки после оплаты по счёту (задача 11, ТЗ 2026-09-22)."""
+
+    async def send(order, link, result) -> None:
+        await mail.send(
+            wire_payment_synced_text(order, link, base_url=amo_base_url,
+                                     tasks_closed=result.tasks_closed, dry_run=dry_run),
+            kind=MAIL_WIRE_PAYMENT_SYNCED, ref=order.order_id)
 
     return send
 

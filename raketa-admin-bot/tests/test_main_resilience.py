@@ -303,6 +303,52 @@ def test_deletions_live_uses_the_live_amo_client():
     assert handler.dry_run is False
 
 
+# --- доводка оплаты по счёту (задача 11, ТЗ 2026-09-22): свой выключатель и dry_run ---
+
+def _empty_specialists():
+    from adminbot.sync.specialists import SpecialistIndex
+
+    return SpecialistIndex.from_enums([])
+
+
+def test_wire_payment_disabled_returns_none():
+    from adminbot.main import _build_wire_payment
+
+    settings = _minimal_settings(wire_payment_enabled=False)
+
+    assert _build_wire_payment(settings, None, None, None, _empty_specialists(), {},
+                               object(), object()) is None
+
+
+def test_wire_payment_rehearsal_uses_the_rehearsal_amo_client():
+    from adminbot.main import _build_wire_payment
+
+    settings = _minimal_settings(wire_payment_enabled=True, wire_payment_dry_run=True)
+    live, rehearsal = object(), object()
+
+    sync = _build_wire_payment(settings, None, None, None, _empty_specialists(), {},
+                               live, rehearsal)
+
+    assert sync is not None
+    assert sync.engine.amo is rehearsal
+    # dry_run обязателен: без него репетиция ставила бы payment_synced_at
+    # по-настоящему и забирала бы связки у последующего боя.
+    assert sync.engine.dry_run is True
+
+
+def test_wire_payment_live_uses_the_live_amo_client():
+    from adminbot.main import _build_wire_payment
+
+    settings = _minimal_settings(wire_payment_enabled=True, wire_payment_dry_run=False)
+    live, rehearsal = object(), object()
+
+    sync = _build_wire_payment(settings, None, None, None, _empty_specialists(), {},
+                               live, rehearsal)
+
+    assert sync.engine.amo is live
+    assert sync.engine.dry_run is False
+
+
 def _make_outcome(outcome: str, **fields):
     from datetime import datetime, timezone
 
