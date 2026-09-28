@@ -321,6 +321,22 @@ class AmoClient:
             },
         )
 
+    async def get_lead_tasks_of_type(self, lead_id: int, task_type_id: int) -> list[dict]:
+        """Все задачи сделки этого типа — и открытые, и закрытые (поле is_completed).
+
+        В отличие от `get_lead_tasks` (только открытые, для проведения сделки),
+        здесь фильтра по `is_completed` нет: цикл «Повторный заказ» (задача 3)
+        должен видеть уже закрытую задачу, чтобы не поставить вторую поверх.
+        """
+        return await self.get_all(
+            "/api/v4/tasks", "tasks",
+            params={
+                "filter[entity_type]": "leads",
+                "filter[entity_id]": lead_id,
+                "filter[task_type]": task_type_id,
+            },
+        )
+
     async def get_contact(self, contact_id: int) -> Optional[dict]:
         return await self.get(f"/api/v4/contacts/{contact_id}")
 
@@ -434,6 +450,29 @@ class AmoClient:
         body = {"is_completed": True, "result": {"text": result_text}}
         intent = Intent(action="complete_task", entity="task", entity_id=task_id, payload=body)
         return await self._perform(intent, "PATCH", f"/api/v4/tasks/{task_id}")
+
+    async def create_task(
+        self,
+        lead_id: int,
+        *,
+        task_type_id: int,
+        text: str,
+        complete_till: int,
+        responsible_user_id: Optional[int] = None,
+    ) -> Intent:
+        """Поставить задачу на сделку. `complete_till` — unix-время дедлайна."""
+        entity: dict[str, Any] = {
+            "task_type_id": task_type_id,
+            "text": text,
+            "complete_till": complete_till,
+            "entity_id": lead_id,
+            "entity_type": "leads",
+        }
+        if responsible_user_id is not None:
+            entity["responsible_user_id"] = responsible_user_id
+
+        intent = Intent(action="create_task", entity="task", entity_id=None, payload=[entity])
+        return await self._perform(intent, "POST", "/api/v4/tasks", result_key="tasks")
 
     async def add_note(self, lead_id: int, text: str) -> Intent:
         """Написать комментарий к сделке — например, пометить лид-дубль."""

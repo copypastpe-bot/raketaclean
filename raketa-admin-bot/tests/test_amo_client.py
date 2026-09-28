@@ -249,6 +249,24 @@ async def test_get_lead_tasks_filters_by_lead(amo):
     assert query["filter[is_completed]"] == "0"   # закрытые задачи нас не интересуют
 
 
+async def test_get_lead_tasks_of_type_includes_closed(amo):
+    """Задача 1 ТЗ 2026-09-28: нужны и открытые, и закрытые задачи одного типа."""
+    client, fake = amo
+    fake.stub("/api/v4/tasks", {"_embedded": {"tasks": [
+        {"id": 1, "task_type_id": ids.TASK_TYPE_FEEDBACK, "is_completed": False},
+        {"id": 2, "task_type_id": ids.TASK_TYPE_FEEDBACK, "is_completed": True},
+    ]}})
+
+    tasks = await client.get_lead_tasks_of_type(500, ids.TASK_TYPE_FEEDBACK)
+
+    assert [t["id"] for t in tasks] == [1, 2]           # закрытая тоже пришла
+    query = fake.requests[0].query
+    assert query["filter[entity_type]"] == "leads"
+    assert query["filter[entity_id]"] == "500"
+    assert query["filter[task_type]"] == str(ids.TASK_TYPE_FEEDBACK)
+    assert "filter[is_completed]" not in query          # закрытые не отсекаем фильтром
+
+
 async def test_get_child_lead_id_reads_latest_note(amo):
     """Формат проверен на проде 22.09: params.type == 'child', берём params.lead_id."""
     client, fake = amo

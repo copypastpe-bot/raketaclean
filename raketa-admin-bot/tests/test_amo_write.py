@@ -192,6 +192,40 @@ async def test_complete_task_marks_done_with_result(amo_write):
     assert "amo_sync" in record.body["result"]["text"]      # видно, что закрыл робот
 
 
+# --- постановка задачи (задача 1 ТЗ 2026-09-28) ---
+
+async def test_create_task_sends_type_deadline_lead_and_responsible(amo_write):
+    client, fake = amo_write
+    fake.stub("/api/v4/tasks", {"_embedded": {"tasks": [{"id": 555}]}})
+
+    intent = await client.create_task(
+        500, task_type_id=ids.TASK_TYPE_CONTACT, text="Позвонить через 21 день",
+        complete_till=1756500000, responsible_user_id=951507,
+    )
+
+    record = fake.requests[0]
+    assert record.method == "POST" and record.path == "/api/v4/tasks"
+    assert record.body == [{
+        "task_type_id": ids.TASK_TYPE_CONTACT,
+        "text": "Позвонить через 21 день",
+        "complete_till": 1756500000,
+        "entity_id": 500,
+        "entity_type": "leads",
+        "responsible_user_id": 951507,
+    }]
+    assert intent.entity_id == 555                       # номер новой задачи из ответа
+
+
+async def test_create_task_without_responsible_omits_key(amo_write):
+    client, fake = amo_write
+    fake.stub("/api/v4/tasks", {"_embedded": {"tasks": [{"id": 556}]}})
+
+    await client.create_task(500, task_type_id=ids.TASK_TYPE_CONTACT, text="…",
+                             complete_till=1756500000)
+
+    assert "responsible_user_id" not in fake.requests[0].body[0]
+
+
 # --- комментарий к сделке (лид-дубль) ---
 
 async def test_add_note_writes_comment(amo_write):
@@ -210,7 +244,7 @@ async def test_add_note_writes_comment(amo_write):
 # --- РЕПЕТИЦИЯ: в сеть не уходит ничего ---
 
 @pytest.mark.parametrize("call", ["update", "move", "create_lead", "create_contact",
-                                  "complete_task", "note"])
+                                  "complete_task", "note", "create_task"])
 async def test_dry_run_sends_nothing(amo_dry, call):
     client, fake = amo_dry
 
@@ -226,6 +260,9 @@ async def test_dry_run_sends_nothing(amo_dry, call):
         intent = await client.create_contact(name="Ирина", phone="+79601861067")
     elif call == "complete_task":
         intent = await client.complete_task(321)
+    elif call == "create_task":
+        intent = await client.create_task(500, task_type_id=ids.TASK_TYPE_CONTACT,
+                                          text="…", complete_till=1756500000)
     else:
         intent = await client.add_note(500, "текст")
 
