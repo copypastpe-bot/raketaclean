@@ -479,3 +479,95 @@ async def test_promo_callback_done_letter_goes_to_owner_mail():
     assert text.startswith("Отклик на промо: завёл сделку")
     assert "+79601861067" in text and text.endswith("https://x/leads/detail/777")
 
+
+# --- «Повторный заказ» по оценке клиента (ТЗ 2026-09-28, задача 4): свой выключатель и dry_run ---
+
+def _rated_order(**overrides):
+    from datetime import datetime, timezone
+
+    from adminbot.feedback.models import RatedOrder
+
+    values = dict(order_id=42, lead_id=777, score=5, comment=None,
+                  replied_at=datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc))
+    values.update(overrides)
+    return RatedOrder(**values)
+
+
+class _FakeMail:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, text, *, kind, ref=None, reply_markup=None):
+        self.sent.append((text, kind, ref))
+
+
+def test_feedback_disabled_returns_none():
+    from adminbot.main import _build_feedback
+
+    settings = _minimal_settings(feedback_tasks_enabled=False)
+
+    assert _build_feedback(settings, None, None, None, object(), object()) is None
+
+
+def test_feedback_rehearsal_uses_the_rehearsal_amo_client():
+    from adminbot.main import _build_feedback
+
+    settings = _minimal_settings(feedback_tasks_enabled=True, feedback_tasks_dry_run=True)
+    live, rehearsal = object(), object()
+
+    sync = _build_feedback(settings, None, None, None, live, rehearsal)
+
+    assert sync.amo is rehearsal
+    assert sync.dry_run is True and sync.mode == "rehearsal"
+
+
+def test_feedback_live_uses_the_live_amo_client():
+    from adminbot.main import _build_feedback
+
+    settings = _minimal_settings(feedback_tasks_enabled=True, feedback_tasks_dry_run=False)
+    live, rehearsal = object(), object()
+
+    sync = _build_feedback(settings, None, None, None, live, rehearsal)
+
+    assert sync.amo is live
+    assert sync.dry_run is False and sync.mode == "live"
+
+
+async def test_feedback_rehearsal_letter_goes_to_owner_mail():
+    from adminbot.main import MAIL_FEEDBACK_REHEARSAL, _make_feedback_rehearsal_sender
+
+    mail = _FakeMail()
+    send = _make_feedback_rehearsal_sender(mail, "https://x")
+
+    await send(_rated_order(), ["закрыл бы «Повторный заказ»"])
+
+    [(text, kind, ref)] = mail.sent
+    assert kind == MAIL_FEEDBACK_REHEARSAL and ref == 42
+    assert "№42" in text
+
+
+async def test_feedback_failure_letter_marked_in_rehearsal():
+    """Решение координатора: сбой в репетиции тоже помечен как репетиционный."""
+    from adminbot.main import MAIL_FEEDBACK_FAILED, _make_feedback_failure_sender
+
+    mail = _FakeMail()
+    send = _make_feedback_failure_sender(mail, "https://x", dry_run=True)
+
+    await send(_rated_order(score=2, comment="плохо"), "amoCRM 500")
+
+    [(text, kind, ref)] = mail.sent
+    assert kind == MAIL_FEEDBACK_FAILED and ref == 42
+    assert text.startswith("🎭 РЕПЕТИЦИЯ")
+
+
+async def test_feedback_failure_letter_not_marked_when_live():
+    from adminbot.main import _make_feedback_failure_sender
+
+    mail = _FakeMail()
+    send = _make_feedback_failure_sender(mail, "https://x", dry_run=False)
+
+    await send(_rated_order(score=2, comment="плохо"), "amoCRM 500")
+
+    [(text, _, _)] = mail.sent
+    assert not text.startswith("🎭 РЕПЕТИЦИЯ")
+

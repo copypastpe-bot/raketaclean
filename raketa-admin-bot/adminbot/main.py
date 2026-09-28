@@ -48,6 +48,8 @@ from adminbot.gcal.watcher import CalendarWatcher
 from adminbot.carpets.store import MemoryCarpetStore, PgCarpetStore
 from adminbot.carpets.watcher import CarpetWatcher
 from adminbot.control import PgControlPanel, sync_allowed
+from adminbot.feedback.store import PgFeedbackSource, PgFeedbackStore
+from adminbot.feedback.sync import FeedbackSync
 from adminbot.heartbeat import HeartbeatWriter
 from adminbot.mail import MailBox, mail_settings_from_env
 from adminbot.phone import for_owner
@@ -75,6 +77,8 @@ from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
     carpet_held_text, carpet_question_card, carpet_report_text, mark_rehearsal,
     order_done_text, question_card, summary_text, wire_payment_synced_text)
+from adminbot.tg.feedback_cards import (
+    failure_text as feedback_failure_text, rehearsal_text as feedback_rehearsal_text)
 from adminbot.tg.promo_cards import (
     done_text as promo_done_text, failure_text as promo_failure_text,
     rehearsal_text as promo_rehearsal_text)
@@ -114,6 +118,8 @@ MAIL_WIRE_PAYMENT_SYNCED = "wire_payment_synced"
 MAIL_PROMO_CALLBACK_REHEARSAL = "promo_callback_rehearsal"
 MAIL_PROMO_CALLBACK_FAILED = "promo_callback_failed"
 MAIL_PROMO_CALLBACK_DONE = "promo_callback_done"
+MAIL_FEEDBACK_REHEARSAL = "feedback_rehearsal"
+MAIL_FEEDBACK_FAILED = "feedback_failed"
 
 
 @dataclass
@@ -151,6 +157,9 @@ class App:
     # Отклик «1» на промо → сделка с тегом (ТЗ 2026-09-23): свой выключатель,
     # поэтому обычно пусто.
     promo_callback: Optional[Any] = None
+    # «Повторный заказ» по оценке клиента (ТЗ 2026-09-28, задача 4): свой
+    # выключатель, поэтому обычно пусто.
+    feedback: Optional[Any] = None
     # Отдельный send-only бот для сообщений менеджеру (WORKER_TG_TOKEN) — не участвует
     # в опросе, но его aiohttp-сессия открывается лениво при первой отправке и должна
     # закрыться вместе с сервисом, как и сессия self.bot.
@@ -200,6 +209,9 @@ class App:
         if self.promo_callback is not None:
             background.append(asyncio.create_task(
                 self.promo_callback.run_forever(self.stop), name="promo_callback"))
+        if self.feedback is not None:
+            background.append(asyncio.create_task(
+                self.feedback.run_forever(self.stop), name="feedback"))
         if self.mail is not None:
             background.append(asyncio.create_task(
                 self.mail.run_forever(self.stop), name="mail"))
@@ -320,6 +332,11 @@ async def build_app(settings: Settings) -> App:
     # берёт автозвонок сам, по тегу.
     promo_callback = _build_promo_callback(settings, bot_pool, own_pool, mail,
                                            live_amo, rehearsal_amo)
+
+    # «Повторный заказ» по оценке клиента (ТЗ 2026-09-28, задача 4): свой
+    # выключатель и свой цикл, источник — связка сделки реализации (own_pool)
+    # и оценка клиента (bot_pool, только чтение).
+    feedback = _build_feedback(settings, bot_pool, own_pool, mail, live_amo, rehearsal_amo)
 
     source = PgOrderSource(bot_pool, own_pool, settings.backlog_from)
     watcher = Watcher(
@@ -492,6 +509,7 @@ async def build_app(settings: Settings) -> App:
                contact_reminder=contact_reminder,
                wire_payment=wire_payment,
                promo_callback=promo_callback,
+               feedback=feedback,
                mail=mail,
                heartbeat=heartbeat,
                stop=asyncio.Event())
@@ -693,6 +711,35 @@ def _build_promo_callback(settings: Settings, bot_pool: Any, own_pool: Any, mail
         on_done=_make_promo_callback_done_sender(mail, settings.amo_base_url),
     )
     log.info("Отклики на промо: включены, режим %s",
+             "репетиция" if dry_run else "БОЕВОЙ")
+    return sync
+
+
+def _build_feedback(settings: Settings, bot_pool: Any, own_pool: Any, mail: OwnerMail,
+                    live_amo: AmoClient, rehearsal_amo: AmoClient):
+    """Собрать цикл «Повторный заказ» по оценке клиента (ТЗ 2026-09-28, задача 4).
+
+    Свой выключатель, по умолчанию выключен. Свой dry_run: выбирает клиента амо
+    (`rehearsal_amo` читает CRM по-настоящему и не пишет). Хранилище — Postgres
+    у обоих режимов, у репетиции и у боя свои строки и своя закладка
+    (миграция 019), тем же приёмом, что у отклика на промо.
+    """
+    if not settings.feedback_tasks_enabled:
+        log.info("«Повторный заказ» по оценке: функция выключена настройкой "
+                 "FEEDBACK_TASKS_ENABLED")
+        return None
+
+    dry_run = settings.feedback_tasks_dry_run
+    sync = FeedbackSync(
+        source=PgFeedbackSource(bot_pool, own_pool),
+        store=PgFeedbackStore(own_pool),
+        amo=rehearsal_amo if dry_run else live_amo,
+        dry_run=dry_run,
+        on_rehearsal=_make_feedback_rehearsal_sender(mail, settings.amo_base_url),
+        on_failure=_make_feedback_failure_sender(mail, settings.amo_base_url,
+                                                 dry_run=dry_run),
+    )
+    log.info("«Повторный заказ» по оценке: включена, режим %s",
              "репетиция" if dry_run else "БОЕВОЙ")
     return sync
 
@@ -1078,6 +1125,33 @@ def _make_promo_callback_done_sender(mail: OwnerMail, amo_base_url: str):
     async def send(callback, lead_id: int) -> None:
         await mail.send(promo_done_text(callback, lead_id, base_url=amo_base_url),
                         kind=MAIL_PROMO_CALLBACK_DONE, ref=callback.id)
+
+    return send
+
+
+def _make_feedback_rehearsal_sender(mail: OwnerMail, amo_base_url: str):
+    """Репетиция цикла «Повторный заказ»: что робот сделал бы по заказу."""
+
+    async def send(order, actions: list[str]) -> None:
+        await mail.send(feedback_rehearsal_text(order, actions, base_url=amo_base_url),
+                        kind=MAIL_FEEDBACK_REHEARSAL, ref=order.order_id)
+
+    return send
+
+
+def _make_feedback_failure_sender(mail: OwnerMail, amo_base_url: str, *,
+                                  dry_run: bool = False):
+    """Три сбоя подряд по заказу — владелец разбирается руками.
+
+    Решение координатора (задача 4): письмо о сбое в режиме репетиции тоже
+    помечается как репетиционное — `failure_text` этого не делает сама,
+    в отличие от `promo_failure_text`.
+    """
+
+    async def send(order, error: str) -> None:
+        await mail.send(mark_rehearsal(feedback_failure_text(order, error, base_url=amo_base_url),
+                                       dry_run),
+                        kind=MAIL_FEEDBACK_FAILED, ref=order.order_id)
 
     return send
 
