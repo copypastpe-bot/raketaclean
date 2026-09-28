@@ -93,6 +93,11 @@ CANCEL_TASK_RESULT = "🤖 Заказ отменён: запись удален�
 # это решение владельца 5, а не выбор робота. Owner получает короткий отчёт.
 NO_REALIZATION_REASON = "сделки реализации нет, в CRM ничего не трогал"
 
+# Запись без услуги в работу не передаём (решение владельца 28.09): без услуги
+# сейлзбот не создаёт автосделку, и заказ застревает молча. Под выключателем
+# сверки контакта — это та же проверка записи перед работой.
+SERVICE_UNKNOWN_REASON = "не понял услугу"
+
 
 def _hands_off(link: CalendarLink) -> bool:
     """Робот в эту запись не лезет — так решил владелец или так вышло само."""
@@ -208,6 +213,8 @@ class CalendarEngine:
         # Сверка «номер + имя» записи с контактом сделки (задача 5, ТЗ 2026-09-22):
         # свой выключатель, по умолчанию выключен. Выключено — ни сверки на
         # путях Б/В, ни сверки при смене номера в `_refresh`.
+        # Тот же выключатель держит проверку услуги (решение владельца 28.09):
+        # запись без услуги в работу не передаётся, владельцу — вопрос.
         self.contact_check = contact_check
         self.now = now
         # У каждого движка свои черновики: в сервисе их работает несколько сразу
@@ -271,6 +278,12 @@ class CalendarEngine:
                 # его не увидит (задача 3 ТЗ 2026-09-22).
                 link = await self.store.get(event.event_id) or link
 
+        if (link.status == "waiting_owner" and event.services
+                and (link.question or {}).get("reason") == SERVICE_UNKNOWN_REASON):
+            # Менеджер дописал услугу в запись — вопрос снят сам, без кнопки.
+            link = await self.store.update(event.event_id, status="new",
+                                           question=None) or link
+
         if link.status in ("done", "waiting_owner", "cancelled"):
             return link                        # закончили или ждём ответа владельца
 
@@ -287,6 +300,10 @@ class CalendarEngine:
             # Сам теплоход робот не заводит: ни телефона, ни цены в записи нет.
             return await self._ask_owner(link, "теплоход — завести сделку?",
                                          payload=_boat_option(event))
+
+        if self.contact_check and not event.services and not link.checklist:
+            # В CRM робот по записи ещё ничего не сделал — без услуги и не начинаем.
+            return await self._ask_owner(link, SERVICE_UNKNOWN_REASON)
 
         try:
             if link.path is None:

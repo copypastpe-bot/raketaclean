@@ -20,7 +20,7 @@ from adminbot.amo import ids
 from adminbot.amo.fields import enum_field
 from adminbot.gcal.engine import (
     CANCEL_TASK_RESULT, CHILD_LEAD_EDIT_FAILED_NOTE, NO_REALIZATION_REASON,
-    PRIMARY_LEAD_EDIT_FAILED_NOTE, CalendarEngine,
+    PRIMARY_LEAD_EDIT_FAILED_NOTE, SERVICE_UNKNOWN_REASON, CalendarEngine,
 )
 from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.store import MemoryCalendarStore
@@ -1242,3 +1242,87 @@ async def test_marks_the_primary_lead_when_the_salesbot_never_made_a_deal(amo):
     assert updates and updates[-1][0] == 41400002
     assert updates[-1][1]["custom_fields"] == [
         {"field_id": ids.FIELD_OWNER_HANDLES, "values": [{"value": True}]}]
+
+
+# --- запись без услуги (решение владельца 28.09) ---
+#
+# 27.09 «Генералка» ушла в работу без услуги, сейлзбот не сработал, и заказ
+# застрял с невнятным «сейлзбот не создал автосделку». Теперь робот такую запись
+# в работу не передаёт и говорит владельцу прямо. Выключатель — сверка контакта.
+
+def build_checking(amo, *, store=None) -> CalendarEngine:
+    return CalendarEngine(amo=amo, store=store or MemoryCalendarStore(now=lambda: NOW),
+                          dry_run=False, contact_check=True, now=lambda: NOW)
+
+
+async def test_order_without_service_asks_the_owner_and_leaves_crm_alone(amo):
+    engine = build_checking(amo)
+
+    link = await engine.process(an_order(services=()))
+
+    assert link.status == "waiting_owner"
+    assert link.question["reason"] == SERVICE_UNKNOWN_REASON
+    assert amo.calls == []                               # в CRM ни шагу
+
+
+async def test_order_without_service_goes_on_as_before_when_the_check_is_off(amo):
+    engine = build(amo)                                  # сверка контакта выключена
+
+    link = await engine.process(an_order(services=()))
+
+    assert (link.question or {}).get("reason") != SERVICE_UNKNOWN_REASON
+    assert amo.calls_of("create_lead")                   # лид заведён, как раньше
+
+
+async def test_service_written_into_the_record_is_picked_up_by_itself(amo):
+    """Менеджер дописал услугу — робот снимает вопрос и ведёт запись без нажатий."""
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build_checking(amo, store=store)
+    await engine.process(an_order(services=()))
+
+    link = await engine.process(an_order(services=("cleaning",)))
+
+    assert link.status != "waiting_owner"
+    assert link.question is None
+    assert amo.calls_of("create_lead")
+
+
+async def test_record_edit_does_not_lift_other_owner_questions(amo):
+    """Автоподхват — только для вопроса про услугу: другие ждут ответа владельца."""
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build_checking(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9605379757")
+    await store.update("evt-1", status="waiting_owner",
+                       question={"reason": "сейлзбот не создал автосделку"})
+
+    link = await engine.process(an_order())
+
+    assert link.status == "waiting_owner"
+    assert link.question["reason"] == "сейлзбот не создал автосделку"
+    assert amo.calls == []
+
+
+async def test_retry_without_service_asks_again(amo):
+    """«Проверить ещё раз», а услуги всё нет — вопрос возвращается, лида нет."""
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build_checking(amo, store=store)
+    await engine.process(an_order(services=()))
+    await store.update("evt-1", status="new", question=None)     # кнопка «retry»
+
+    link = await engine.process(an_order(services=()))
+
+    assert link.status == "waiting_owner"
+    assert link.question["reason"] == SERVICE_UNKNOWN_REASON
+    assert amo.calls == []
+
+
+async def test_record_already_in_work_is_not_stopped_by_a_missing_service(amo):
+    """Робот уже начал работу в CRM — проверка про услугу его не останавливает."""
+    amo.add_lead(41400002, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_DIALOG)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build_checking(amo, store=store)
+    await engine.process(an_order())                     # передан в работу, ждёт сейлзбота
+
+    link = await engine.process(an_order(services=()))   # услугу из записи убрали
+
+    assert (link.question or {}).get("reason") != SERVICE_UNKNOWN_REASON

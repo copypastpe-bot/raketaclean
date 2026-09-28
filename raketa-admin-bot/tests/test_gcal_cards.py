@@ -13,6 +13,7 @@ from datetime import date
 
 import pytest
 
+from adminbot.gcal.engine import SERVICE_UNKNOWN_REASON
 from adminbot.gcal.store import MemoryCalendarStore
 from adminbot.tg.calendar_cards import (
     boat_card, calendar_question_card, cancellation_card, no_realization_text,
@@ -477,6 +478,20 @@ def test_changed_record_message_lists_what_was_updated():
     assert "изменил" in text.lower() or "поправил" in text.lower()
     assert "адрес" in text and "комментарий" in text
     assert "/leads/detail/31570695" in text
+
+
+def test_service_question_asks_to_fix_the_record_not_to_create_a_deal():
+    """Запись без услуги (решение 28.09): поправить запись, а не заводить лид."""
+    link = a_link(services=(), real_lead_id=None,
+                  question={"reason": SERVICE_UNKNOWN_REASON})
+
+    text, keyboard = calendar_question_card(link)
+
+    assert "услуг" in text.lower() and "подхвачу сам" in text.lower()
+    buttons = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert any("Проверить ещё раз" in b for b in buttons)
+    assert any("Сам разберусь" in b for b in buttons)
+    assert not any("Создать новую" in b for b in buttons)   # завёл бы лид без услуги
 
 
 def test_closed_deal_question_offers_to_confirm_not_to_work():

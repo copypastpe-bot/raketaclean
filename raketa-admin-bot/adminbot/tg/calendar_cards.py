@@ -19,6 +19,7 @@ from typing import Any, Optional, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from adminbot.gcal.engine import SERVICE_UNKNOWN_REASON
 from adminbot.phone import for_owner
 from adminbot.tg.cards import mark_rehearsal
 
@@ -37,6 +38,8 @@ REASON_TEXTS = {
                         "похоже, вы уже провели этот заказ сами. Это она или "
                         "заказ новый?",
     "сейлзбот не создал автосделку": "Лид передан в работу, но автосделку так и не увидел.",
+    SERVICE_UNKNOWN_REASON: "В записи не нашёл услугу — в работу не передал. "
+                            "Допишите услугу в запись календаря — подхвачу сам.",
 }
 DEFAULT_REASON = "Не смог решить сам, как поступить с этой записью календаря."
 
@@ -140,13 +143,15 @@ def calendar_question_card(link: Any, *, dry_run: bool = False,
     rows = [[InlineKeyboardButton(text=str(number),
                                   callback_data=_choice(f"{prefix}_{option['lead_id']}"))]
             for number, option in enumerate(options, 1)]
-    if reason == "сейлзбот не создал автосделку":
+    if reason in ("сейлзбот не создал автосделку", SERVICE_UNKNOWN_REASON):
         rows.append([InlineKeyboardButton(text="🔄 Проверить ещё раз",
                                           callback_data=_choice("retry"))])
-    rows.append([
-        InlineKeyboardButton(text="➕ Создать новую", callback_data=_choice("new")),
-        InlineKeyboardButton(text="✋ Сам разберусь", callback_data=_choice("manual")),
-    ])
+    # Без услуги «Создать новую» завела бы лид опять без услуги — не предлагаем.
+    last_row = [] if reason == SERVICE_UNKNOWN_REASON else [
+        InlineKeyboardButton(text="➕ Создать новую", callback_data=_choice("new"))]
+    last_row.append(InlineKeyboardButton(text="✋ Сам разберусь",
+                                         callback_data=_choice("manual")))
+    rows.append(last_row)
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
