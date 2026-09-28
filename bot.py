@@ -327,13 +327,6 @@ DEAL_LINK_WAIT_TIMEOUT_SEC = max(60, _env_int("DEAL_LINK_WAIT_TIMEOUT_SEC", 1800
 # в базу со ссылкой на запись/сделку (adminbot.calendar_jobs, задача 8 того
 # же ТЗ). По умолчанию выключено — бот в представление не смотрит вовсе.
 ORDER_CALENDAR_PICK = _env_int("ORDER_CALENDAR_PICK", 0) == 1
-# Старое сообщение админам «клиент/лид откликнулся на промо» (ТЗ
-# docs/plans/2026-09-23-promo-autocall.md, задача 3). Отклик теперь ведётся
-# заявкой в `promo_callbacks`, по ней админ-бот заводит сделку и автозвонок
-# звонит сам. По умолчанию `1` — сообщение уходит как раньше; `0` ставится
-# последним шагом выката, когда автозвонок по откликам заработает. Заявка
-# пишется при любом значении.
-PROMO_INTEREST_ADMIN_MESSAGE = _env_int("PROMO_INTEREST_ADMIN_MESSAGE", 1) == 1
 # Карточки «Неразобранного» amoCRM админам (ТЗ docs/plans/2026-09-23-amo-unsorted-cards.md):
 # опрос заводит дело на каждую новую запись, отдельный цикл раз в минуту рассылает
 # карточку обоим админам и напоминает раз в час, пока кто-то не нажмёт кнопку.
@@ -3760,17 +3753,6 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
                     text=LEADS_AUTO_REPLY,
                     channel_kind=channel_kind,
                 )
-                if PROMO_INTEREST_ADMIN_MESSAGE:
-                    msg_admin = (
-                        "Лид откликнулся на промо (1)\n"
-                        f"Имя: {(lead.get('full_name') or lead.get('name') or 'Лид')}\n"
-                        f"Телефон: {lead.get('phone') or 'неизвестно'}"
-                    )
-                    for admin_id in ADMIN_TG_IDS:
-                        try:
-                            await bot.send_message(admin_id, msg_admin)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning("Failed to notify admin %s about lead interest: %s", admin_id, exc)
                 return True
 
             await _log_lead_response(conn, lead_id=lead["id"], response_kind="other", response_text=normalized_text)
@@ -3855,8 +3837,6 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
                 name=client["full_name"],
                 response_text=normalized_text,
             )
-            if PROMO_INTEREST_ADMIN_MESSAGE:
-                await _notify_admins_about_promo_interest(client, normalized_text)
             try:
                 contact = ClientContact(
                     client_id=client["id"],
@@ -3874,24 +3854,6 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
             return True
 
     return False
-
-
-async def _notify_admins_about_promo_interest(client_row: Mapping[str, Any], message_text: str) -> None:
-    if not ADMIN_TG_IDS:
-        return
-    name = client_row.get("full_name") or "Клиент"
-    phone = client_row.get("phone") or "неизвестно"
-    text = (
-        "📞 Клиент откликнулся на промо-напоминание\n"
-        f"Имя: {name}\n"
-        f"Телефон: {phone}\n"
-        f"Ответ: {message_text.strip()}"
-    )
-    for admin_id in ADMIN_TG_IDS:
-        try:
-            await bot.send_message(admin_id, text)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to notify admin %s about промо интерес: %s", admin_id, exc)
 
 
 RATING_LOOKBACK_DAYS = 30

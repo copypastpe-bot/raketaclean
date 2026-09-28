@@ -11,9 +11,10 @@
 `interest`/`stop`.
 
 Задача 3 — на засчитанный отклик строка в `promo_callbacks` (миграция 0015 —
-договорённость с админ-ботом, он по ней заводит сделку). Старое сообщение
-админам гасится выключателем `PROMO_INTEREST_ADMIN_MESSAGE`; заявка пишется
-всегда. Сбой записи заявки не мешает автоответу.
+договорённость с админ-ботом, он по ней заводит сделку). Сбой записи заявки
+не мешает автоответу. Старое сообщение админам «откликнулся на промо» удалено
+вместе с выключателем (решение владельца 28.09): о сделке владельцу пишет
+админ-бот, админам на отклик не уходит ничего.
 
 Ветка подтверждения заказа базу не трогает — проверяется без неё. Остальное —
 на настоящем Postgres (DSN в `TEST_DB_DSN`, без него класс пропускается):
@@ -201,7 +202,6 @@ class PromoInboundRealDbTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(bot, "send_with_rules", self.send),
             mock.patch.object(bot, "bot", self.tg),
             mock.patch.object(bot, "ADMIN_TG_IDS", {111}),
-            mock.patch.object(bot, "PROMO_INTEREST_ADMIN_MESSAGE", True),
         ]
         for p in self.patches:
             p.start()
@@ -286,7 +286,7 @@ class PromoInboundRealDbTests(unittest.IsolatedAsyncioTestCase):
         })
         self.send.assert_awaited_once()
         self.assertEqual(self.send.await_args.kwargs["text"], bot.CLIENT_PROMO_INTEREST_REPLY)
-        self.tg.send_message.assert_awaited_once()
+        self.tg.send_message.assert_not_awaited()                   # админам — ничего
         async with self.pool.acquire() as conn:
             kind = await conn.fetchval(
                 "SELECT response_kind FROM promo_reengagements WHERE client_id=$1", client_id)
@@ -316,17 +316,6 @@ class PromoInboundRealDbTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(handled)
         self.assertEqual(await self._callbacks(), [])
         self.send.assert_not_awaited()
-
-    async def test_client_switch_off_keeps_callback_drops_admin_message(self):
-        await self._client()
-
-        with mock.patch.object(bot, "PROMO_INTEREST_ADMIN_MESSAGE", False):
-            handled = await bot.handle_wahelp_inbound(_payload("1", "+79161112233"))
-
-        self.assertTrue(handled)
-        self.assertEqual(len(await self._callbacks()), 1)
-        self.tg.send_message.assert_not_awaited()
-        self.send.assert_awaited_once()
 
     async def test_callback_failure_does_not_stop_client_reply(self):
         await self._client()
@@ -372,7 +361,7 @@ class PromoInboundRealDbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._last_lead_response(lead_id), "interest")
         self.send.assert_awaited_once()
         self.assertEqual(self.send.await_args.kwargs["text"], bot.LEADS_AUTO_REPLY)
-        self.tg.send_message.assert_awaited_once()
+        self.tg.send_message.assert_not_awaited()                   # админам — ничего
 
     async def test_lead_failed_promo_is_not_interest(self):
         """Правка 1 (ревью 2026-09-23): недошедшая рассылка — не «промо приходило»."""
@@ -436,18 +425,6 @@ class PromoInboundRealDbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._callbacks(), [])
         self.send.assert_not_awaited()
         self.tg.send_message.assert_not_awaited()
-
-    async def test_lead_switch_off_keeps_callback_drops_admin_message(self):
-        lead_id = await self._lead()
-        await self._lead_log(lead_id, "week4", days_ago=2)
-
-        with mock.patch.object(bot, "PROMO_INTEREST_ADMIN_MESSAGE", False):
-            handled = await bot.handle_wahelp_inbound(_payload("1)", "+79264445566"))
-
-        self.assertTrue(handled)
-        self.assertEqual(len(await self._callbacks()), 1)
-        self.tg.send_message.assert_not_awaited()
-        self.send.assert_awaited_once()
 
 
 if __name__ == "__main__":
