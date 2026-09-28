@@ -76,7 +76,8 @@ from adminbot.tg.cards import (
     carpet_held_text, carpet_question_card, carpet_report_text, mark_rehearsal,
     order_done_text, question_card, summary_text, wire_payment_synced_text)
 from adminbot.tg.promo_cards import (
-    failure_text as promo_failure_text, rehearsal_text as promo_rehearsal_text)
+    done_text as promo_done_text, failure_text as promo_failure_text,
+    rehearsal_text as promo_rehearsal_text)
 from adminbot.tg.outbox import (
     SUMMARY_TTL_SEC, MemoryMailStore, OwnerMail, PgMailStore, Purpose)
 from adminbot.tg.session import build_session
@@ -112,6 +113,7 @@ MAIL_AUTOCALL_MANAGER = "autocall_manager"
 MAIL_WIRE_PAYMENT_SYNCED = "wire_payment_synced"
 MAIL_PROMO_CALLBACK_REHEARSAL = "promo_callback_rehearsal"
 MAIL_PROMO_CALLBACK_FAILED = "promo_callback_failed"
+MAIL_PROMO_CALLBACK_DONE = "promo_callback_done"
 
 
 @dataclass
@@ -688,6 +690,7 @@ def _build_promo_callback(settings: Settings, bot_pool: Any, own_pool: Any, mail
         on_rehearsal=_make_promo_callback_rehearsal_sender(mail),
         on_failure=_make_promo_callback_failure_sender(mail, settings.amo_base_url,
                                                        dry_run=dry_run),
+        on_done=_make_promo_callback_done_sender(mail, settings.amo_base_url),
     )
     log.info("Отклики на промо: включены, режим %s",
              "репетиция" if dry_run else "БОЕВОЙ")
@@ -1059,6 +1062,22 @@ def _make_promo_callback_failure_sender(mail: OwnerMail, amo_base_url: str, *,
         await mail.send(promo_failure_text(callback, error=error, lead_id=lead_id,
                                            base_url=amo_base_url, dry_run=dry_run),
                         kind=MAIL_PROMO_CALLBACK_FAILED, ref=callback.id)
+
+    return send
+
+
+def _make_promo_callback_done_sender(mail: OwnerMail, amo_base_url: str):
+    """Бой: сделка по отклику заведена — сообщение владельцу (решение 28.09).
+
+    Единственное место, где это событие уходит наружу. При переезде на службу
+    оповещений меняется только тело этой функции: вместо `mail.send` — запись
+    события вида `MAIL_PROMO_CALLBACK_DONE` в шину (`adminbot/notify_bus.py`),
+    а куда его доставить, решает маршрут службы.
+    """
+
+    async def send(callback, lead_id: int) -> None:
+        await mail.send(promo_done_text(callback, lead_id, base_url=amo_base_url),
+                        kind=MAIL_PROMO_CALLBACK_DONE, ref=callback.id)
 
     return send
 

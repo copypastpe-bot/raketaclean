@@ -13,6 +13,8 @@
 
 Дальше сделку ведёт автозвонок сам — он берёт сделки с этим тегом наравне с
 заявками с сайта (решение владельца 7). Об автозвонке модуль ничего не знает.
+Владельцу в бою уходит одно сообщение «завёл сделку» — после примечания, то
+есть когда заявка доведена до конца (решение владельца 28.09).
 
 Устройство — как у `sync/wire_payment.py`: источник, цикл, отчёт. Что уже
 обработано, помнит своё хранилище (схема `adminbot`, миграция 018): у
@@ -136,6 +138,7 @@ class PromoCallbackSync:
         dry_run: bool = True,
         on_rehearsal: Optional[Callable[[PromoCallback, Optional[int]], Awaitable[Any]]] = None,
         on_failure: Optional[Callable[[PromoCallback, Optional[int], str], Awaitable[Any]]] = None,
+        on_done: Optional[Callable[[PromoCallback, int], Awaitable[Any]]] = None,
         poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -146,10 +149,12 @@ class PromoCallbackSync:
         self.amo = amo
         self.dry_run = dry_run
         self.mode = MODE_REHEARSAL if dry_run else MODE_LIVE
-        # Репетиция: письмо владельцу по каждой заявке. Бой: писем по успешным
-        # заявкам нет (как у заявок с сайта), только по сбоям — on_failure.
+        # Репетиция: письмо владельцу по каждой заявке. Бой: «завёл сделку»
+        # по доведённой заявке (on_done, решение владельца 28.09) и письмо
+        # по сбою (on_failure) — одно из двух, не оба.
         self.on_rehearsal = on_rehearsal
         self.on_failure = on_failure
+        self.on_done = on_done
         self.poll_interval_sec = poll_interval_sec
         self.sleep = sleep
 
@@ -252,6 +257,7 @@ class PromoCallbackSync:
             current = await self._save(current, status=STATUS_QUEUED, last_error=None)
             log.info("Отклик на промо №%s (%s): сделка #%s в «Новом лиде»",
                      callback.id, mask(callback.phone), current.lead_id)
+            await self._report_done(callback, current.lead_id)
             return True
         except Exception as exc:                       # noqa: BLE001 — сбой CRM или базы
             await self._fail(callback, current, exc)
@@ -302,6 +308,16 @@ class PromoCallbackSync:
             await self.on_rehearsal(callback, contact_id)
         except Exception:                              # noqa: BLE001
             log.exception("Отклик на промо №%s: отчёт репетиции не ушёл", callback.id)
+
+    async def _report_done(self, callback: PromoCallback, lead_id: int) -> None:
+        """Заявка уже доведена и отмечена: сбой письма её не откатывает."""
+        if self.on_done is None:
+            return
+        try:
+            await self.on_done(callback, lead_id)
+        except Exception:                              # noqa: BLE001
+            log.exception("Отклик на промо №%s: сообщение «завёл сделку» не ушло",
+                          callback.id)
 
     async def _report_failure(self, callback: PromoCallback, lead_id: Optional[int],
                               error: str) -> None:

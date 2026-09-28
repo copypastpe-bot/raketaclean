@@ -15,7 +15,7 @@ from adminbot.amo import ids
 from adminbot.promo_callback.sync import (
     MODE_LIVE, MODE_REHEARSAL, PromoCallback, PromoCallbackState, PromoCallbackSync,
     deal_name, note_text)
-from adminbot.tg.promo_cards import failure_text, rehearsal_text
+from adminbot.tg.promo_cards import done_text, failure_text, rehearsal_text
 from tests.fakes import FakeAmo
 
 AMO_URL = "https://example.amocrm.ru"
@@ -85,6 +85,7 @@ class Letters:
     def __init__(self) -> None:
         self.rehearsals: list[tuple[PromoCallback, Optional[int]]] = []
         self.failures: list[tuple[PromoCallback, Optional[int], str]] = []
+        self.dones: list[tuple[PromoCallback, int]] = []
 
     async def rehearsal(self, callback, contact_id) -> None:
         self.rehearsals.append((callback, contact_id))
@@ -92,10 +93,14 @@ class Letters:
     async def failure(self, callback, lead_id, error) -> None:
         self.failures.append((callback, lead_id, error))
 
+    async def done(self, callback, lead_id) -> None:
+        self.dones.append((callback, lead_id))
+
 
 def _sync(source, store, amo, letters, *, dry_run: bool = False) -> PromoCallbackSync:
     return PromoCallbackSync(source=source, store=store, amo=amo, dry_run=dry_run,
-                             on_rehearsal=letters.rehearsal, on_failure=letters.failure)
+                             on_rehearsal=letters.rehearsal, on_failure=letters.failure,
+                             on_done=letters.done)
 
 
 async def _armed(source, store, amo, letters, *, dry_run: bool = False) -> PromoCallbackSync:
@@ -165,7 +170,7 @@ async def test_found_contact_gets_lead_with_tag_and_note():
     assert state.contact_id == 111 and state.lead_id is not None
     assert amo.calls_of("add_note") == [
         (state.lead_id, "🤖 Клиент ответил «1» на промо 23.09 12:05. Клиент из бота.")]
-    assert letters.failures == [] and letters.rehearsals == []     # в бою по успеху молчим
+    assert letters.failures == [] and letters.rehearsals == []
 
 
 async def test_missing_contact_is_created_with_full_number():
@@ -280,6 +285,62 @@ async def test_unrecognized_phone_fails_at_once_without_crm():
     assert lead_id is None and "не распознан" in error
 
 
+# --- бой: сообщение владельцу о заведённой сделке (решение владельца 28.09) ---
+
+async def test_live_success_reports_done_once_with_the_lead():
+    source, store, amo, letters = MemorySource(), MemoryStore(), FakeAmo(), Letters()
+    sync = await _armed(source, store, amo, letters)
+    source.add(_callback(1))
+
+    await sync.tick()
+    await sync.tick()                                              # сообщение одно
+
+    [(callback, lead_id)] = letters.dones
+    assert callback.id == 1 and lead_id == store.state(1).lead_id
+
+
+async def test_note_failure_reports_done_only_after_the_retry_succeeds():
+    source, store, amo, letters = MemorySource(), MemoryStore(), FakeAmo(), Letters()
+    sync = await _armed(source, store, amo, letters)
+    source.add(_callback(1))
+
+    amo.fail_on = "add_note"
+    await sync.tick()
+    assert letters.dones == []                                     # сделка есть, примечания нет
+
+    amo.fail_on = None
+    await sync.tick()
+    assert [lead_id for _, lead_id in letters.dones] == [store.state(1).lead_id]
+
+
+async def test_failed_callback_reports_failure_and_no_done():
+    source, store, amo, letters = MemorySource(), MemoryStore(), FakeAmo(), Letters()
+    sync = await _armed(source, store, amo, letters)
+    source.add(_callback(1))
+    amo.fail_on = "create_lead"
+
+    for _ in range(3):
+        await sync.tick()
+
+    assert len(letters.failures) == 1 and letters.dones == []
+
+
+async def test_done_letter_crash_does_not_break_the_pass():
+    source, store, amo, letters = MemorySource(), MemoryStore(), FakeAmo(), Letters()
+
+    async def broken(callback, lead_id) -> None:
+        raise RuntimeError("telegram упал")
+
+    sync = PromoCallbackSync(source=source, store=store, amo=amo, dry_run=False,
+                             on_failure=letters.failure, on_done=broken)
+    await sync.tick()
+    source.add(_callback(1))
+
+    assert await sync.tick() == 1
+    assert store.state(1).status == "queued"
+    assert letters.failures == []
+
+
 # --- репетиция ---
 
 async def test_rehearsal_reads_crm_writes_nothing_and_reports():
@@ -298,6 +359,7 @@ async def test_rehearsal_reads_crm_writes_nothing_and_reports():
 
     await sync.tick()                                              # отчёт один раз
     assert len(letters.rehearsals) == 1
+    assert letters.dones == []                                     # «завёл» — только в бою
 
 
 async def test_rehearsal_and_live_keep_separate_bookmarks_and_rows():
@@ -352,3 +414,21 @@ def test_failure_text_when_lead_exists_says_autocall_will_take_it():
 
     assert text.startswith("🎭 РЕПЕТИЦИЯ · ⚠️ Сделку по отклику на промо завёл")
     assert text.endswith(f"{AMO_URL}/leads/detail/777")
+
+
+def test_done_text_has_name_full_phone_answer_time_and_link():
+    assert done_text(_callback(1), 777, base_url=AMO_URL).splitlines() == [
+        "Отклик на промо: завёл сделку, автозвонок подхватит.",
+        "Ирина · +79601861067",
+        "Клиент ответил «1» 23.09 12:05",
+        f"{AMO_URL}/leads/detail/777",
+    ]
+
+
+def test_done_text_for_lead_without_name_and_time():
+    callback = replace(_callback(1, source="lead", name=" ", text="1."), created_at=None)
+
+    lines = done_text(callback, 777, base_url=AMO_URL).splitlines()
+
+    assert lines[1] == "без имени · +79601861067"
+    assert lines[2] == "Лид ответил «1.»"

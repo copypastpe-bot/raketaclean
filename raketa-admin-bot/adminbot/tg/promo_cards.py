@@ -1,4 +1,4 @@
-"""Письма владельцу по откликам на промо (ТЗ 2026-09-23, задача 5).
+"""Письма владельцу по откликам на промо (ТЗ 2026-09-23, задача 5; «завёл сделку» — 28.09).
 
 Только строители текста: вход — данные, выход — строка. Телефон — целиком
 (`phone.for_owner`): бот личный, владельцу номер нужен, чтобы позвонить самому
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from adminbot.amo.fields import MOSCOW_TZ
 from adminbot.phone import for_owner
 from adminbot.promo_callback.sync import deal_name
 from adminbot.tg.cards import mark_rehearsal
@@ -24,6 +25,27 @@ def rehearsal_text(callback: Any, contact_id: Optional[int]) -> str:
                else "контакт будет заведён")
     return (f"Репетиция: завёл бы сделку «{deal_name(callback)}», {contact}, "
             "поставил бы в автозвонок.")
+
+
+def done_text(callback: Any, lead_id: int, *, base_url: str) -> str:
+    """Бой: сделка по отклику заведена и примечание записано (решение владельца 28.09).
+
+    Одно сообщение на заявку, по образцу отчёта автозвонка: что сделал робот,
+    кто ответил, ссылка на сделку. Звонит дальше автозвонок, владельцу —
+    только знать.
+    """
+    name = (getattr(callback, "name", None) or "").strip() or "без имени"
+    who = "Клиент" if callback.source == "client" else "Лид"
+    answer = (getattr(callback, "response_text", None) or "").strip() or "1"
+    created_at = getattr(callback, "created_at", None)
+    when = (" " + created_at.astimezone(MOSCOW_TZ).strftime("%d.%m %H:%M")
+            if created_at is not None else "")
+    return "\n".join([
+        "Отклик на промо: завёл сделку, автозвонок подхватит.",
+        f"{name} · {for_owner(callback.phone)}",
+        f"{who} ответил «{answer}»{when}",
+        _deal_url(base_url, lead_id),
+    ])
 
 
 def failure_text(callback: Any, *, error: str, lead_id: Optional[int] = None,

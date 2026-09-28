@@ -433,6 +433,7 @@ def test_promo_callback_live_uses_the_live_amo_client():
 
     assert sync.amo is live
     assert sync.dry_run is False and sync.mode == "live"
+    assert sync.on_done is not None                                 # бой пишет «завёл сделку»
 
 
 async def test_promo_callback_failure_letter_goes_to_owner_mail():
@@ -455,3 +456,26 @@ async def test_promo_callback_failure_letter_goes_to_owner_mail():
     [(text, kind, ref)] = mail.sent
     assert kind == MAIL_PROMO_CALLBACK_FAILED and ref == 5
     assert "позвоните руками" in text and "+79601861067" in text
+
+
+async def test_promo_callback_done_letter_goes_to_owner_mail():
+    from adminbot.main import MAIL_PROMO_CALLBACK_DONE, _make_promo_callback_done_sender
+    from adminbot.promo_callback.sync import PromoCallback
+
+    class Mail:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, text, *, kind, ref=None, reply_markup=None):
+            self.sent.append((text, kind, ref))
+
+    mail = Mail()
+    send = _make_promo_callback_done_sender(mail, "https://x")
+
+    await send(PromoCallback(id=5, source="client", phone="+79601861067", name="Ирина"), 777)
+
+    [(text, kind, ref)] = mail.sent
+    assert kind == MAIL_PROMO_CALLBACK_DONE and ref == 5
+    assert text.startswith("Отклик на промо: завёл сделку")
+    assert "+79601861067" in text and text.endswith("https://x/leads/detail/777")
+
