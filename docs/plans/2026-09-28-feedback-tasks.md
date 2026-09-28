@@ -311,7 +311,16 @@ def failure_text(order: RatedOrder, error: str, *, base_url: str) -> str
 - Тесты: выключено → `None`; репетиция берёт клиента репетиции, бой — боевого; письма уходят в почту владельца
   нужного вида и с номером заказа.
 
-- [ ] Выполнено
+- [x] Выполнено. Коммиты: `35e021c` (настройки `feedback_tasks_enabled`/`feedback_tasks_dry_run` +
+  тесты), `094ac39` (`main.py` — `_build_feedback`, `MAIL_FEEDBACK_*`, отправители, `App.feedback`,
+  запуск в `App.run`, сборка в `build_app`, тесты), `8d5a5f2` (карта `main.py.map.md`), `e66ad23`
+  (`deploy/update.sh` — ключи `--feedback-on/off/live/rehearsal`, строка в отчёте, подсказка в
+  шапке), `8f04166` (`docs/deploy.md` — раздел про включение). Решение координатора: письмо о
+  сбое в репетиции помечается `mark_rehearsal` в самом отправителе (тест
+  `test_feedback_failure_letter_marked_in_rehearsal`/`_not_marked_when_live`). Тесты: TDD
+  (падения проверены на импорте несуществующих имён и `AttributeError` настроек до правки кода);
+  полный прогон `pytest -q` — `1161 passed, 9 skipped` (пропуски — те же фикстуры ковров без
+  `CARPET_FIXTURES_DIR`, к задаче не относятся).
 
 ---
 
