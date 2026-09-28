@@ -235,7 +235,17 @@ class FeedbackSync:
                 order.lead_id, task_type_id=ids.TASK_TYPE_CONTACT,
                 text=contact_task_text(order), complete_till=deadline,
                 responsible_user_id=responsible)
-            contact_task_id = 0 if self.dry_run else intent.entity_id
+            if self.dry_run:
+                contact_task_id = 0
+            elif intent.entity_id is not None:
+                contact_task_id = intent.entity_id
+            else:
+                # Амо поставила задачу, но номер в ответе не пришёл. -1 — признак
+                # «поставлена, номер неизвестен»: None здесь повторил бы постановку
+                # каждый проход (спам задачами) — замечание ревью, задача 3.
+                contact_task_id = -1
+                log.warning("Заказ №%s (сделка %s): «Связаться» поставлена, но amoCRM "
+                           "не вернула номер задачи", order.order_id, order.lead_id)
             current = await self._save(current, contact_task_id=contact_task_id)
             actions.append('поставил бы «Связаться»')
         if not current.note_added:

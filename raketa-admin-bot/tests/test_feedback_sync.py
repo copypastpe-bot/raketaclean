@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from adminbot.amo import ids
+from adminbot.amo.client import Intent
 from adminbot.feedback.models import (
     MODE_LIVE,
     MODE_REHEARSAL,
@@ -311,6 +312,38 @@ async def test_failure_after_contact_task_retry_does_not_create_second():
     assert len(amo.calls_of("create_task")) == 1           # вторую не поставил
     assert store.state(609).status == STATUS_CONTACT_SET
     assert store.state(609).attempts == 0                   # успех обнулил счётчик
+
+
+async def test_score_low_missing_entity_id_in_response_uses_sentinel_and_no_retry():
+    """Ревью, замечание 1: амо поставила задачу, но номер в ответе не пришёл
+    (entity_id=None) — раньше это писалось как contact_task_id=None, и на
+    следующем проходе «Связаться» ставилась заново (спам задачами)."""
+    source, store, letters = MemorySource(), MemoryStore(), Letters()
+    amo = FakeAmo()
+    lead_id = 41013
+    _lead(amo, lead_id)
+    created_calls: list[dict] = []
+
+    async def create_task_no_entity_id(lead_id_arg, *, task_type_id, text, complete_till,
+                                       responsible_user_id=None):
+        created_calls.append({"task_type_id": task_type_id, "text": text,
+                              "complete_till": complete_till,
+                              "responsible_user_id": responsible_user_id})
+        return Intent(action="create_task", entity="task", entity_id=None,
+                     payload={}, performed=True)
+
+    amo.create_task = create_task_no_entity_id
+    sync = await _armed(source, store, amo, letters)
+    order = _order(618, lead_id=lead_id, score=3, comment="3")
+    source.add(order)
+
+    assert await sync.tick() == 0                        # задачи «Повторный заказ» нет
+    assert len(created_calls) == 1
+    assert store.state(618).contact_task_id == -1
+    assert store.state(618).status == STATUS_CONTACT_SET
+
+    assert await sync.tick() == 0                          # второй проход
+    assert len(created_calls) == 1                          # вторую задачу не поставил
 
 
 # --- старые оценки (решение 8) ---
