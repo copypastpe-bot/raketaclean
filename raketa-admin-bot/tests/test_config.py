@@ -308,3 +308,28 @@ def test_promo_callback_env_overrides(monkeypatch):
 
     assert s.promo_callback_enabled is True
     assert s.promo_callback_dry_run is False
+
+
+# --- «Повторный заказ» по оценке клиента (ТЗ 2026-09-28, задача 4) ---
+
+def test_feedback_tasks_is_off_by_default(monkeypatch):
+    """Свой выключатель, по умолчанию выключен и в репетиции."""
+    _minimal_env(monkeypatch)
+    monkeypatch.delenv("FEEDBACK_TASKS_ENABLED", raising=False)
+    monkeypatch.delenv("FEEDBACK_TASKS_DRY_RUN", raising=False)
+
+    s = Settings.from_env()
+
+    assert s.feedback_tasks_enabled is False
+    assert s.feedback_tasks_dry_run is True
+
+
+def test_feedback_tasks_env_overrides(monkeypatch):
+    _minimal_env(monkeypatch)
+    monkeypatch.setenv("FEEDBACK_TASKS_ENABLED", "1")
+    monkeypatch.setenv("FEEDBACK_TASKS_DRY_RUN", "0")
+
+    s = Settings.from_env()
+
+    assert s.feedback_tasks_enabled is True
+    assert s.feedback_tasks_dry_run is False

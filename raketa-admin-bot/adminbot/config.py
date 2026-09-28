@@ -227,6 +227,12 @@ class Settings:
     promo_callback_enabled: bool = False
     promo_callback_dry_run: bool = True
 
+    # «Повторный заказ» по оценке клиента (ТЗ 2026-09-28, задача 4): свой
+    # выключатель, по умолчанию выключен. Своя репетиция: цикл пишет в
+    # amoCRM (комментарий, задача «Связаться», закрытие «Повторного заказа»).
+    feedback_tasks_enabled: bool = False
+    feedback_tasks_dry_run: bool = True
+
     # Мастер заказа → вид работ для поля «Услуга»
     service_by_master: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_SERVICE_BY_MASTER))
 
@@ -342,6 +348,8 @@ class Settings:
             wire_payment_dry_run=_flag("WIRE_PAYMENT_DRY_RUN", True),
             promo_callback_enabled=_flag("PROMO_CALLBACK_ENABLED", False),
             promo_callback_dry_run=_flag("PROMO_CALLBACK_DRY_RUN", True),
+            feedback_tasks_enabled=_flag("FEEDBACK_TASKS_ENABLED", False),
+            feedback_tasks_dry_run=_flag("FEEDBACK_TASKS_DRY_RUN", True),
             service_by_master=_service_by_master("SERVICE_BY_MASTER",
                                                  DEFAULT_SERVICE_BY_MASTER),
             heartbeat_enabled=_flag("HEARTBEAT_ENABLED", False),
