@@ -330,7 +330,6 @@ class Engine:
 
     async def _run_checklist(self, order: Order, link: AmoLink) -> AmoLink:
         context = StepContext(
-            has_rating=order.rating_score is not None,
             has_duplicates=bool(self._duplicates.get(order.order_id)),
         )
 
@@ -408,10 +407,6 @@ class Engine:
 
     async def _step_close_autotasks(self, order: Order, link: AmoLink) -> StepResult:
         await self._close_tasks(order, link.real_lead_id, ids.TASK_TYPES_TO_CLOSE)
-        return StepResult()
-
-    async def _step_close_feedback_task(self, order: Order, link: AmoLink) -> StepResult:
-        await self._close_tasks(order, link.real_lead_id, {ids.TASK_TYPE_FEEDBACK})
         return StepResult()
 
     async def _step_note_duplicates(self, order: Order, link: AmoLink) -> StepResult:

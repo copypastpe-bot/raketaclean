@@ -68,18 +68,43 @@ async def test_path_a_completes_the_deal():
     assert amo.leads[lead_id]["status_id"] == ids.STATUS_SUCCESS     # проведена
     assert amo.leads[lead_id]["price"] == 5950                       # бюджет = сумма чека
     assert amo.calls_of("complete_task") == [1]      # автозадача закрыта
-    # «Получить ОС» не закрыта: клиент не поставил оценку (решение владельца №9)
+    # «Получить ОС» не закрыта: чек-лист её больше не трогает (задача 5 ТЗ
+    # docs/plans/2026-09-28-feedback-tasks.md, циклом заведует adminbot/feedback/)
     assert 2 not in amo.calls_of("complete_task")
 
 
-async def test_feedback_task_closed_when_client_rated():
+async def test_feedback_task_is_never_closed_by_the_checklist_even_when_rated():
+    """Решение №9 отменено: проведение заказа не закрывает «Повторный заказ»
+    ни при какой оценке — этим занимается отдельный цикл adminbot/feedback/."""
     amo, store = FakeAmo(), FakeStore()
     lead_id = open_realization_lead(amo)
     amo.add_task(lead_id, 2, ids.TASK_TYPE_FEEDBACK)
 
     await make_engine(amo, store).process_order(make_order(rating=5))
 
-    assert amo.calls_of("complete_task") == [2]
+    assert 2 not in amo.calls_of("complete_task")
+
+
+async def test_stored_checklist_with_old_close_feedback_task_key_finishes_without_error():
+    """До задачи 5 чек-лист включал шаг close_feedback_task — такие связки
+    могли остаться в базе. Лишний ключ просто игнорируется, цепочка идёт дальше."""
+    amo, store = FakeAmo(), FakeStore()
+    lead_id = open_realization_lead(amo)
+    order = make_order()
+    moved_at = ORDER_MOMENT - timedelta(minutes=5)
+    store.links[order.order_id] = AmoLink(
+        order_id=order.order_id, phone10=order.phone10, status="in_progress",
+        path="A", real_lead_id=lead_id,
+        checklist={"fill_realization": moved_at.isoformat(),
+                  "fix_contact_name": moved_at.isoformat(),
+                  "close_autotasks": moved_at.isoformat(),
+                  "close_feedback_task": moved_at.isoformat()},
+        created_at=moved_at, updated_at=moved_at,
+    )
+
+    link = await make_engine(amo, store).process_order(order)
+
+    assert link.status == "done"
 
 
 async def test_service_is_set_by_master_when_empty():

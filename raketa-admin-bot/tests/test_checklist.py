@@ -9,7 +9,6 @@ import pytest
 
 from adminbot.sync.checklist import StepContext, next_step, steps_for
 
-RATED = StepContext(has_rating=True)
 WITH_DUPLICATES = StepContext(has_duplicates=True)
 
 
@@ -32,17 +31,13 @@ def test_stage_is_changed_after_tasks_are_closed():
     assert order.index("close_autotasks") < order.index("move_realization_done")
 
 
-def test_path_a_finishes_without_feedback_task_when_client_did_not_rate():
+def test_path_a_finishes_without_feedback_task():
+    """Задачу «Получить ОС» («Повторный заказ») чек-лист больше не закрывает —
+    решение №9 заменено циклом `adminbot/feedback/` (ТЗ
+    docs/plans/2026-09-28-feedback-tasks.md)."""
     checklist = done("fill_realization", "fix_contact_name", "close_autotasks")
     assert next_step("A", checklist) == "move_realization_done"
     assert next_step("A", done(*steps_for("A"))) is None
-
-
-def test_feedback_task_closed_only_when_client_rated():
-    """Решение владельца №9: нет оценки — задачу «Получить ОС» оставляем ему."""
-    checklist = done("fill_realization", "fix_contact_name", "close_autotasks")
-    assert next_step("A", checklist, RATED) == "close_feedback_task"
-    assert next_step("A", done(*steps_for("A", RATED)), RATED) is None
     assert "close_feedback_task" not in steps_for("A")
 
 
