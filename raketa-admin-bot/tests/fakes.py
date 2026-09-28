@@ -80,6 +80,24 @@ class FakeAmo:
         self.calls.append(("get_lead_tasks", lead_id))
         return list(self.tasks.get(lead_id, []))
 
+    async def get_lead_tasks_of_type(self, lead_id: int, task_type_id: int) -> list[dict]:
+        """Задачи сделки этого типа, включая закрытые — как в бою (задача 1 ТЗ 2026-09-28).
+
+        Закрытость видна через `task_results`: сам `complete_task` не трогает
+        запись в `self.tasks`, только помнит, чем задача закрыта.
+        """
+        self._maybe_fail("get_lead_tasks_of_type")
+        self.calls.append(("get_lead_tasks_of_type", (lead_id, task_type_id)))
+        result = []
+        for task in self.tasks.get(lead_id, []):
+            if task["task_type_id"] != task_type_id:
+                continue
+            task = dict(task)
+            if task["id"] in self.task_results:
+                task["is_completed"] = True
+            result.append(task)
+        return result
+
     # --- запись ---
 
     async def update_lead(self, lead_id: int, **fields) -> Optional[Intent]:
@@ -157,6 +175,24 @@ class FakeAmo:
         self.calls.append(("add_note", (lead_id, text)))
         return Intent(action="add_note", entity="lead", entity_id=lead_id,
                       payload={"text": text}, performed=not self.dry_run)
+
+    async def create_task(self, lead_id: int, *, task_type_id: int, text: str,
+                          complete_till: int,
+                          responsible_user_id: Optional[int] = None) -> Intent:
+        self._maybe_fail("create_task", lead_id)
+        payload = {"task_type_id": task_type_id, "text": text,
+                   "complete_till": complete_till, "entity_id": lead_id,
+                   "entity_type": "leads"}
+        if responsible_user_id is not None:
+            payload["responsible_user_id"] = responsible_user_id
+        self.calls.append(("create_task", payload))
+        new_id = None
+        if not self.dry_run:
+            new_id = self._take_id()
+            self.tasks.setdefault(lead_id, []).append(
+                {"id": new_id, "task_type_id": task_type_id, "is_completed": False})
+        return Intent(action="create_task", entity="task", entity_id=new_id,
+                      payload=payload, performed=not self.dry_run)
 
     # --- вспомогательное для тестов ---
 
