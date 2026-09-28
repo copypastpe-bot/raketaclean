@@ -71,23 +71,45 @@ DISTRICT_BY_PREFIX: dict[str, str] = {
 # --- слово из записи → вид услуги ---
 # Мебель не детализируем (решение 11): форму дивана в записи не видно, а список
 # амо требует выбрать «прямой / угловой / П-образный» — выдумывать нельзя.
+#
+# Услугу узнаём по корню (решение владельца 28.09): точный словарь не знал
+# «генералка», «створок», «матрасика», и заказ уходил в работу без услуги.
+# Корни собраны по календарю за февраль-сентябрь 2026.
+SERVICE_BY_ROOT: tuple[tuple[str, str], ...] = (
+    ("микроматрас", "mattress"), ("матрас", "mattress"),
+    ("диван", "furniture"), ("мебел", "furniture"), ("стул", "furniture"),
+    ("кресл", "furniture"), ("пуф", "furniture"), ("кроват", "furniture"),
+    ("тахт", "furniture"), ("изголов", "furniture"), ("каркас", "furniture"),
+    ("подушк", "furniture"), ("подух", "furniture"), ("подлокотник", "furniture"),
+    ("коляск", "furniture"), ("люльк", "furniture"), ("лежанк", "furniture"),
+    ("скамейк", "furniture"), ("сидушк", "furniture"), ("сиден", "furniture"),
+    ("накидк", "furniture"),
+    ("ковролин", "carpeting"),
+    ("уборк", "cleaning"), ("генерал", "cleaning"), ("поддерж", "cleaning"),
+    ("послестро", "cleaning"), ("санузл", "cleaning"), ("клининг", "cleaning"),
+    ("уборщиц", "cleaning"), ("вытяжк", "cleaning"), ("холодильник", "cleaning"),
+    ("духовк", "cleaning"), ("шкаф", "cleaning"),
+    ("створ", "windows"), ("панорам", "windows"),
+    ("перемыв", "rewash"),
+)
+
+# Короткие и двусмысленные слова — только целиком: корень «кух» зацепил бы
+# «кухонный уголок» (это мебель), корень «угол» — адрес «угол Ленина».
+# Отдельного «кух» нет тоже: в календаре это всегда «кух угол» — мебель
+# (решение владельца 28.09), в уборках пишут «кухня», «кухни».
 SERVICE_BY_WORD: dict[str, str] = {
-    "матрас": "mattress", "матрасы": "mattress", "матрасов": "mattress",
-    "диван": "furniture", "диваны": "furniture", "дивана": "furniture",
-    "диванов": "furniture", "мебель": "furniture",
-    "стул": "furniture", "стулья": "furniture", "стульев": "furniture",
-    "кресло": "furniture", "кресла": "furniture", "пуфик": "furniture",
-    "кровать": "furniture", "тахта": "furniture", "уголок": "furniture",
-    "изголовье": "furniture", "каркас": "furniture", "подушка": "furniture",
-    "подушки": "furniture", "коляска": "furniture", "лежанка": "furniture",
-    "ковролин": "carpeting",
-    "уборка": "cleaning", "генеральная": "cleaning", "поддерживающая": "cleaning",
-    "послестрой": "cleaning", "кухня": "cleaning", "кух": "cleaning",
-    "санузел": "cleaning", "перемыв": "rewash",
-    "окна": "windows", "окно": "windows", "створки": "windows",
+    "кресел": "furniture", "уголок": "furniture",
+    "кухня": "cleaning", "кухни": "cleaning",
+    "санузел": "cleaning",
+    "окна": "windows", "окно": "windows", "окон": "windows",
 }
 
+# «Запах» — повторный выезд по гарантии, но только в заголовке (решение
+# владельца 28.09): в описании это пожелание к обычному заказу («убрать запах»).
+_REWASH_TITLE_WORDS = frozenset({"запах"})
+
 # Ковёр на дому ищем отдельно и ПОСЛЕ ковролина: «ковролин» тоже начинается с «ковр».
+# «Коврик» не берём (решение владельца 28.09): в описании это чаще «ключи под коврик».
 _RUG_RE = re.compile(r"\bков(?:[её]р|ры|ров|ра)\b", re.IGNORECASE)
 
 # Названия теплоходов (B2B без телефона). Список расширяется строкой здесь же:
@@ -268,25 +290,36 @@ def _split_summary(summary: str) -> tuple[Optional[str], Optional[str], str]:
     prefix = match.group("prefix").lower()
     rest = match.group("rest").strip()
 
-    if prefix in SERVICE_BY_WORD:                     # «Диван, Татьяна» — это не район
+    if _service_of(prefix):                           # «Диван, Татьяна» — это не район
         return None, None, summary
 
     district = DISTRICT_BY_PREFIX.get(prefix)
     return district, (None if district else prefix), rest
 
 
+def _service_of(word: str) -> Optional[str]:
+    """Услуга по одному слову в нижнем регистре: сначала целиком, потом по корню."""
+    kind = SERVICE_BY_WORD.get(word)
+    if kind:
+        return kind
+    for root, kind in SERVICE_BY_ROOT:
+        if word.startswith(root):
+            return kind
+    return None
+
+
 def _services(rest: str, description: str) -> tuple[str, ...]:
     """Какие услуги названы в записи. Порядок сохраняем, повторы убираем."""
     found: list[str] = []
     for word in re.findall(r"[А-Яа-яЁёA-Za-z]+", rest.lower()):
-        kind = SERVICE_BY_WORD.get(word)
+        kind = _service_of(word) or ("rewash" if word in _REWASH_TITLE_WORDS else None)
         if kind and kind not in found:
             found.append(kind)
 
     if not found:
         # Заголовок молчит — смотрим состав в описании («Диван\nКресло\nТахта»).
         for word in re.findall(r"[А-Яа-яЁёA-Za-z]+", description.lower()):
-            kind = SERVICE_BY_WORD.get(word)
+            kind = _service_of(word)
             if kind and kind not in found:
                 found.append(kind)
 
@@ -325,7 +358,7 @@ def _client_name(rest: str) -> Optional[str]:
     """
     tail = rest.split(",")[-1].strip() if "," in rest else rest
     words = [word for word in re.findall(r"[А-ЯЁ][а-яё]+", tail)
-             if word.lower() not in SERVICE_BY_WORD]
+             if _service_of(word.lower()) is None]
     return words[-1] if words else None
 
 

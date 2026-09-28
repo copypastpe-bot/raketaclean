@@ -229,6 +229,87 @@ def test_rug_in_description_means_cleaning_at_home():
     assert "rug_home" in parsed.services
 
 
+def _services_of(summary: str, description: str = "89601861067") -> tuple[str, ...]:
+    parsed = parse_event({"id": summary, "summary": summary, "description": description,
+                          "start": {"dateTime": "2026-09-28T10:00:00+03:00"}})
+    return parsed.services
+
+
+def test_word_forms_from_the_real_calendar_are_recognised():
+    """Услугу узнаём по корню слова (решение владельца 28.09).
+
+    Формы взяты из календаря за февраль-сентябрь 2026: точный словарь их не знал,
+    и «Генералка» 27.09 ушла в работу без услуги — сейлзбот не сработал.
+    """
+    cases = {
+        "Сов! Генералка, Дарья": ("cleaning",),
+        "Сов! Клининг, Андрей": ("cleaning",),
+        "Сов! Холодильник и духовка, Андрей": ("cleaning",),
+        "Ниж! Матрасик, Юлия": ("mattress",),
+        "Ниж! Микроматрас, Юлия": ("mattress",),
+        "Лен! 2 стула, Ирина": ("furniture",),
+        "Лен! Диванчик, Ирина": ("furniture",),
+        "Авт! 4 кресел, Ольга": ("furniture",),
+        "Авт! Кровати, Ольга": ("furniture",),
+        "Сов! Подухи, Анна": ("furniture",),
+        "Сов! Люлька, Анна": ("furniture",),
+        "Сов! Сидушки, Анна": ("furniture",),
+        "Мос! 7 створок, Ирина": ("windows",),
+        "Мос! Мойка окон, Ирина": ("windows",),
+        "Мос! Панорамы, Ирина": ("windows",),
+        "Кан! Ковролина 20 м, Пётр": ("carpeting",),
+    }
+    for summary, expected in cases.items():
+        assert _services_of(summary) == expected, summary
+
+
+def test_description_forms_count_when_the_title_is_silent():
+    """Запись Дарьи 27.09: в заголовке только имя, состав — в описании."""
+    assert _services_of("Сов! Дарья", "Генералка 30 м\n7 створок\n12600\n89601861067") \
+        == ("cleaning", "windows")
+
+
+def test_kitchen_corner_sofa_is_furniture_not_cleaning():
+    """Корня «кух» нет нарочно: «кухонный уголок» — мебель, а не уборка кухни."""
+    assert _services_of("Сов! Кухонный уголок, Анна") == ("furniture",)
+
+
+def test_street_corner_in_address_is_not_furniture():
+    """«Уголок» — только точным словом: «угол улиц» в описании не мебель."""
+    assert _services_of("Сов! Анна", "Матрас\nугол Ленина и Белинского\n89601861067") \
+        == ("mattress",)
+
+
+def test_doormat_is_not_a_rug_at_home():
+    """«Ключи под коврик» 29.08 добавили дивану ковёр — «коврик» не берём (решение 28.09)."""
+    assert _services_of("Авт! Диван Дарья", "Заказчица уйдет, ключи под коврик\n89601861067") \
+        == ("furniture",)
+
+
+def test_kitchen_corner_shorthand_is_furniture_only():
+    """«Кух угол» — кухонный уголок: «кух» уборкой не считаем (решение 28.09)."""
+    assert _services_of("Авт! Кух угол и 2 стула, Елена") == ("furniture",)
+
+
+def test_smell_in_title_is_a_warranty_visit():
+    """«Ниж! Запах, Ксения» — повторный выезд по гарантии, как перемыв (решение 28.09)."""
+    parsed = parse_event({"id": "smell", "summary": "Ниж! Запах, Ксения",
+                          "description": "Запах остался\n89601861067",
+                          "start": {"dateTime": "2026-09-28T10:00:00+03:00"}})
+
+    assert parsed.kind is EventKind.REWASH
+
+
+def test_smell_in_description_is_not_a_warranty_visit():
+    """«Запах» в описании — пожелание к обычному заказу, заказ не пропускаем."""
+    parsed = parse_event({"id": "smell2", "summary": "Сов! Надежда",
+                          "description": "Диван\nубрать запах кошки\n89601861067",
+                          "start": {"dateTime": "2026-09-28T10:00:00+03:00"}})
+
+    assert parsed.kind is EventKind.ORDER
+    assert parsed.services == ("furniture",)
+
+
 def test_prices_are_never_taken_for_a_phone():
     """Цены и размеры рядом с номером не должны рождать выдуманный телефон."""
     parsed = parse_event({"id": "p", "summary": "Сов! Диван, Ирина",
