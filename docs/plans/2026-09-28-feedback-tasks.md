@@ -202,7 +202,12 @@ class PgFeedbackStore:            # __init__(self, own_pool)
   ставится один раз и второй вызов его не двигает; режимы не видят строк друг друга; `update` не пускает чужое поле;
   миграция применяется дважды без ошибки.
 
-- [ ] Выполнено
+- [x] Выполнено. Коммиты: 18217f1 (миграция 019: `adminbot.feedback_state`,
+  `adminbot.feedback_cursor`), 9146d59 (`adminbot/feedback/models.py`,
+  `adminbot/feedback/store.py`, тест `tests/test_feedback_store.py`). Тесты: TDD
+  (падение `ModuleNotFoundError` до кода подтверждено), файл — 5 passed на
+  настоящей базе (не skipped); полный прогон `pytest -q` — `1131 passed, 9 skipped`
+  (пропуски — отчёты по коврам без `CARPET_FIXTURES_DIR`, к задаче не относятся).
 
 ---
 
