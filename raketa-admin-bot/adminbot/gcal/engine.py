@@ -1044,8 +1044,23 @@ def _compare_contact(record_name: Optional[str], record_phone10: Optional[str],
 
     phones = contact_phones(contact)
     phone_ok = not record_phone10 or record_phone10 in phones
-    name_ok = name.split()[0][:3].lower() == contact_name.split()[0][:3].lower()
+    record_start = name.split()[0][:3].lower()
+    name_ok = any(word[:3].lower() == record_start
+                  for word in _first_name_candidates(contact_name))
     return phone_ok and name_ok
+
+
+def _first_name_candidates(contact_name: str) -> list[str]:
+    """Где в имени контакта может стоять имя (решение владельца 28.09).
+
+    Одно слово — оно само. Три и больше — ФИО, имя второе: «Серова Оксана
+    Олеговна»; фамилию и отчество не смотрим, иначе «Иван» сошёлся бы с
+    «Иванов Олег Петрович». Два слова — порядок в CRM бывает любым, смотрим оба.
+    """
+    words = contact_name.split()
+    if len(words) >= 3:
+        return [words[1]]
+    return words
 
 
 def contact_mismatch_text(record_name: Optional[str], record_phone10: Optional[str],
@@ -1059,9 +1074,10 @@ def contact_mismatch_text(record_name: Optional[str], record_phone10: Optional[s
     Общая с циклом напоминаний (`gcal/contact_reminder.py`) функция, не общий
     цикл (решение координатора 22.09).
 
-    Сравнение имени: без регистра, по первому слову, совпадение первых трёх
-    букв («Наташа»/«Наталья» — не расхождение). Телефон записи должен входить
-    в телефоны контакта (последние 10 цифр).
+    Сравнение имени: без регистра, первое слово записи против места имени
+    в контакте (`_first_name_candidates`: ФИО — второе слово), совпадение
+    первых трёх букв («Наташа»/«Наталья» — не расхождение). Телефон записи
+    должен входить в телефоны контакта (последние 10 цифр).
     """
     matches = _compare_contact(record_name, record_phone10, contact)
     if matches is not False:

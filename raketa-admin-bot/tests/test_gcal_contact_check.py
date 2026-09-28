@@ -64,6 +64,38 @@ def test_ирина_and_наталья_is_a_mismatch():
     assert contact_resolved("Ирина", "9601861933", contact) is False
 
 
+def test_full_name_in_crm_matches_the_first_name_in_the_record():
+    """ФИО в CRM, имя в календаре — одно лицо (жалоба владельца 28.09:
+    «Ирина» против «Корнилова Ирина Ивановна» при том же номере)."""
+    contact = contact_with_phone(1, "Корнилова Ирина Ивановна", "9601860783")
+    assert contact_mismatch_text("Ирина", "9601860783", contact) is None
+    assert contact_resolved("Ирина", "9601860783", contact) is True
+
+
+def test_full_name_checks_the_name_not_the_surname():
+    """В ФИО имя — второе слово: «Иван» против «Иванов Олег Петрович» — расхождение."""
+    contact = contact_with_phone(1, "Иванов Олег Петрович", "9601861933")
+    assert contact_mismatch_text("Иван", "9601861933", contact) is not None
+
+
+def test_full_name_checks_the_name_not_the_patronymic():
+    contact = contact_with_phone(1, "Петров Сергей Иванович", "9601861933")
+    assert contact_mismatch_text("Иван", "9601861933", contact) is not None
+
+
+def test_two_words_in_crm_are_checked_both_ways():
+    """«Серова Оксана» и «Оксана Серова» — порядок в CRM бывает любым."""
+    for name in ("Серова Оксана", "Оксана Серова"):
+        contact = contact_with_phone(1, name, "9601861933")
+        assert contact_mismatch_text("Оксана", "9601861933", contact) is None, name
+
+
+def test_full_name_with_another_phone_is_still_a_mismatch():
+    """Имя сошлось, номер нет — карточка нужна (карточка «Ксения» 28.09)."""
+    contact = contact_with_phone(1, "Буракова Ксения Олеговна", "9601866530")
+    assert contact_mismatch_text("Ксения", "9601868094", contact) is not None
+
+
 def test_phone_not_in_contact_is_a_mismatch():
     contact = contact_with_phone(1, "Наталья", "9004445566")
     text = contact_mismatch_text("Наталья", "9601861933", contact)
