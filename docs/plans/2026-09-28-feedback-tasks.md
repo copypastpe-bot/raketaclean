@@ -133,7 +133,11 @@ async def create_task(self, lead_id: int, *, task_type_id: int, text: str,
 - Тесты: фильтры запроса (закрытые не отсекаются), тело `create_task` (тип, срок, сделка, ответственный; без
   ответственного — ключа нет), номер созданной задачи из ответа, репетиция не делает запроса.
 
-- [ ] Выполнено
+- [x] Выполнено. Коммиты: 8a5f22d (клиент: `get_lead_tasks_of_type`, `create_task`,
+  `ids.TASK_TYPE_CONTACT`, тесты `test_amo_client.py`/`test_amo_write.py`), 041a076
+  (двойник `FakeAmo` + `tests/test_fakes_amo_tasks.py`). Тесты: TDD (падение до кода
+  подтверждено), полный прогон `pytest -q` — `1126 passed, 9 skipped` (пропуски —
+  отчёты по коврам без `CARPET_FIXTURES_DIR`, к задаче не относятся).
 
 ---
 
