@@ -279,7 +279,13 @@ def failure_text(order: RatedOrder, error: str, *, base_url: str) -> str
 открытой задачей — обрабатывается, без открытой — `skipped`; три сбоя → `failed` и одно письмо; репетиция: записей
 в CRM нет, одно письмо, `dry_run`, у боя своя очередь; лимит 20 за проход; первый проход ставит `started_at`.
 
-- [ ] Выполнено
+- [x] Выполнено. Коммит: 388045b (`adminbot/feedback/sync.py` — `FeedbackSync`,
+  протоколы `FeedbackSource`/`FeedbackStore`; `adminbot/tg/feedback_cards.py` — тексты;
+  `tests/test_feedback_sync.py` — источник/хранилище в памяти, CRM — `FakeAmo`). Тесты:
+  TDD (падения из-за ошибок в самих тестах — `replied_at` по умолчанию раньше
+  `started_at`, перепутанные переменные — исправлены, не код цикла); файл — 21 passed;
+  полный прогон `pytest -q` — `1152 passed, 9 skipped` (пропуски — отчёты по коврам без
+  `CARPET_FIXTURES_DIR`, к задаче не относятся).
 
 ---
 
