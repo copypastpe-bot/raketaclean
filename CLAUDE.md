@@ -52,20 +52,7 @@ Admin bot (`raketa-admin-bot/`):
 
 `smm-autopost` (`~/Projects/smm-autopost`) — third project, created 2026-08-29: auto-posting
 of media from cleaning jobs to social networks. Different server (Contabo), no shared data
-with these bots. Context: `agent1/project_ai_context/smm-autopost/`.
-
-## Local Context
-
-This project uses `context_mode: local` in `/Users/evgenijpastusenko/Projects/agent1/registry.yaml`.
-Agent memory lives inside this repository, one state and one log for both bots:
-
-- State: `./AGENT_STATE.md`
-- Log: `./SESSION_LOG.md`
-- Archive: `./SESSION_LOG_archive.md`
-
-Do not create or update copies of these files under
-`/Users/evgenijpastusenko/Projects/agent1/project_ai_context/` — for this project
-the local files are the registered ones.
+with these bots. Context: in its own repository (since 2026-09-29).
 
 ## Key Sources
 
@@ -104,14 +91,6 @@ on schema `public` (since 2026-08-26).
 
 ## Working Rules
 
-- Project context state lives in `./AGENT_STATE.md` inside this repository.
-- Project session log lives in `./SESSION_LOG.md` inside this repository.
-- If required facts are missing, ask the user directly.
-- Use detective mode only when the user explicitly asks to find a solution or process.
-- Prefer real code and config over documentation when facts conflict.
-- Keep changes aligned with the current project direction in AGENT_STATE.md.
-- Record uncertainty explicitly instead of guessing.
-
 - Treat `bot.py` as the main runtime source unless a refactor clearly changes the entrypoint.
 - Keep notification behavior consistent across `notifications/` code and `docs/notification_rules.json`.
 - Check migration impact before changing order, bonus, or payroll-related data flows.
@@ -119,22 +98,6 @@ on schema `public` (since 2026-08-26).
 - This is an old repository: verify whether a directory is still live before editing it.
 
 ## Project Rules (2026-09-10)
-
-Common rules for python projects (Rules 4.1):
-
-- At 300k tokens of memory the coordinator or the executor runs `/compact` stating what to keep, or closes the session by the closing rules.
-- Tests during work are targeted: only the affected file or a selection (`pytest tests/x.py -q --tb=short`), output through `tail`. A full run once before commit and once before deploy. TDD stays: this project has a standard `pytest`.
-- `ssh` output is trimmed to the useful part. Long or repeated work on the server still goes into a script run once, but step-by-step diagnosis from the main session is allowed (owner decision 2026-09-21, see «Server work» below).
-- Files longer than 500 lines are read in parts; the function map lives next to the file (owner decision 2026-09-10).
-- `.claude/settings.json` of this project holds the permissions its own work needs: `pytest`, `git status/diff/log`, file reads (`cat`, `sed -n`, `grep`, `rg`), `python -m`, project scripts. `ssh` to the bots' server is allowed (see «Server work»); `scp` and `rsync` stay a question for the owner.
-- **Switches live apart from secrets** (owner decision 2026-09-21, applies to every
-  service from now on): the `.env` with tokens and passwords is the owner's, while
-  on/off flags go into a separate non-secret file next to it (`switches.env`), owned
-  by `admin` and editable without sudo. systemd reads both, switches last, so the
-  switch file wins. This is what lets the agent run a staged rollout without ever
-  touching a token.
-- Subagent worktrees are removed after merge (`git worktree prune` plus branch deletion). No leftovers between sessions.
-- Images and screenshots do not go into working-session memory, unless the task is about the interface and the owner chose to show the screen.
 
 This project (Rules 4.2):
 
@@ -169,15 +132,15 @@ host, so:
 - **Migrations, permission changes, deletions and anything else hard to undo** are
   done only on an explicit go-ahead, and the plan is stated first.
 - Output is still trimmed to the useful part; repeated work becomes a script.
+- Step-by-step diagnosis on this server from the main session is allowed (owner decision
+  2026-09-21); long or repeated work still goes into a script run once. `ssh` to the bots'
+  server is allowed; `scp` and `rsync` stay a question for the owner.
+- Switches: on/off flags live in `switches.env` next to `.env`, owned by `admin` and
+  editable without sudo; systemd reads both, switches last, so the switch file wins.
 
 ## Deploy Rules
 
-- Deploy only from committed and pushed state.
 - If the task affects prod runtime, verify the relevant runbook in `project.md`, `scripts/`, or other project docs before deployment.
-- If no trusted deploy sequence is documented for the task, stop and document that gap instead of guessing.
-- Assume the path is `local -> git -> VPS` unless project docs say otherwise.
-- Do not search for passwords, invent credentials, or guess how to get onto the server.
-- If SSH works but `sudo` or another privileged step is unavailable, stop and ask the user.
 
 Two services, two runbooks — they are not interchangeable:
 
@@ -186,16 +149,3 @@ Two services, two runbooks — they are not interchangeable:
 - Admin bot: `raketa-admin-bot/docs/deploy.md` §9. Two steps: `rsync` from
   `~/Projects/raketaclean/raketa-admin-bot/` to `/home/admin/raketa-admin-bot/`, then
   `sudo raketa-admin-bot-update`. A bare `update` without the `rsync` brings up the old version.
-
-## End Of Session Requirements
-
-Before ending the session:
-1. run `git status --short`;
-2. commit completed work in one or more small logical commits;
-3. rewrite `./AGENT_STATE.md` to reflect current state;
-4. add one new entry at the top of `./SESSION_LOG.md`;
-5. apply the context-file rules from the global `~/.claude/CLAUDE.md` to both files.
-
-## Current Focus
-
-Prepare safe future work on Google Calendar integration while preserving the currently stable production flows.
