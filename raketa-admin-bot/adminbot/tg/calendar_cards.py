@@ -225,15 +225,17 @@ def contact_mismatch_card(link: Any, *, dry_run: bool = False,
     Телефон записи — целиком (решение владельца, тот же приём, что у
     `_client_line`): бот личный, владельцу нужно позвонить клиенту самому,
     не открывая CRM. `link.contact_mismatch` — уже готовый текст расхождения
-    (обе стороны, телефоны замаскированы) — просто печатаем его следующей строкой.
+    (обе стороны, номера целиком с 30.09) — просто печатаем его следующей строкой.
     """
     title = (link.event_data or {}).get("summary") or "без названия"
     when = f"{link.order_date:%d.%m}" if link.order_date else "дата не указана"
     lines = [f"👤 Запись «{title}» на {when}: телефон/имя не сходятся с контактом сделки."]
-    if link.phone10:
-        lines.append(for_owner(link.phone10))
+    # Строка сравнения несёт оба номера целиком (30.09) — отдельная строка с номером
+    # записи повторяла бы его; она остаётся только запасной, если сравнения нет.
     if link.contact_mismatch:
         lines.append(link.contact_mismatch)
+    elif link.phone10:
+        lines.append(for_owner(link.phone10))
     lead_id = link.real_lead_id or link.primary_lead_id
     url = deal_url(base_url, lead_id) if base_url else ""
     if url:

@@ -103,6 +103,29 @@ def test_phone_not_in_contact_is_a_mismatch():
     assert contact_resolved("Наталья", "9601861933", contact) is False
 
 
+def test_mismatch_text_shows_both_phones_in_full():
+    """Сообщения владельцу — с полным номером (решение 2026-08-26); 30.09 — и в строке
+    сравнения: оба номера целиком, чтобы сравнить глазами и позвонить по любому."""
+    contact = contact_with_phone(1, "Наталья", "9004445566")
+    text = contact_mismatch_text("Наталья", "9601861933", contact)
+    assert "+79601861933" in text and "+79004445566" in text
+
+
+def test_mismatch_card_shows_record_phone_once():
+    from types import SimpleNamespace
+    from adminbot.tg.calendar_cards import contact_mismatch_card
+    contact = contact_with_phone(1, "Наталья", "9004445566")
+    link = SimpleNamespace(
+        event_data={"summary": "Диван Наталья"}, order_date=date(2026, 9, 30),
+        phone10="9601861933", contact_mismatch=contact_mismatch_text("Наталья", "9601861933", contact),
+        real_lead_id=None, primary_lead_id=None, event_id="ev1")
+
+    text, _ = contact_mismatch_card(link, reminder_no=1)
+
+    assert text.count("+79601861933") == 1
+    assert "+79004445566" in text
+
+
 def test_no_record_name_is_not_checked():
     contact = contact_with_phone(1, "Ирина", "9004445566")
     assert contact_mismatch_text(None, "9601861933", contact) is None

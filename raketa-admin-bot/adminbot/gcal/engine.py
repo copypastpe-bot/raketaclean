@@ -38,7 +38,7 @@ from adminbot.gcal.event import EventKind, ParsedEvent
 from adminbot.gcal.matcher import match_event
 from adminbot.gcal.store import CalendarStore
 from adminbot.models import CalendarLink
-from adminbot.phone import mask, normalize_phone
+from adminbot.phone import for_owner, mask, normalize_phone
 from adminbot.sync.matcher import LeadInfo
 from adminbot.sync.waiting import waited_since
 
@@ -1085,8 +1085,10 @@ def contact_mismatch_text(record_name: Optional[str], record_phone10: Optional[s
 
     contact_name = (contact.get("name") or "").strip() if contact else ""
     phones = contact_phones(contact)
-    record_phone_text = mask(record_phone10) if record_phone10 else "телефон не распознан"
-    contact_phone_text = mask(phones[0]) if phones else "телефон не задан"
+    # Текст идёт только владельцу (карточка расхождения) — номера целиком, как во
+    # всех сообщениях ему (решение 2026-08-26; для этой строки — 30.09). В журнал не пишется.
+    record_phone_text = for_owner(record_phone10) if record_phone10 else "телефон не распознан"
+    contact_phone_text = for_owner(phones[0]) if phones else "телефон не задан"
     return (f"В записи: {(record_name or '').strip()}, {record_phone_text}. "
             f"В CRM: {contact_name or 'имя не задано'}, {contact_phone_text}.")
 
