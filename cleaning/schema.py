@@ -1,4 +1,5 @@
-"""Idempotent bootstrap of cleaning tables (mirrors 0006_cleaning.sql, 0010_cleaning_orders_comment.sql)."""
+"""Idempotent bootstrap of cleaning tables (mirrors 0006_cleaning.sql, 0010_cleaning_orders_comment.sql,
+0016_cleaning_orders_rating.sql)."""
 
 from __future__ import annotations
 
@@ -35,6 +36,16 @@ async def ensure_cleaning_schema(conn: asyncpg.Connection) -> None:
             created_at     timestamptz NOT NULL DEFAULT NOW(),
             deleted_at     timestamptz
         );
+        """
+    )
+    # Оценка по уборкам — как у orders (0016, ТЗ 2026-09-30 «оценка по уборкам»).
+    await conn.execute(
+        """
+        ALTER TABLE cleaning_orders
+        ADD COLUMN IF NOT EXISTS rating_score smallint,
+        ADD COLUMN IF NOT EXISTS rating_comment text,
+        ADD COLUMN IF NOT EXISTS rating_requested_at timestamptz,
+        ADD COLUMN IF NOT EXISTS rating_replied_at timestamptz;
         """
     )
     await conn.execute(

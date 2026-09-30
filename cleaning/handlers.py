@@ -260,6 +260,19 @@ async def _enqueue_cleaning_completed_notifications(
         client_id=client_id,
         payload={"order_id": order_id},
     )
+    # Отметка «попросили оценить» — зеркало химчистки
+    # (bot.py _enqueue_order_completed_notification, ТЗ 2026-09-30).
+    await conn.execute(
+        """
+        UPDATE cleaning_orders
+        SET rating_requested_at = NOW(),
+            rating_replied_at = NULL,
+            rating_score = NULL,
+            rating_comment = NULL
+        WHERE id = $1
+        """,
+        order_id,
+    )
 
 
 # ---------- /cleaning_order ----------
