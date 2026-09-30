@@ -127,6 +127,27 @@ async def test_realization_deal_chosen_by_owner_is_filled_not_moved(amo):
     assert link.real_lead_id == 41400001
 
 
+async def test_outgoing_call_contact_name_is_replaced(amo):
+    """«Исходящий +7…» — имя от телефонии, робот ставит имя из записи.
+
+    Живой случай 2026-10-01: слова «Исходящий» не было в списке автоматических
+    имён, и контакт остался с подписью телефонии.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 _embedded={"contacts": [{"id": 555}]})
+    amo.contacts.append({"id": 555,
+                         "name": "Исходящий +79991414561 (79991414561 - Основной номер)"})
+    store = MemoryCalendarStore(now=lambda: NOW)
+    order = an_order()
+    await store.create(order.event_id, kind=order.kind.value, phone10=order.phone10)
+    await store.update(order.event_id, status="new", path="A", real_lead_id=41400001,
+                       event_data=order.to_dict())
+
+    await build(amo, store=store).process(order)
+
+    assert amo.calls_of("update_contact") == [(555, "Юлия")]
+
+
 async def test_filled_fields_are_never_overwritten(amo):
     """Заполненные поля робот не трогает. Кроме адреса и комментария.
 
