@@ -101,3 +101,27 @@
 2. Тест на ограничение CHECK статуса в миграции 019 (`adminbot.feedback_state.status`): вставка
    недопустимого статуса падает. Образец — существующие тесты миграций админ-бота с `TEST_DB_DSN`
    (найти по `migrations/019` или `feedback_state` в `raketa-admin-bot/tests/`).
+
+Выполнено: 2026-09-30, 5f44ea3 (п.1), 879a8f2 (п.2).
+
+Примечания по пунктам:
+1. `raketa-admin-bot/deploy/update.sh:396` — печать по умолчанию (`WIRE_PAYMENT_DRY_RUN`
+   не задан) приведена к умолчанию `config.py` (`wire_payment_dry_run=True` = репетиция):
+   условие сменено с `[ = 1 ] && репетиция || БОЕВОЙ` на `[ = 0 ] && БОЕВОЙ || репетиция`,
+   как у `PROMO_CALLBACK_DRY_RUN`/`FEEDBACK_TASKS_DRY_RUN`. Найдено такое же расхождение
+   (по умолчанию печатает «БОЕВОЙ», хотя в `config.py` умолчание — репетиция, `True`)
+   ещё в 6 строках, не правились — только перечислены:
+   - `update.sh:382` — `AMO_SYNC_DRY_RUN` («режим:»);
+   - `update.sh:386` — `CARPETS_DRY_RUN` («ковры:»);
+   - `update.sh:389` — `CLEANING_SYNC_DRY_RUN` («уборки:»);
+   - `update.sh:393` — `ORDER_DELETIONS_DRY_RUN` («удаления:»);
+   - `update.sh:405` — `GCAL_DRY_RUN` («календарь:»);
+   - `update.sh:409` — `AUTOCALL_DRY_RUN` («автозвонок:»).
+   Строки `ENABLED`/`выключен(а)` сверены отдельно — их умолчание (выключено) совпадает
+   с `config.py` (`False`), расхождений там нет.
+2. `raketa-admin-bot/tests/test_feedback_store.py`: добавлен
+   `test_store_rejects_unknown_status` по образцу
+   `tests/test_promo_callback_store.py:test_store_rejects_unknown_status` — вставка
+   статуса `"in_progress"` (не входит в список CHECK миграции 019) через
+   `PgFeedbackStore.update` падает `asyncpg.CheckViolationError`. Прогон:
+   `tests/test_feedback_store.py` — 6 passed (было 5, добавлен один).
