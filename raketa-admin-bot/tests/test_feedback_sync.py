@@ -14,6 +14,8 @@ from typing import Any, Optional
 from adminbot.amo import ids
 from adminbot.amo.client import Intent
 from adminbot.feedback.models import (
+    KIND_CLEANING,
+    KIND_ORDER,
     MODE_LIVE,
     MODE_REHEARSAL,
     OPEN_STATUSES,
@@ -43,10 +45,10 @@ NOW = datetime(2026, 9, 4, 10, 0, tzinfo=timezone.utc)                # чуть
 
 class MemorySource:
     def __init__(self, *orders: RatedOrder) -> None:
-        self.rows = {order.order_id: order for order in orders}
+        self.rows = {(order.kind, order.order_id): order for order in orders}
 
     def add(self, order: RatedOrder) -> None:
-        self.rows[order.order_id] = order
+        self.rows[(order.kind, order.order_id)] = order
 
     async def rated_orders(self) -> list[RatedOrder]:
         return list(self.rows.values())
@@ -55,7 +57,7 @@ class MemorySource:
 class MemoryStore:
     def __init__(self) -> None:
         self.started: dict[str, datetime] = {}
-        self.rows: dict[tuple[int, str], FeedbackState] = {}
+        self.rows: dict[tuple[str, int, str], FeedbackState] = {}
 
     async def started_at(self, mode: str) -> Optional[datetime]:
         return self.started.get(mode)
@@ -63,21 +65,22 @@ class MemoryStore:
     async def save_started_at(self, mode: str, when: datetime) -> None:
         self.started.setdefault(mode, when)
 
-    async def states(self, mode: str) -> dict[int, FeedbackState]:
-        return {order_id: state for (order_id, state_mode), state in self.rows.items()
-               if state_mode == mode}
+    async def states(self, mode: str) -> dict[tuple[str, int], FeedbackState]:
+        return {(kind, order_id): state
+                for (kind, order_id, state_mode), state in self.rows.items()
+                if state_mode == mode}
 
-    async def register(self, mode: str, order_ids) -> None:
-        for order_id in order_ids:
-            self.rows.setdefault((order_id, mode),
-                                 FeedbackState(order_id=order_id, mode=mode))
+    async def register(self, mode: str, keys) -> None:
+        for kind, order_id in keys:
+            self.rows.setdefault((kind, order_id, mode),
+                                 FeedbackState(order_id=order_id, mode=mode, kind=kind))
 
-    async def update(self, order_id: int, mode: str, **fields: Any) -> None:
-        key = (order_id, mode)
+    async def update(self, kind: str, order_id: int, mode: str, **fields: Any) -> None:
+        key = (kind, order_id, mode)
         self.rows[key] = replace(self.rows[key], **fields)
 
-    def state(self, order_id: int, mode: str = MODE_LIVE) -> FeedbackState:
-        return self.rows[(order_id, mode)]
+    def state(self, order_id: int, mode: str = MODE_LIVE, kind: str = KIND_ORDER) -> FeedbackState:
+        return self.rows[(kind, order_id, mode)]
 
 
 class Letters:
@@ -103,9 +106,10 @@ class Clock:
 
 
 def _order(order_id: int, *, lead_id: Optional[int] = None, score: int = 5,
-          comment: Optional[str] = None, replied_at: datetime = NOW) -> RatedOrder:
+          comment: Optional[str] = None, replied_at: datetime = NOW,
+          kind: str = KIND_ORDER) -> RatedOrder:
     return RatedOrder(order_id=order_id, lead_id=lead_id or (80000 + order_id), score=score,
-                      comment=comment, replied_at=replied_at)
+                      comment=comment, replied_at=replied_at, kind=kind)
 
 
 def _sync(source, store, amo, letters, *, dry_run: bool = False,
@@ -457,6 +461,30 @@ async def test_rehearsal_and_live_have_separate_queues():
     assert store.state(616, MODE_REHEARSAL).status == STATUS_DRY_RUN   # репетиция не изменилась
 
 
+# --- заказ и уборка с одним номером (миграция 020) ---
+
+async def test_order_and_cleaning_with_same_number_have_separate_states():
+    """Заказ №12 доведён до конца — уборка №12 всё равно своя работа, не «уже сделано»."""
+    source, store, letters = MemorySource(), MemoryStore(), Letters()
+    amo = FakeAmo()
+    order_lead, cleaning_lead = 43000, 43001
+    amo.add_task(order_lead, task_id=21, task_type_id=ids.TASK_TYPE_FEEDBACK)
+    amo.add_task(cleaning_lead, task_id=22, task_type_id=ids.TASK_TYPE_FEEDBACK)
+    sync = await _armed(source, store, amo, letters)
+
+    source.add(_order(12, lead_id=order_lead, score=5, kind=KIND_ORDER))
+    assert await sync.tick() == 1
+    assert store.state(12, kind=KIND_ORDER).status == STATUS_DONE
+
+    source.add(_order(12, lead_id=cleaning_lead, score=5, kind=KIND_CLEANING))
+    assert await sync.tick() == 1
+
+    assert amo.calls_of("complete_task") == [21, 22]
+    cleaning = store.state(12, kind=KIND_CLEANING)
+    assert (cleaning.kind, cleaning.status) == (KIND_CLEANING, STATUS_DONE)
+    assert store.state(12, kind=KIND_ORDER).status == STATUS_DONE
+
+
 # --- лимит за проход ---
 
 async def test_batch_limit_is_20_orders_oldest_first():
@@ -473,7 +501,7 @@ async def test_batch_limit_is_20_orders_oldest_first():
                           replied_at=NOW - timedelta(days=25 - i)))   # старые первыми
 
     assert await sync.tick() == 20
-    registered = {order_id for (order_id, mode) in store.rows if mode == MODE_LIVE}
+    registered = {order_id for (_kind, order_id, mode) in store.rows if mode == MODE_LIVE}
     assert len(registered) == 25                                     # все запомнены
     closed_task_ids = sorted(amo.calls_of("complete_task"))
     assert closed_task_ids == list(range(1000, 1020))                 # только 20 старейших

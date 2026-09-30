@@ -4,9 +4,11 @@
 клиента (`public.orders`, `bot_pool`, только чтение — хард-правило проекта).
 Своё состояние — `adminbot.feedback_state` и `adminbot.feedback_cursor`
 (миграция 019), у каждого режима свои строки, тем же приёмом, что
-`promo_callback/store.py`.
+`promo_callback/store.py`. Строка состояния — по ключу `(kind, order_id)`
+в пределах режима (миграция 020): заказ №12 и уборка №12 — разные строки.
 
-ТЗ docs/plans/2026-09-28-feedback-tasks.md, задача 2.
+ТЗ docs/plans/2026-09-28-feedback-tasks.md, задача 2;
+ТЗ docs/plans/2026-09-30-cleaning-ratings.md, задача 3.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from typing import Any, Optional, Sequence
 
 import asyncpg
 
-from adminbot.feedback.models import FeedbackState, RatedOrder
+from adminbot.feedback.models import FeedbackKey, FeedbackState, RatedOrder
 
 _UPDATABLE_FIELDS = frozenset({"status", "contact_task_id", "note_added", "attempts", "last_error"})
 
@@ -24,7 +26,8 @@ _UPDATABLE_FIELDS = frozenset({"status", "contact_task_id", "note_added", "attem
 def _state_from_row(row: asyncpg.Record) -> FeedbackState:
     return FeedbackState(order_id=row["order_id"], mode=row["mode"], status=row["status"],
                          contact_task_id=row["contact_task_id"], note_added=row["note_added"],
-                         attempts=row["attempts"], last_error=row["last_error"])
+                         attempts=row["attempts"], last_error=row["last_error"],
+                         kind=row["kind"])
 
 
 class PgFeedbackSource:
@@ -78,38 +81,40 @@ class PgFeedbackStore:
                 mode, when,
             )
 
-    async def states(self, mode: str) -> dict[int, FeedbackState]:
+    async def states(self, mode: str) -> dict[FeedbackKey, FeedbackState]:
+        """Строки режима по ключу `(kind, order_id)`."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT order_id, mode, status, contact_task_id, note_added, attempts, "
+                "SELECT kind, order_id, mode, status, contact_task_id, note_added, attempts, "
                 "last_error FROM adminbot.feedback_state WHERE mode = $1",
                 mode,
             )
-        return {row["order_id"]: _state_from_row(row) for row in rows}
+        return {(row["kind"], row["order_id"]): _state_from_row(row) for row in rows}
 
-    async def register(self, mode: str, order_ids: Sequence[int]) -> None:
-        """Завести строки состояния; уже заведённые не трогаем."""
-        if not order_ids:
+    async def register(self, mode: str, keys: Sequence[FeedbackKey]) -> None:
+        """Завести строки состояния по ключам `(kind, order_id)`; уже заведённые не трогаем."""
+        if not keys:
             return
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO adminbot.feedback_state (order_id, mode) "
-                "SELECT unnest($1::bigint[]), $2 "
-                "ON CONFLICT (order_id, mode) DO NOTHING",
-                list(order_ids), mode,
+                "INSERT INTO adminbot.feedback_state (kind, order_id, mode) "
+                "SELECT kind, order_id, $3 FROM unnest($1::text[], $2::bigint[]) "
+                "AS new_rows(kind, order_id) "
+                "ON CONFLICT (kind, order_id, mode) DO NOTHING",
+                [kind for kind, _ in keys], [order_id for _, order_id in keys], mode,
             )
 
-    async def update(self, order_id: int, mode: str, **fields: Any) -> None:
+    async def update(self, kind: str, order_id: int, mode: str, **fields: Any) -> None:
         unknown = set(fields) - _UPDATABLE_FIELDS
         if unknown:
             raise ValueError(f"Недопустимые поля состояния отзыва: {sorted(unknown)}")
         if not fields:
             return
         names = list(fields)
-        assignments = ", ".join(f"{name} = ${index}" for index, name in enumerate(names, start=3))
+        assignments = ", ".join(f"{name} = ${index}" for index, name in enumerate(names, start=4))
         async with self.pool.acquire() as conn:
             await conn.execute(
                 f"UPDATE adminbot.feedback_state SET {assignments}, updated_at = now() "
-                "WHERE order_id = $1 AND mode = $2",
-                order_id, mode, *(fields[name] for name in names),
+                "WHERE kind = $1 AND order_id = $2 AND mode = $3",
+                kind, order_id, mode, *(fields[name] for name in names),
             )

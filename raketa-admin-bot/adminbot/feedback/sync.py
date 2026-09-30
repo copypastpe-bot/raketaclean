@@ -19,7 +19,8 @@
 
 Устройство — как у `promo_callback/sync.py`: источник, цикл, отчёт, своё
 состояние в схеме `adminbot` (миграция 019), у репетиции и у боя свои строки
-и своя закладка `started_at`. В отличие от промо-отклика, «Связаться» может
+и своя закладка `started_at`. Строка состояния — по ключу `(kind, order_id)`
+(миграция 020): заказ №12 и уборка №12 — разные работы. В отличие от промо-отклика, «Связаться» может
 понадобиться раньше, чем «Повторный заказ» вообще появится в CRM, поэтому
 статусов у заказа не два, а несколько (см. `feedback/models.py`).
 
@@ -48,6 +49,7 @@ from adminbot.feedback.models import (
     STATUS_DRY_RUN,
     STATUS_FAILED,
     STATUS_SKIPPED,
+    FeedbackKey,
     FeedbackState,
     RatedOrder,
 )
@@ -87,11 +89,11 @@ class FeedbackStore(Protocol):
 
     async def save_started_at(self, mode: str, when: datetime) -> None: ...
 
-    async def states(self, mode: str) -> dict[int, FeedbackState]: ...
+    async def states(self, mode: str) -> dict[FeedbackKey, FeedbackState]: ...
 
-    async def register(self, mode: str, order_ids: Sequence[int]) -> None: ...
+    async def register(self, mode: str, keys: Sequence[FeedbackKey]) -> None: ...
 
-    async def update(self, order_id: int, mode: str, **fields: Any) -> None: ...
+    async def update(self, kind: str, order_id: int, mode: str, **fields: Any) -> None: ...
 
 
 def _default_now() -> datetime:
@@ -144,19 +146,19 @@ class FeedbackSync:
 
         candidates = [
             order for order in orders
-            if order.order_id not in states or states[order.order_id].status in OPEN_STATUSES
+            if order.key not in states or states[order.key].status in OPEN_STATUSES
         ]
-        new_ids = [order.order_id for order in candidates if order.order_id not in states]
-        if new_ids:
-            await self.store.register(self.mode, new_ids)
+        new_keys = [order.key for order in candidates if order.key not in states]
+        if new_keys:
+            await self.store.register(self.mode, new_keys)
 
         candidates.sort(key=lambda order: order.replied_at)
         batch = candidates[:BATCH_LIMIT]
 
         done = 0
         for order in batch:
-            state = states.get(order.order_id) or FeedbackState(order_id=order.order_id,
-                                                                 mode=self.mode)
+            state = states.get(order.key) or FeedbackState(order_id=order.order_id,
+                                                            mode=self.mode, kind=order.kind)
             status = await self._handle(order, state, started, moment)
             if status in _FINAL_STATUSES:
                 done += 1
@@ -282,7 +284,7 @@ class FeedbackSync:
         return STATUS_DRY_RUN
 
     async def _save(self, state: FeedbackState, **fields: Any) -> FeedbackState:
-        await self.store.update(state.order_id, state.mode, **fields)
+        await self.store.update(state.kind, state.order_id, state.mode, **fields)
         return replace(state, **fields)
 
     async def _reset_and_save(self, state: FeedbackState, **fields: Any) -> FeedbackState:
@@ -311,7 +313,7 @@ class FeedbackSync:
     async def _save_quietly(self, state: FeedbackState, **fields: Any) -> None:
         """Отметка сбоя сама не должна ронять проход: база бывает недоступна."""
         try:
-            await self.store.update(state.order_id, state.mode, **fields)
+            await self.store.update(state.kind, state.order_id, state.mode, **fields)
         except Exception:                                    # noqa: BLE001
             log.exception("Заказ №%s: не смог записать отметку о сбое", state.order_id)
 

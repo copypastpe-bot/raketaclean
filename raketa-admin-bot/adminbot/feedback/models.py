@@ -5,7 +5,12 @@
 `adminbot.amo_links` каждый проход, второе живёт в `adminbot.feedback_state`
 (миграция 019) и меняется только через `PgFeedbackStore.update`.
 
-ТЗ docs/plans/2026-09-28-feedback-tasks.md, задача 2.
+Вид работы (`kind`, миграция 020): химчистка (`public.orders`) и уборка
+(`public.cleaning_orders`) нумеруются независимо, поэтому заказ №12 и уборка
+№12 — разные работы. Ключ состояния — `(kind, order_id)` в пределах режима.
+
+ТЗ docs/plans/2026-09-28-feedback-tasks.md, задача 2;
+ТЗ docs/plans/2026-09-30-cleaning-ratings.md, задача 3.
 """
 
 from __future__ import annotations
@@ -16,6 +21,12 @@ from typing import Optional
 
 MODE_LIVE = "live"
 MODE_REHEARSAL = "rehearsal"
+
+KIND_ORDER = "order"          # химчистка: public.orders, связка adminbot.amo_links
+KIND_CLEANING = "cleaning"    # уборка: public.cleaning_orders, связка adminbot.cleaning_links
+
+# Ключ строки состояния в пределах режима: (вид работы, номер).
+FeedbackKey = tuple[str, int]
 
 STATUS_NEW = "new"                  # увидели, ещё не закончили (ждём задачу или повторяем после сбоя)
 STATUS_CONTACT_SET = "contact_set"  # 1–4: комментарий и «Связаться» есть, «Повторный заказ» ещё не закрыт
@@ -36,6 +47,11 @@ class RatedOrder:
     score: int                    # orders.rating_score
     comment: Optional[str]        # orders.rating_comment — сырой ответ клиента
     replied_at: datetime          # orders.rating_replied_at (aware)
+    kind: str = KIND_ORDER        # вид работы: KIND_ORDER | KIND_CLEANING
+
+    @property
+    def key(self) -> FeedbackKey:
+        return (self.kind, self.order_id)
 
 
 @dataclass(frozen=True)
@@ -49,3 +65,8 @@ class FeedbackState:
     note_added: bool = False                # комментарий записан
     attempts: int = 0
     last_error: Optional[str] = None
+    kind: str = KIND_ORDER                  # вид работы: KIND_ORDER | KIND_CLEANING
+
+    @property
+    def key(self) -> FeedbackKey:
+        return (self.kind, self.order_id)

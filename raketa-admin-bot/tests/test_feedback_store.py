@@ -15,9 +15,12 @@ import pytest
 
 from adminbot import db
 from adminbot.feedback.models import (
+    KIND_CLEANING,
+    KIND_ORDER,
     MODE_LIVE,
     MODE_REHEARSAL,
     STATUS_CONTACT_SET,
+    STATUS_DONE,
     STATUS_NEW,
     RatedOrder,
 )
@@ -29,6 +32,7 @@ pytestmark = pytest.mark.skipif(not TEST_DB_DSN, reason="TEST_DB_DSN не зад
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = sorted((ROOT / "migrations").glob("*.sql"))
 FEEDBACK_MIGRATION = ROOT / "migrations" / "019_feedback_tasks.sql"
+KIND_MIGRATION = ROOT / "migrations" / "020_feedback_kind.sql"
 
 REPLIED = datetime(2026, 9, 26, 10, 0, tzinfo=timezone.utc)
 
@@ -134,29 +138,46 @@ async def test_store_started_at_is_set_once_and_per_mode(pool):
 
 async def test_store_register_and_states_are_per_mode(pool):
     store = PgFeedbackStore(pool)
-    await store.register(MODE_LIVE, [601, 602, 603])
-    await store.update(601, MODE_LIVE, status=STATUS_CONTACT_SET, contact_task_id=777,
+    order_keys = [(KIND_ORDER, 601), (KIND_ORDER, 602), (KIND_ORDER, 603)]
+    await store.register(MODE_LIVE, order_keys)
+    await store.update(KIND_ORDER, 601, MODE_LIVE, status=STATUS_CONTACT_SET, contact_task_id=777,
                        note_added=True, attempts=1, last_error="сбой")
-    await store.register(MODE_LIVE, [601, 602, 603])            # повтор — уже заведённые не трогаем
-    await store.register(MODE_REHEARSAL, [602])
+    await store.register(MODE_LIVE, order_keys)                 # повтор — уже заведённые не трогаем
+    await store.register(MODE_REHEARSAL, [(KIND_ORDER, 602)])
 
     live_states = await store.states(MODE_LIVE)
-    assert set(live_states) == {601, 602, 603}
-    first = live_states[601]
+    assert set(live_states) == set(order_keys)
+    first = live_states[(KIND_ORDER, 601)]
     assert (first.status, first.contact_task_id, first.note_added,
            first.attempts, first.last_error) == (STATUS_CONTACT_SET, 777, True, 1, "сбой")
-    assert live_states[602].status == STATUS_NEW
+    assert live_states[(KIND_ORDER, 602)].status == STATUS_NEW
 
     rehearsal_states = await store.states(MODE_REHEARSAL)
-    assert set(rehearsal_states) == {602}                       # режимы не видят строк друг друга
+    assert set(rehearsal_states) == {(KIND_ORDER, 602)}         # режимы не видят строк друг друга
+
+
+async def test_store_order_and_cleaning_with_same_number_are_independent(pool):
+    """Заказ №12 и уборка №12 в одном режиме — две независимые строки состояния."""
+    store = PgFeedbackStore(pool)
+    await store.register(MODE_LIVE, [(KIND_ORDER, 12), (KIND_CLEANING, 12)])
+    await store.update(KIND_CLEANING, 12, MODE_LIVE, status=STATUS_DONE, contact_task_id=555,
+                       note_added=True)
+
+    states = await store.states(MODE_LIVE)
+    assert set(states) == {(KIND_ORDER, 12), (KIND_CLEANING, 12)}
+    order, cleaning = states[(KIND_ORDER, 12)], states[(KIND_CLEANING, 12)]
+    assert (order.kind, order.order_id, order.status, order.contact_task_id,
+            order.note_added) == (KIND_ORDER, 12, STATUS_NEW, None, False)
+    assert (cleaning.kind, cleaning.order_id, cleaning.status, cleaning.contact_task_id,
+            cleaning.note_added) == (KIND_CLEANING, 12, STATUS_DONE, 555, True)
 
 
 async def test_store_update_rejects_unknown_field(pool):
     store = PgFeedbackStore(pool)
-    await store.register(MODE_LIVE, [601])
+    await store.register(MODE_LIVE, [(KIND_ORDER, 601)])
 
     with pytest.raises(ValueError):
-        await store.update(601, MODE_LIVE, created_at=None)
+        await store.update(KIND_ORDER, 601, MODE_LIVE, created_at=None)
 
 
 async def test_store_rejects_unknown_status(pool):
@@ -165,13 +186,56 @@ async def test_store_rejects_unknown_status(pool):
     import asyncpg
 
     store = PgFeedbackStore(pool)
-    await store.register(MODE_LIVE, [601])
+    await store.register(MODE_LIVE, [(KIND_ORDER, 601)])
 
     with pytest.raises(asyncpg.CheckViolationError):
-        await store.update(601, MODE_LIVE, status="in_progress")
+        await store.update(KIND_ORDER, 601, MODE_LIVE, status="in_progress")
 
 
 async def test_migration_019_applies_twice_without_error(pool):
     """Фикстура уже применила миграции один раз (петлёй по всем файлам) — второй раз здесь."""
     async with pool.acquire() as conn:
         await conn.execute(FEEDBACK_MIGRATION.read_text())
+
+
+async def test_migration_020_twice_keeps_old_rows_as_order_and_rekeys(pool):
+    """Схема как до выката (миграции по 019 включительно), в ней строка состояния
+    химчистки; 020 дважды подряд (обёртка гоняет все миграции на каждом выкате) —
+    без ошибок, старая строка стала `kind = 'order'`, ключ `(kind, order_id, mode)`."""
+    import asyncpg
+
+    before = [migration for migration in MIGRATIONS if migration.name < KIND_MIGRATION.name]
+    async with pool.acquire() as conn:
+        await conn.execute("DROP SCHEMA IF EXISTS adminbot CASCADE")
+        for migration in before:
+            await conn.execute(migration.read_text())
+        await conn.execute(
+            "INSERT INTO adminbot.feedback_state (order_id, mode, status) "
+            "VALUES (12, 'live', 'done')")
+
+        await conn.execute(KIND_MIGRATION.read_text())
+        await conn.execute(KIND_MIGRATION.read_text())
+
+        assert await conn.fetchval(
+            "SELECT kind FROM adminbot.feedback_state WHERE order_id = 12") == KIND_ORDER
+        key = await conn.fetchval(
+            "SELECT array_agg(a.attname::text ORDER BY k.ord) "
+            "FROM pg_index i "
+            "CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
+            "WHERE i.indrelid = 'adminbot.feedback_state'::regclass AND i.indisprimary")
+        assert key == ["kind", "order_id", "mode"]
+        kind_checks = await conn.fetchval(
+            "SELECT count(*) FROM pg_constraint "
+            "WHERE conrelid = 'adminbot.feedback_state'::regclass AND contype = 'c' "
+            "AND pg_get_constraintdef(oid) LIKE '%kind%'")
+        assert kind_checks == 1                                   # повтор не завёл второе
+
+        # Уборка с тем же номером в том же режиме — своя строка, не конфликт.
+        await conn.execute(
+            "INSERT INTO adminbot.feedback_state (kind, order_id, mode) "
+            "VALUES ('cleaning', 12, 'live')")
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                "INSERT INTO adminbot.feedback_state (kind, order_id, mode) "
+                "VALUES ('carpet', 12, 'live')")
