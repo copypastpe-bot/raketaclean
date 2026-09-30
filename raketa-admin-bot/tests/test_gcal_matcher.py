@@ -8,6 +8,10 @@
 Второе отличие: у записи календаря нет ни суммы чека, ни мастера. Значит
 отсеять чужую сделку по цене и специалисту нельзя, и единственный надёжный
 признак — дата. Где дата не решает, робот спрашивает владельца.
+
+Третье (решение владельца 2026-09-30): запись календаря работает только с первой
+воронкой. Сделку второй воронки создаёт сейлзбот из лида записи, поэтому готовая
+сделка там — всегда чужой заказ, и робот её не видит вовсе.
 """
 
 from datetime import date
@@ -29,13 +33,34 @@ def primary(lead_id: int, status=ids.PRIM_STAGE_DIALOG, **kwargs) -> LeadInfo:
                     status_id=status, **kwargs)
 
 
-def test_open_realization_deal_is_taken():
-    """Сейлзбот уже завёл сделку — робот её дозаполняет, этап не двигает."""
+def test_open_realization_deal_is_never_taken():
+    """Готовая сделка второй воронки — чужой заказ, даже если дата совпала.
+
+    Решение владельца 2026-09-30: «создаём в календаре — создаём в первой
+    воронке, сейлзбот — во вторую». Свою сделку второй воронки запись получает
+    только от сейлзбота, по его примечанию.
+    """
     decision = match_event(order_date=ORDER_DAY,
                            candidates=[realization(1, order_date=ORDER_DAY)])
 
-    assert decision.kind == "use_realization"
-    assert decision.lead_id == 1
+    assert decision.kind == "create_new"
+
+
+def test_bulk_client_open_deal_waiting_for_payment_is_not_taken():
+    """Случай 30.09: у оптового клиента открыта сделка прошлого заказа.
+
+    Сделка на этапе «Заказ выполнен» ждала оплаты, заведена за две недели до
+    новой записи. Робот взял её под новый заказ и переписал дату, адрес и
+    комментарий, а при проведении туда же лёг чек нового заказа.
+    """
+    waiting_payment = realization(1, status=ids.REAL_STAGE_DONE,
+                                  order_date=date(2026, 8, 17),
+                                  created_date=date(2026, 8, 13))
+
+    decision = match_event(order_date=ORDER_DAY, candidates=[waiting_payment])
+
+    assert decision.kind == "create_new"
+    assert decision.forgotten == ()
 
 
 def test_primary_lead_starts_the_chain():
@@ -69,17 +94,17 @@ def test_date_picks_between_two_open_deals():
     """У клиента две работы подряд — каждой своя сделка, различает дата."""
     decision = match_event(
         order_date=ORDER_DAY,
-        candidates=[realization(1, order_date=date(2026, 8, 30)),
-                    realization(2, order_date=ORDER_DAY)])
+        candidates=[primary(1, order_date=date(2026, 8, 30)),
+                    primary(2, order_date=ORDER_DAY)])
 
-    assert decision.kind == "use_realization"
+    assert decision.kind == "use_primary"
     assert decision.lead_id == 2
 
 
 def test_two_deals_without_dates_are_a_question():
     """Дата ничего не говорит — спрашиваем владельца, а не гадаем."""
     decision = match_event(order_date=ORDER_DAY,
-                           candidates=[realization(1), realization(2)])
+                           candidates=[primary(1), primary(2)])
 
     assert decision.kind == "ask_owner"
     assert decision.options == (1, 2)
@@ -89,7 +114,7 @@ def test_deal_taken_by_another_calendar_event_is_skipped():
     """Одна сделка не может обслуживать две записи календаря."""
     decision = match_event(
         order_date=ORDER_DAY,
-        candidates=[realization(1, order_date=ORDER_DAY)],
+        candidates=[primary(1, order_date=ORDER_DAY)],
         taken_lead_ids={1})
 
     assert decision.kind == "create_new"
@@ -139,7 +164,7 @@ def test_forgotten_lead_does_not_stop_a_new_deal():
     В CRM таких 60 из 93 незакрытых — вопросы приходили бы постоянно.
     """
     decision = match_event(order_date=ORDER_DAY,
-                           candidates=[realization(9, created_date=date(2024, 9, 11))])
+                           candidates=[primary(9, created_date=date(2024, 9, 11))])
 
     assert decision.kind == "create_new"
     assert decision.forgotten == (9,)          # владельцу скажем, что хвост висит
@@ -154,7 +179,7 @@ def test_a_fresh_tail_outweighs_a_forgotten_one():
     decision = match_event(
         order_date=ORDER_DAY,
         candidates=[primary(2, created_date=date(2026, 6, 1)),
-                    realization(9, created_date=date(2024, 9, 11))])
+                    primary(9, created_date=date(2024, 9, 11))])
 
     assert decision.kind == "ask_owner_stale"
     assert decision.options == (2,)
@@ -189,14 +214,26 @@ def test_handled_lead_wins_over_unsorted():
     assert decision.duplicates == (1,)         # второму лиду робот оставит комментарий
 
 
-def test_realization_wins_over_primary():
-    """Сделка реализации уже создана сейлзботом — лид первичной вторичен."""
+def test_primary_lead_is_taken_even_when_a_realization_deal_exists():
+    """Лид первой воронки — свой, сделка второй — чужой заказ того же клиента."""
     decision = match_event(
         order_date=ORDER_DAY,
         candidates=[primary(1), realization(2, order_date=ORDER_DAY)])
 
-    assert decision.kind == "use_realization"
-    assert decision.lead_id == 2
+    assert decision.kind == "use_primary"
+    assert decision.lead_id == 1
+
+
+def test_stale_realization_deal_is_not_a_question():
+    """Старая открытая сделка второй воронки вопроса не рождает.
+
+    У оптового клиента открытых сделок всегда несколько: вопрос по каждой
+    приходил бы на каждый заказ.
+    """
+    decision = match_event(order_date=ORDER_DAY,
+                           candidates=[realization(2, created_date=date(2026, 6, 1))])
+
+    assert decision.kind == "create_new"
 
 
 def test_closed_deal_on_the_same_day_is_a_question():
@@ -206,8 +243,8 @@ def test_closed_deal_on_the_same_day_is_a_question():
     закрытые он считает прошлой работой клиента. Но закрытая ровно на дату
     записи — скорее тот же заказ, и решать это должен владелец.
     """
-    closed = realization(5, status=ids.STATUS_SUCCESS, order_date=ORDER_DAY,
-                         closed_date=ORDER_DAY)
+    closed = primary(5, status=ids.STATUS_SUCCESS, order_date=ORDER_DAY,
+                     closed_date=ORDER_DAY)
 
     decision = match_event(order_date=ORDER_DAY, candidates=[closed])
 
@@ -215,10 +252,20 @@ def test_closed_deal_on_the_same_day_is_a_question():
     assert decision.options == (5,)
 
 
+def test_closed_realization_deal_on_the_same_day_is_not_a_question():
+    """По второй воронке вопрос «провели руками?» не задаётся (решение 2026-09-30)."""
+    closed = realization(5, status=ids.STATUS_SUCCESS, order_date=ORDER_DAY,
+                         closed_date=ORDER_DAY)
+
+    decision = match_event(order_date=ORDER_DAY, candidates=[closed])
+
+    assert decision.kind == "create_new"
+
+
 def test_old_closed_deal_is_still_just_history():
     """Закрытая сделка с другой датой — прошлый заказ, вопрос задавать не о чем."""
-    closed = realization(5, status=ids.STATUS_SUCCESS, order_date=date(2026, 5, 10),
-                         closed_date=date(2026, 5, 12))
+    closed = primary(5, status=ids.STATUS_SUCCESS, order_date=date(2026, 5, 10),
+                     closed_date=date(2026, 5, 12))
 
     decision = match_event(order_date=ORDER_DAY, candidates=[closed])
 
@@ -229,9 +276,9 @@ def test_open_deal_wins_over_a_closed_one():
     """Есть открытая — работаем с ней, закрытая не мешает."""
     decision = match_event(
         order_date=ORDER_DAY,
-        candidates=[realization(5, status=ids.STATUS_SUCCESS, order_date=ORDER_DAY,
-                                closed_date=ORDER_DAY),
-                    realization(6, order_date=ORDER_DAY)])
+        candidates=[primary(5, status=ids.STATUS_SUCCESS, order_date=ORDER_DAY,
+                            closed_date=ORDER_DAY),
+                    primary(6, order_date=ORDER_DAY)])
 
-    assert decision.kind == "use_realization"
+    assert decision.kind == "use_primary"
     assert decision.lead_id == 6

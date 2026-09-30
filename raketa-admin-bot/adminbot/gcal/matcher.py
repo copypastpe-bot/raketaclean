@@ -15,6 +15,14 @@
    недели, и лид, заведённый месяц назад, — норма, а не забытый хвост. Для заказов
    из бота действует обратное правило (граница 14 дней), потому что там сделка
    заводится незадолго до выполнения.
+4. **Только первая воронка** (решение владельца 2026-09-30). Порядок компании:
+   запись в календаре → лид в первой воронке → сейлзбот создаёт сделку во второй.
+   Своя сделка второй воронки у новой записи появляется только от сейлзбота, и
+   движок находит её по примечанию сейлзбота. Готовая сделка второй воронки —
+   всегда чужой заказ того же клиента, поэтому матчер её не видит вовсе: ни
+   чтобы взять, ни чтобы спросить. Раньше робот брал открытую сделку второй
+   воронки первой очередью, и 30.09 записал новый заказ оптового клиента в
+   сделку прошлого, ждавшую оплаты.
 
 Принцип прежний: лучше спросить владельца, чем уверенно ошибиться.
 """
@@ -105,21 +113,13 @@ def match_event(*, order_date: date, candidates: Iterable[LeadInfo],
     один и тот же заказ, и общая сделка у них правильная.
     """
     taken = set(taken_lead_ids)
+    # Только первая воронка (п.4 в описании модуля): вторая — сейлзбота.
     mine = [lead for lead in candidates
-            if lead.pipeline_id not in ids.PIPELINES_IGNORED
+            if lead.pipeline_id == ids.PIPELINE_PRIMARY
             and lead.lead_id not in taken]
-    ours = [lead for lead in mine if lead.is_open]
+    primary = [lead for lead in mine if lead.is_open]
 
-    realization = [lead for lead in ours if lead.pipeline_id == ids.PIPELINE_REALIZATION]
-    primary = [lead for lead in ours if lead.pipeline_id == ids.PIPELINE_PRIMARY]
-
-    # 1. Сделка реализации уже есть (сейлзбот успел её создать) — работаем с ней.
-    timely_realization = [lead for lead in realization if _is_timely(order_date, lead)]
-    decision = _choose(order_date, timely_realization, "use_realization")
-    if decision is not None:
-        return decision
-
-    # 2. Лид первичной воронки: обработанные вперёд, «Неразобранное» — в последнюю
+    # 1. Лид первичной воронки: обработанные вперёд, «Неразобранное» — в последнюю
     #    очередь. Клиент мог сначала не дозвониться, а потом написать.
     timely_primary = [lead for lead in primary if _is_timely(order_date, lead)]
     handled = [lead for lead in timely_primary if not lead.is_unsorted]
@@ -135,11 +135,11 @@ def match_event(*, order_date: date, candidates: Iterable[LeadInfo],
         if decision is not None:
             return decision
 
-    # 3. Свежего нет, но висят старые хвосты. Те, что моложе полугода, ещё могут
+    # 2. Свежего нет, но висят старые хвосты. Те, что моложе полугода, ещё могут
     #    быть про этот заказ — решает владелец. Забытые (см. FORGOTTEN_LEAD_DAYS)
     #    работе не мешают: заводим новую сделку и упоминаем их в отчёте, чтобы
     #    владелец знал, что в CRM висит мусор (решение владельца 2026-09-02).
-    stale = [lead for lead in ours if not _is_timely(order_date, lead)]
+    stale = [lead for lead in primary if not _is_timely(order_date, lead)]
     forgotten = [lead for lead in stale if _is_forgotten(order_date, lead)]
     recent = [lead for lead in stale if lead not in forgotten]
     if recent:
@@ -150,7 +150,7 @@ def match_event(*, order_date: date, candidates: Iterable[LeadInfo],
         return Decision(kind="create_new",
                         forgotten=tuple(sorted(lead.lead_id for lead in forgotten)))
 
-    # 4. Открытого ничего нет. Но если у клиента есть ЗАКРЫТАЯ сделка ровно на
+    # 3. Открытого ничего нет. Но если у клиента есть ЗАКРЫТЫЙ лид ровно на
     #    дату записи — владелец мог провести этот заказ сам, до того как записал
     #    его в календарь. Молча заводить вторую нельзя (решение владельца 2026-08-27).
     same_day_closed = [lead for lead in mine
@@ -158,5 +158,5 @@ def match_event(*, order_date: date, candidates: Iterable[LeadInfo],
     if same_day_closed:
         return _ask(same_day_closed, kind="ask_owner_closed")
 
-    # 5. Ничего нет — заводим цепочку с нуля.
+    # 4. Ничего нет — заводим цепочку с нуля.
     return Decision(kind="create_new")

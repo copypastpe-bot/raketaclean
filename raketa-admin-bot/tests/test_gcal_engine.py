@@ -78,12 +78,42 @@ def amo():
     return FakeAmo()
 
 
-async def test_existing_realization_deal_is_filled_not_moved(amo):
-    """Сделка уже есть — робот дозаполняет её и оставляет на месте (решение 13)."""
-    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
-    engine = build(amo)
+async def test_existing_realization_deal_is_not_taken(amo):
+    """Готовая сделка второй воронки — чужой заказ: робот заводит свою цепочку.
+
+    Живой случай 2026-09-30: у оптового клиента была открыта сделка прошлого
+    заказа на этапе «Заказ выполнен» (ждала оплаты). Робот взял её под новую
+    запись и переписал дату, адрес и комментарий. Решение владельца: запись
+    календаря — всегда первая воронка, вторую создаёт сейлзбот.
+    """
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_DONE)
+    engine = CalendarEngine(amo=amo, store=MemoryCalendarStore(now=lambda: NOW),
+                            dry_run=False, child_by_note=True, now=lambda: NOW)
 
     link = await engine.process(an_order())
+
+    created = amo.calls_of("create_lead")
+    assert len(created) == 1
+    assert created[0]["pipeline_id"] == ids.PIPELINE_PRIMARY
+    assert [lead_id for lead_id, _ in amo.calls_of("update_lead")] == []
+    assert all(call[0] != 41400001 for call in amo.calls_of("move_lead"))
+    assert link.path == "C"
+    assert link.real_lead_id is None
+    assert link.status == "waiting_salesbot"
+
+
+async def test_realization_deal_chosen_by_owner_is_filled_not_moved(amo):
+    """Сделку второй воронки выбрал владелец — робот дозаполняет её и оставляет
+    на месте (решение 13)."""
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    order = an_order()
+    await store.create(order.event_id, kind=order.kind.value, phone10=order.phone10)
+    await store.update(order.event_id, status="new", path="A", real_lead_id=41400001,
+                       event_data=order.to_dict())
+    engine = build(amo, store=store)
+
+    link = await engine.process(order)
 
     fields = sent_fields(amo)
     assert only_value(fields[ids.FIELD_ADDRESS]) == "Панина д 7к2, кв 132"
@@ -237,10 +267,10 @@ async def test_ask_owner_options_carry_the_deal_address(amo):
     """Задача 7 (ТЗ 2026-09-22): карточка-вопрос различает варианты адресом —
     `LeadInfo.address` должен долетать до `question["options"]`.
     """
-    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+    amo.add_lead(41400001, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_DIALOG,
                 custom_fields_values=[
                     {"field_id": ids.FIELD_ADDRESS, "values": [{"value": "ул. Мира, 10"}]}])
-    amo.add_lead(41400002, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.add_lead(41400002, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_DIALOG)
     store = MemoryCalendarStore(now=lambda: NOW)
     engine = build(amo, store=store)
 
@@ -857,13 +887,14 @@ async def test_comment_from_the_calendar_wins(amo):
 
 
 async def test_forgotten_deal_does_not_stop_the_work_but_is_reported(amo):
-    """Висит незакрытая сделка двухлетней давности — заводим новую и говорим о ней.
+    """Висит незакрытый лид двухлетней давности — заводим новый и говорим о нём.
 
     Живой случай 2026-09-02: сделка от 11.09.2024 на этапе «мастер назначен»
     заставила робота спросить владельца по записи на 06.09.2026. Владельцу такие
     вопросы не нужны, но и молчать о мусоре в CRM нельзя — он копится.
+    С 2026-09-30 вторую воронку запись не смотрит вовсе, хвосты считаются по первой.
     """
-    amo.add_lead(29174771, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CONFIRMED,
+    amo.add_lead(29174771, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_DIALOG,
                  created_at=int(datetime(2024, 9, 11, tzinfo=MSK).timestamp()))
     store = MemoryCalendarStore(now=lambda: NOW)
     engine = build(amo, store=store)
@@ -958,10 +989,13 @@ async def test_edited_record_updates_the_deal(amo):
     они должны быть верны и после правки, а не только в момент заведения.
     День работы при этом не менялся — дату в амо второй раз не отправляем.
     """
-    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
+    amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED,
+                 custom_fields_values=[
+                     {"field_id": ids.FIELD_ORDER_DATETIME,
+                      "values": [{"value": stamp_of(an_order().start_at)}]}])
     store = MemoryCalendarStore(now=lambda: NOW)
+    await _done_link(store, an_order(), real_lead_id=41400001)
     engine = build(amo, store=store)
-    await engine.process(an_order())
     calls_before = len(amo.calls_of("update_lead"))
 
     changed = await engine.process(an_order(
