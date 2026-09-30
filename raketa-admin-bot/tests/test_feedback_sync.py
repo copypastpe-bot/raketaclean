@@ -236,6 +236,21 @@ async def test_score_low_open_task_sets_contact_note_and_closes():
     assert state.contact_task_id is not None and state.note_added is True
 
 
+async def test_score_low_deleted_deal_sets_nothing_and_skips():
+    """Сделку удалили — ни «Связаться», ни комментария (решение владельца 30.09):
+    задача — страховка на случай пропущенного уведомления, нет сделки — нет задачи."""
+    source, store, letters = MemorySource(), MemoryStore(), Letters()
+    amo = FakeAmo()                                   # сделки 41009 в CRM нет
+    sync = await _armed(source, store, amo, letters)
+    source.add(_order(609, lead_id=41009, score=2, comment="2"))      # новая оценка
+
+    assert await sync.tick() == 1
+
+    assert amo.calls_of("create_task") == []
+    assert amo.calls_of("add_note") == []
+    assert store.state(609).status == STATUS_SKIPPED
+
+
 async def test_score_low_closed_by_hand_still_sets_contact_and_note():
     source, store, letters = MemorySource(), MemoryStore(), Letters()
     amo = FakeAmo()

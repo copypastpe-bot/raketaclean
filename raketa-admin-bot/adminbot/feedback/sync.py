@@ -237,7 +237,15 @@ class FeedbackSync:
         actions: list[str] = []
         if current.contact_task_id is None:
             lead = await self.amo.get_lead(order.lead_id)
-            responsible = (lead or {}).get("responsible_user_id")
+            if lead is None:
+                # Сделку удалили — ни «Связаться», ни комментария (решение владельца
+                # 30.09): задача — страховка на случай пропущенного уведомления в
+                # админских чатах; нет сделки — нет задачи.
+                log.info("%s №%s: сделки %s в CRM нет — задачу не ставлю",
+                         work_title(order.kind), order.order_id, order.lead_id)
+                await self._reset_and_save(state, status=STATUS_SKIPPED)
+                return STATUS_SKIPPED
+            responsible = lead.get("responsible_user_id")
             deadline = int((moment + CONTACT_DEADLINE).timestamp())
             intent = await self.amo.create_task(
                 order.lead_id, task_type_id=ids.TASK_TYPE_CONTACT,
