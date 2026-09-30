@@ -49,6 +49,26 @@ journalctl -u telegram-bot.service -n 20 --no-pager
 В журнале должен быть чистый старт без трассировок. `git rev-parse --short HEAD`
 на сервере обязан совпасть с локальным `main`.
 
+## Миграции и их журнал
+
+Если в выезде есть новый файл `app/migrations/NNNN_*.sql`, его накатывают до перезапуска,
+от роли `bot`, и **сразу записывают в журнал** `public.schema_migrations` (задача 19
+брифа 2026-09-18, журнал ведётся с 30.09). Строка подключения — из `.env`, не печатать:
+
+```bash
+cd /opt/telegram-bot
+DSN="$(grep '^DB_DSN=' .env | cut -d= -f2-)"
+psql "$DSN" -v ON_ERROR_STOP=1 -f app/migrations/NNNN_имя.sql
+psql "$DSN" -c "INSERT INTO schema_migrations (name) VALUES ('NNNN_имя.sql') ON CONFLICT (name) DO NOTHING"
+```
+
+Миграция, которую бот накатывает сам при запуске (зеркало в `ensure_*`, как `0016` →
+`cleaning/schema.py`), тоже записывается — той же второй командой после перезапуска.
+Проверка, что журнал полон: последняя строка
+`psql -d clients_db -Atc "SELECT max(name) FROM schema_migrations"` совпадает с последним
+файлом в `app/migrations/`. Строки 0004–0016 дописаны задним числом 30.09: применение
+проверено по базе, дата — по журналу сессий или коммиту файла, время условное.
+
 Если на сервере ещё прописан старый адрес репозитория, перевести его один раз:
 
 ```bash
