@@ -379,18 +379,18 @@ flag_of() { grep "^$1=" "$ENV_FILE" | cut -d= -f2- || true; }
 now_enabled=$(flag_of AMO_SYNC_ENABLED)
 now_dry=$(flag_of AMO_SYNC_DRY_RUN)
 echo "функция: $([ "$now_enabled" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
-echo "режим:   $([ "$now_dry" = 1 ] && echo 'репетиция (в amoCRM не пишем)' || echo 'БОЕВОЙ (пишем в amoCRM)')"
+echo "режим:   $([ "$now_dry" = 0 ] && echo 'БОЕВОЙ (пишем в amoCRM)' || echo 'репетиция (в amoCRM не пишем)')"
 echo "хвост с: $(flag_of AMO_SYNC_BACKLOG_FROM)"
 now_carpets=$(flag_of CARPETS_ENABLED)
 now_carpets_dry=$(flag_of CARPETS_DRY_RUN)
-echo "ковры:   $([ "$now_carpets" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_carpets_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
+echo "ковры:   $([ "$now_carpets" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_carpets_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключены')"
 now_cleaning=$(flag_of CLEANING_SYNC_ENABLED)
 now_cleaning_dry=$(flag_of CLEANING_SYNC_DRY_RUN)
-echo "уборки:  $([ "$now_cleaning" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_cleaning_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
+echo "уборки:  $([ "$now_cleaning" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_cleaning_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключены')"
 echo "уборки с: $(flag_of CLEANING_BACKLOG_FROM)"
 now_deletions=$(flag_of ORDER_DELETIONS_ENABLED)
 now_deletions_dry=$(flag_of ORDER_DELETIONS_DRY_RUN)
-echo "удаления: $([ "$now_deletions" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_deletions_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
+echo "удаления: $([ "$now_deletions" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_deletions_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключены')"
 now_wire_payment=$(flag_of WIRE_PAYMENT_ENABLED)
 now_wire_payment_dry=$(flag_of WIRE_PAYMENT_DRY_RUN)
 echo "оплата по счёту: $([ "$now_wire_payment" = 1 ] && echo "ВКЛЮЧЕНА, $([ "$now_wire_payment_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключена')"
@@ -402,11 +402,11 @@ now_feedback_tasks_dry=$(flag_of FEEDBACK_TASKS_DRY_RUN)
 echo "задача «Повторный заказ» по оценке: $([ "$now_feedback_tasks" = 1 ] && echo "ВКЛЮЧЕНА, режим $([ "$now_feedback_tasks_dry" = 0 ] && echo 'БОЕВОЙ' || echo 'репетиция')" || echo 'выключена')"
 now_gcal=$(flag_of GCAL_ENABLED)
 now_gcal_dry=$(flag_of GCAL_DRY_RUN)
-echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
+echo "календарь: $([ "$now_gcal" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_gcal_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключен')"
 echo "календари: $(flag_of GCAL_CALENDAR_ID)"
 now_autocall=$(flag_of AUTOCALL_ENABLED)
 now_autocall_dry=$(flag_of AUTOCALL_DRY_RUN)
-echo "автозвонок: $([ "$now_autocall" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_autocall_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключен')"
+echo "автозвонок: $([ "$now_autocall" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_autocall_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключен')"
 # Телефоны менеджера печатаем целиком: их видит только владелец у себя в консоли,
 # а проверить порядок «рабочий, потом личный» иначе нечем.
 echo "телефоны менеджера: $(flag_of PBX_MANAGER_DIAL)"
