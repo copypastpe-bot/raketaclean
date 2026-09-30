@@ -42,6 +42,22 @@
 Проверка: `python -m py_compile` для изменённых `.py`; тесты `tests/test_wahelp_webhook_log.py`
 (рабочий бот), если трогался `webhook.py`.
 
+Выполнено: 2026-09-30, 9aadece.
+
+Примечания по пунктам:
+1. Докстринг `watchdog.py` дополнен: строка `amocrm_api_state` теперь называет
+   `stream = 'unsorted'` и ссылается на `db.fetch_amocrm_last_poll` — по факту из кода
+   (`db.py:331`, `WHERE stream = $1` с умолчанием `"unsorted"`).
+2. Докстринг `run_weekly_leads_exchange` (`bot.py:1386-1391`) переписан по текущему коду:
+   больше не про «владелец проверяет одним взглядом» (удалённая сводка в личку), а про
+   журналирование в `amocrm_api_events` и итог только в `logger.info`. Число строк `bot.py`
+   не менялось (4 строки текста заменены на 4 строки), правка номеров в `bot.py.map.md`
+   не потребовалась.
+3. `.gitignore`: добавлена строка `.claude/worktrees/` следом за `.worktrees/`.
+4. `notifications/webhook.py`: все три импорта (`Callable`, `Awaitable`, `Mapping`)
+   используются (аннотация `inbound_handler` и `_normalize_payload`) — предположение
+   координатора подтвердилось, файл не менялся.
+
 ## Задача 2. Документация
 
 1. `CLAUDE.md` (корень) и `raketa-admin-bot/CLAUDE.md`: в списках «Files longer than 500 lines»
