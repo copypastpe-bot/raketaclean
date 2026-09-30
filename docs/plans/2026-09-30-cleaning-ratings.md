@@ -122,6 +122,8 @@ rating_requested_at timestamptz, rating_replied_at timestamptz` (типы — к
 
 Полный прогон рабочего бота, коммит.
 
+Выполнено: 2026-09-30, 012c2fd
+
 ## Задача 3. Админ-бот: состояние цикла различает уборку и заказ (миграция 020)
 
 **Файлы:** создать `raketa-admin-bot/migrations/020_feedback_kind.sql`; изменить
