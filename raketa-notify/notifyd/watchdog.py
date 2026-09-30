@@ -19,9 +19,12 @@
                              adminbot/heartbeat.py; своя таблица, потому что
                              админ-боту нельзя писать в схему public —
                              хард-правило проекта, миграция 002)
-* опрос amoCRM            — `public.amocrm_api_state.updated_at`, закрывает
-                             дыру факта 6 ТЗ (цикл `amocrm_api_polling_loop`
-                             при ошибке авторизации выходит навсегда и молча)
+* опрос amoCRM            — `public.amocrm_api_state.updated_at` строки с
+                             `stream = 'unsorted'` (поток опроса
+                             «Неразобранного», `db.fetch_amocrm_last_poll`),
+                             закрывает дыру факта 6 ТЗ (цикл
+                             `amocrm_api_polling_loop` при ошибке авторизации
+                             выходит навсегда и молча)
 * база данных             — SELECT 1 через пул самой службы
 * прокси                  — Telegram getMe() тем же путём, что доставка
 * рассыльщик клиентам     — `public.notification_outbox`: возраст последней

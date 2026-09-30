@@ -28,6 +28,7 @@ import/
 .idea/
 .superpowers/
 .worktrees/
+.claude/worktrees/
 Сохраняем файл на всякий/
 .env
 switches.env
