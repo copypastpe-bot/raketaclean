@@ -139,7 +139,10 @@ for sql in migrations/*.sql; do psql "$ADMINBOT_DB_DSN" -v ON_ERROR_STOP=1 -f "$
 psql "$ADMINBOT_DB_DSN" -tAc "select tablename from pg_tables where schemaname='adminbot'"
 # ожидаемо: amo_links, amo_actions, settings, carpet_links, carpet_actions,
 #           carpet_letters, gcal_events, gcal_actions, gcal_cursor,
-#           autocall_leads, autocall_actions, autocall_cursor, owner_outbox
+#           autocall_leads, autocall_actions, autocall_cursor, owner_outbox,
+#           cleaning_links, cleaning_actions, order_deletions_seen,
+#           promo_callback_state, promo_callback_cursor,
+#           feedback_state, feedback_cursor
 ```
 
 Проверка, что правило «в чужие таблицы не пишем» держится не на честном слове:
@@ -525,6 +528,19 @@ sudo raketa-admin-bot-update --feedback-off
   «не смог обработать оценку, сделай руками», и в репетиции такое письмо тоже помечено.
 - Где смотреть: `adminbot.feedback_state` (статус по каждому заказу и режиму),
   `adminbot.feedback_cursor` (закладки).
+- Заказ со статусом `failed` (3 сбоя подряд, письмо уже ушло) цикл сам больше не берёт:
+  в кандидаты попадают только строки без записи в `feedback_state` или со статусом
+  `new`/`contact_set` (`adminbot/feedback/sync.py`, `OPEN_STATUSES`). Чтобы вернуть заказ
+  в очередь, удалить его строку `(order_id, mode)` из `adminbot.feedback_state` — на
+  следующем проходе он снова станет новым кандидатом с чистыми счётчиками:
+
+  ```sql
+  DELETE FROM adminbot.feedback_state WHERE order_id = <ID> AND mode = 'live';
+  ```
+
+  Менять статус на `new` вручную вместо удаления допустимо, но тогда нужно тем же
+  запросом обнулить и `attempts`, и `last_error` — иначе счётчик сбоев (`attempts = 3`)
+  сохранится, и одна новая неудача снова уведёт заказ в `failed`, минуя все три попытки.
 
 ### Порядок включения цепочки заказа (ТЗ 2026-09-22)
 
