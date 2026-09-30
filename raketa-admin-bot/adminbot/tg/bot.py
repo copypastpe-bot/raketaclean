@@ -339,10 +339,14 @@ class CalendarAnswers:
         # summary-rework.md): та же причина, что и у заказов и ковров — без
         # этого «Сам разберусь» неотличимо от автоматического already_done.
         lead_id = self._lead_id_of(choice)
+        # Номер карточки забываем вместе с вопросом: по нему наблюдатель судит,
+        # что уже спросил. Иначе новый вопрос по той же записи (после «Проверить
+        # ещё раз» робот может спросить снова) не уходит, а старая карточка уже
+        # без кнопок — запись молча висит (случай 30.09).
         await self.store.update_and_log(
             link.event_id, action="answer_owner", dry_run=False,
             entity=("lead" if lead_id is not None else None), amo_id=lead_id,
-            payload={"choice": choice}, question=None, **fields)
+            payload={"choice": choice}, question=None, question_msg_id=None, **fields)
         log.info("Календарь, запись %s: владелец выбрал %s", link.event_id, choice)
         await callback.answer()
         await callback.message.edit_text(f"Запись календаря: {reply}")

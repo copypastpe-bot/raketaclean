@@ -228,6 +228,24 @@ async def test_owner_confirms_closing(answered):
     assert link.question is None
 
 
+async def test_answer_frees_the_card_for_the_next_question(answered):
+    """После ответа робот забывает старую карточку — следующий вопрос придёт новой.
+
+    Живой случай 2026-09-30: владелец нажал «Проверить ещё раз», робот снова не
+    нашёл автосделку и спросил заново, но карточку не отправил — номер старой
+    остался записан, и наблюдатель счёл, что уже спросил. Старая карточка к
+    тому времени стала текстом «проверю ещё раз» без кнопок, и запись молча
+    висела.
+    """
+    store, answers = answered
+
+    await answers.on_choice(FakeCallback("gcal:retry"))
+
+    link = await store.get("evt-1")
+    assert link.status == "new"
+    assert link.question_msg_id is None
+
+
 async def test_owner_keeps_the_deal(answered):
     """«Оставить как есть» — сначала пометка сделки, отмена записи потом.
 
