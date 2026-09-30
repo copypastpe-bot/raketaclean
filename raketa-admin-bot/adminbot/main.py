@@ -256,6 +256,16 @@ class App:
     async def close(self) -> None:
         for client in self.amo_clients:
             await client.close()
+        # Календари Google, их ключ и телефония автозвонка держат свои сессии
+        # aiohttp: без закрытия — «Unclosed client session» в журнале на каждом
+        # перезапуске (п.13, 30.09).
+        for calendar in getattr(self.calendar_watcher, "calendars", ()):
+            await calendar.close()
+        if self.calendar_token is not None:
+            await self.calendar_token.close()
+        pbx = getattr(getattr(self.autocall_watcher, "engine", None), "pbx", None)
+        if pbx is not None and hasattr(pbx, "close"):
+            await pbx.close()
         await self.bot.session.close()
         if self.autocall_manager_bot is not None:
             await self.autocall_manager_bot.session.close()

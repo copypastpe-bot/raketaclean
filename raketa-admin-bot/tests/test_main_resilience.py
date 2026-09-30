@@ -258,6 +258,31 @@ async def test_close_without_autocall_manager_bot_does_not_break():
     await app.close()                                  # не падает
 
 
+class FakeClosable:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+async def test_close_closes_google_and_pbx_sessions():
+    """Ключ Google, календари и телефония автозвонка держат свои сессии aiohttp.
+    Без закрытия — три «Unclosed client session» в журнале на каждом перезапуске
+    (п.13, 30.09)."""
+    from types import SimpleNamespace
+    token, calendar, pbx = FakeClosable(), FakeClosable(), FakeClosable()
+    app = App(settings=None, bot_pool=FakePool(), own_pool=FakePool(), amo_clients=(),
+              bot=FakeBot(), dispatcher=None, watcher=None, reconciler=None,
+              stop=asyncio.Event(), calendar_token=token,
+              calendar_watcher=SimpleNamespace(calendars=(calendar,)),
+              autocall_watcher=SimpleNamespace(engine=SimpleNamespace(pbx=pbx)))
+
+    await app.close()
+
+    assert token.closed and calendar.closed and pbx.closed
+
+
 # --- разбор удалений (задача 5/7, ТЗ 2026-09-17): свой выключатель и письмо владельцу ---
 
 def _minimal_settings(**overrides):
