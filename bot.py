@@ -962,31 +962,6 @@ async def ensure_amocrm_api_schema(conn: asyncpg.Connection) -> None:
         );
         """
     )
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS amocrm_pending_incoming (
-            id bigserial PRIMARY KEY,
-            event_id text NOT NULL UNIQUE,
-            message_id text,
-            lead_id bigint,
-            contact_id bigint,
-            talk_id text,
-            payload jsonb NOT NULL,
-            created_at integer NOT NULL,
-            due_at timestamptz NOT NULL,
-            status text NOT NULL DEFAULT 'pending',
-            notified_at timestamptz,
-            answered_at timestamptz,
-            error text
-        );
-        """
-    )
-    await conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_amocrm_pending_incoming_due
-        ON amocrm_pending_incoming(status, due_at);
-        """
-    )
 
 
 async def ensure_client_messaging_schema(conn: asyncpg.Connection) -> None:

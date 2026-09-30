@@ -132,6 +132,12 @@ class _RealDbCase(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(TEST_DB_DSN, "TEST_DB_DSN не задан — нужен настоящий Postgres")
 class PollUnsortedTests(_RealDbCase):
+    async def test_schema_no_longer_creates_pending_incoming(self):
+        """В `amocrm_pending_incoming` писал удалённый вебхук amoCRM (23.09); с 30.09
+        самонастройка её не создаёт (п.13). Старую таблицу на проде не удаляем."""
+        async with self.pool.acquire() as conn:
+            self.assertIsNone(await conn.fetchval("SELECT to_regclass('amocrm_pending_incoming')"))
+
     async def test_new_call_creates_card_and_sends_nothing(self):
         item = _call_item()
         before = datetime.now(timezone.utc)
