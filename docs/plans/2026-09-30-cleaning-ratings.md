@@ -174,6 +174,8 @@ rating_requested_at timestamptz, rating_replied_at timestamptz` (типы — к
    AND order_id = <ID> AND mode = 'live'`).
 5. Полный прогон админ-бота, коммит.
 
+Выполнено: 2026-09-30, 90657b1
+
 ---
 
 ## Выкат (делает координатор, не исполнитель)
