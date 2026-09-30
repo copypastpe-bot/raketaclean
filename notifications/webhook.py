@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Awaitable, Callable, Mapping
 
 import asyncpg
@@ -11,6 +12,30 @@ from aiohttp import web
 from .outbox import apply_provider_status_update
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_IN_URL = re.compile(r"(token=)[^&\s\"]*")
+
+
+class _MaskTokenFilter(logging.Filter):
+    """Прячет ключ Wahelp (`?token=...`) в строке журнала `aiohttp.access`.
+
+    Подмена `_format_r` в наследнике `AccessLogger` не работает: aiohttp берёт
+    функции форматирования у базового класса напрямую. Поэтому правим готовую строку.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        masked = _TOKEN_IN_URL.sub(r"\1***", message)
+        if masked != message:
+            record.msg = masked
+            record.args = ()
+        return True
+
+
+def _install_access_log_mask() -> None:
+    access_logger = logging.getLogger("aiohttp.access")
+    if not any(isinstance(f, _MaskTokenFilter) for f in access_logger.filters):
+        access_logger.addFilter(_MaskTokenFilter())
 
 
 class WahelpWebhookServer:
@@ -36,6 +61,7 @@ class WahelpWebhookServer:
     async def start(self, host: str, port: int) -> None:
         if self._runner:
             return
+        _install_access_log_mask()
         app = self.create_app()
         self._runner = web.AppRunner(app)
         await self._runner.setup()
