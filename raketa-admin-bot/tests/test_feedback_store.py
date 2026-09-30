@@ -1,10 +1,11 @@
 """Postgres для цикла «Повторный заказ»: оценённые заказы и своё состояние.
 
 Нужен Postgres: DSN в переменной TEST_DB_DSN. Без него тесты пропускаются
-(как в test_db_schema.py). `public.orders` здесь — свой урезанный набросок
-(только колонки оценки), как `test_promo_callback_store.py` заводит свою
-копию `public.promo_callbacks`: общий `tests/fixtures/bot_schema_min.sql`
-для этого не трогаем — он не входит в задачу и им пользуются другие тесты.
+(как в test_db_schema.py). `public.orders` и `public.cleaning_orders` здесь —
+свои урезанные наброски (только колонки оценки, у уборки ещё `deleted_at`), как
+`test_promo_callback_store.py` заводит свою копию `public.promo_callbacks`: общий
+`tests/fixtures/bot_schema_min.sql` для этого не трогаем — он не входит в задачу
+и им пользуются другие тесты.
 """
 
 import os
@@ -55,11 +56,25 @@ async def pool():
             )
             """
         )
+        # Поля оценки уборки — миграция рабочего бота 0016 (ТЗ 2026-09-30, задача 1).
+        await conn.execute("DROP TABLE IF EXISTS public.cleaning_orders")
+        await conn.execute(
+            """
+            CREATE TABLE public.cleaning_orders (
+                id                 bigint PRIMARY KEY,
+                rating_score       smallint,
+                rating_comment     text,
+                rating_replied_at  timestamptz,
+                deleted_at         timestamptz
+            )
+            """
+        )
     try:
         yield pool
     finally:
         async with pool.acquire() as conn:
             await conn.execute("DROP TABLE IF EXISTS public.orders")
+            await conn.execute("DROP TABLE IF EXISTS public.cleaning_orders")
         await pool.close()
 
 
@@ -69,6 +84,17 @@ async def _order(pool, order_id, *, score=None, comment=None, replied_at=None):
             "INSERT INTO public.orders (id, rating_score, rating_comment, rating_replied_at) "
             "VALUES ($1, $2, $3, $4)",
             order_id, score, comment, replied_at,
+        )
+
+
+async def _cleaning(pool, order_id, *, score=None, comment=None, replied_at=None,
+                    deleted_at=None):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO public.cleaning_orders "
+            "(id, rating_score, rating_comment, rating_replied_at, deleted_at) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            order_id, score, comment, replied_at, deleted_at,
         )
 
 
@@ -121,6 +147,72 @@ async def test_source_rated_orders_filters_link_status_lead_and_rating(pool):
 
     assert rated == [RatedOrder(order_id=601, lead_id=41000, score=5,
                                 comment="5 отлично", replied_at=REPLIED)]
+
+
+async def test_source_rated_orders_includes_rated_cleanings(pool):
+    """Уборка: связка `adminbot.cleaning_links` + оценка в `public.cleaning_orders`
+    (ТЗ 2026-09-30, задача 4). Фильтры — те же, что у химчистки."""
+    # Уборка №701 — связка done с real_lead_id и полная оценка: должна попасть.
+    await _cleaning_link(pool, 701, status="done", real_lead_id=51000)
+    await _cleaning(pool, 701, score=4, comment="4 пыль под диваном", replied_at=REPLIED)
+
+    # 702 — связка не done.
+    await _cleaning_link(pool, 702, status="in_progress", real_lead_id=51001)
+    await _cleaning(pool, 702, score=4, comment="4", replied_at=REPLIED)
+
+    # 703 — связка done, но без real_lead_id.
+    await _cleaning_link(pool, 703, status="done", real_lead_id=None)
+    await _cleaning(pool, 703, score=3, comment="3", replied_at=REPLIED)
+
+    # 704 — клиент ещё не оценил.
+    await _cleaning_link(pool, 704, status="done", real_lead_id=51002)
+    await _cleaning(pool, 704)
+
+    # 705 — нет времени ответа (оценка неполная).
+    await _cleaning_link(pool, 705, status="done", real_lead_id=51003)
+    await _cleaning(pool, 705, score=4, comment="4", replied_at=None)
+
+    # 706 — уборку удалили (`deleted_at`): химчистка при удалении исчезает из
+    # `public.orders` целиком, уборка остаётся строкой с пометкой — не берём.
+    await _cleaning_link(pool, 706, status="done", real_lead_id=51004)
+    await _cleaning(pool, 706, score=2, comment="2", replied_at=REPLIED, deleted_at=REPLIED)
+
+    # 707 — оценка уборки есть, но связка — химчистки (amo_links), уборочной нет.
+    await _link(pool, 707, status="done", real_lead_id=51005)
+    await _cleaning(pool, 707, score=5, comment="5", replied_at=REPLIED)
+
+    # №12 — и заказ химчистки, и уборка, у каждой своя сделка и своя оценка.
+    await _link(pool, 12, status="done", real_lead_id=41012)
+    await _order(pool, 12, score=5, comment="5", replied_at=REPLIED)
+    await _cleaning_link(pool, 12, status="done", real_lead_id=51012)
+    await _cleaning(pool, 12, score=3, comment="3", replied_at=REPLIED)
+
+    source = PgFeedbackSource(bot_pool=pool, own_pool=pool)
+    rated = await source.rated_orders()
+
+    by_key = {order.key: order for order in rated}
+    assert len(by_key) == len(rated)                             # ни одна работа не пришла дважды
+    assert by_key == {
+        (KIND_CLEANING, 701): RatedOrder(order_id=701, lead_id=51000, score=4,
+                                         comment="4 пыль под диваном", replied_at=REPLIED,
+                                         kind=KIND_CLEANING),
+        (KIND_CLEANING, 12): RatedOrder(order_id=12, lead_id=51012, score=3, comment="3",
+                                        replied_at=REPLIED, kind=KIND_CLEANING),
+        (KIND_ORDER, 12): RatedOrder(order_id=12, lead_id=41012, score=5, comment="5",
+                                     replied_at=REPLIED, kind=KIND_ORDER),
+    }
+
+
+async def test_source_reads_cleanings_when_there_are_no_order_links(pool):
+    """Связок химчистки нет вовсе — оценённые уборки всё равно приходят."""
+    await _cleaning_link(pool, 801, status="done", real_lead_id=52000)
+    await _cleaning(pool, 801, score=5, comment="5", replied_at=REPLIED)
+
+    source = PgFeedbackSource(bot_pool=pool, own_pool=pool)
+
+    assert await source.rated_orders() == [
+        RatedOrder(order_id=801, lead_id=52000, score=5, comment="5",
+                   replied_at=REPLIED, kind=KIND_CLEANING)]
 
 
 async def test_store_started_at_is_set_once_and_per_mode(pool):

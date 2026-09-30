@@ -53,7 +53,12 @@ from adminbot.feedback.models import (
     FeedbackState,
     RatedOrder,
 )
-from adminbot.tg.feedback_cards import contact_task_text, feedback_result_text, note_text
+from adminbot.tg.feedback_cards import (
+    contact_task_text,
+    feedback_result_text,
+    note_text,
+    work_title,
+)
 
 log = logging.getLogger(__name__)
 
@@ -201,8 +206,8 @@ class FeedbackSync:
             await self._fail(order, state, exc)
             return None
 
-        log.info("Заказ №%s (сделка %s), оценка %s: %s",
-                order.order_id, order.lead_id, order.score, status)
+        log.info("%s №%s (сделка %s), оценка %s: %s",
+                 work_title(order.kind), order.order_id, order.lead_id, order.score, status)
         return status
 
     async def _process(self, order: RatedOrder, state: FeedbackState, open_: list[dict],
@@ -211,7 +216,8 @@ class FeedbackSync:
         if order.score == 5:
             if open_:
                 for task in open_:
-                    await self.amo.complete_task(task["id"], feedback_result_text(5))
+                    await self.amo.complete_task(
+                        task["id"], feedback_result_text(5, kind=order.kind))
                 return await self._finish(order, state, STATUS_DONE,
                                           ['закрыл бы «Повторный заказ»'])
             if closed_by_hand or expired:
@@ -246,8 +252,9 @@ class FeedbackSync:
                 # «поставлена, номер неизвестен»: None здесь повторил бы постановку
                 # каждый проход (спам задачами) — замечание ревью, задача 3.
                 contact_task_id = -1
-                log.warning("Заказ №%s (сделка %s): «Связаться» поставлена, но amoCRM "
-                           "не вернула номер задачи", order.order_id, order.lead_id)
+                log.warning("%s №%s (сделка %s): «Связаться» поставлена, но amoCRM "
+                           "не вернула номер задачи", work_title(order.kind),
+                           order.order_id, order.lead_id)
             current = await self._save(current, contact_task_id=contact_task_id)
             actions.append('поставил бы «Связаться»')
         if not current.note_added:
@@ -259,7 +266,8 @@ class FeedbackSync:
 
         if open_:
             for task in open_:
-                await self.amo.complete_task(task["id"], feedback_result_text(order.score))
+                await self.amo.complete_task(
+                    task["id"], feedback_result_text(order.score, kind=order.kind))
             actions.append('закрыл бы «Повторный заказ»')
             return await self._finish(order, current, STATUS_DONE, actions)
         if closed_by_hand or expired:
@@ -301,8 +309,9 @@ class FeedbackSync:
         """Сбой заказа: следующий проход повторит; третий подряд — `failed` и письмо."""
         attempts = state.attempts + 1
         error = str(exc) or type(exc).__name__
-        log.warning("Заказ №%s (сделка %s): попытка %s/%s не удалась: %s",
-                    order.order_id, order.lead_id, attempts, MAX_ATTEMPTS, error)
+        log.warning("%s №%s (сделка %s): попытка %s/%s не удалась: %s",
+                    work_title(order.kind), order.order_id, order.lead_id, attempts,
+                    MAX_ATTEMPTS, error)
         if attempts < MAX_ATTEMPTS:
             await self._save_quietly(state, attempts=attempts, last_error=error)
             return
@@ -315,7 +324,8 @@ class FeedbackSync:
         try:
             await self.store.update(state.kind, state.order_id, state.mode, **fields)
         except Exception:                                    # noqa: BLE001
-            log.exception("Заказ №%s: не смог записать отметку о сбое", state.order_id)
+            log.exception("%s №%s: не смог записать отметку о сбое",
+                          work_title(state.kind), state.order_id)
 
     async def _report_rehearsal(self, order: RatedOrder, actions: list[str]) -> None:
         if self.on_rehearsal is None:
@@ -323,7 +333,8 @@ class FeedbackSync:
         try:
             await self.on_rehearsal(order, actions)
         except Exception:                                    # noqa: BLE001
-            log.exception("Заказ №%s: отчёт репетиции не ушёл", order.order_id)
+            log.exception("%s №%s: отчёт репетиции не ушёл", work_title(order.kind),
+                          order.order_id)
 
     async def _report_failure(self, order: RatedOrder, error: str) -> None:
         if self.on_failure is None:
@@ -331,4 +342,5 @@ class FeedbackSync:
         try:
             await self.on_failure(order, error)
         except Exception:                                    # noqa: BLE001
-            log.exception("Заказ №%s: письмо о сбое не ушло", order.order_id)
+            log.exception("%s №%s: письмо о сбое не ушло", work_title(order.kind),
+                          order.order_id)

@@ -1,14 +1,15 @@
 """Postgres для цикла «Повторный заказ»: оценённые заказы и своё состояние.
 
-Оценка — из связки сделки реализации (`adminbot.amo_links`, `own_pool`) и оценки
-клиента (`public.orders`, `bot_pool`, только чтение — хард-правило проекта).
+Оценка — из связки сделки реализации (`adminbot.amo_links` / `adminbot.cleaning_links`,
+`own_pool`) и оценки клиента (`public.orders` / `public.cleaning_orders`, `bot_pool`,
+только чтение — хард-правило проекта).
 Своё состояние — `adminbot.feedback_state` и `adminbot.feedback_cursor`
 (миграция 019), у каждого режима свои строки, тем же приёмом, что
 `promo_callback/store.py`. Строка состояния — по ключу `(kind, order_id)`
 в пределах режима (миграция 020): заказ №12 и уборка №12 — разные строки.
 
 ТЗ docs/plans/2026-09-28-feedback-tasks.md, задача 2;
-ТЗ docs/plans/2026-09-30-cleaning-ratings.md, задача 3.
+ТЗ docs/plans/2026-09-30-cleaning-ratings.md, задачи 3 и 4.
 """
 
 from __future__ import annotations
@@ -18,7 +19,13 @@ from typing import Any, Optional, Sequence
 
 import asyncpg
 
-from adminbot.feedback.models import FeedbackKey, FeedbackState, RatedOrder
+from adminbot.feedback.models import (
+    KIND_CLEANING,
+    KIND_ORDER,
+    FeedbackKey,
+    FeedbackState,
+    RatedOrder,
+)
 
 _UPDATABLE_FIELDS = frozenset({"status", "contact_task_id", "note_added", "attempts", "last_error"})
 
@@ -31,32 +38,55 @@ def _state_from_row(row: asyncpg.Record) -> FeedbackState:
 
 
 class PgFeedbackSource:
-    """Оценённые заказы: сделка реализации (own_pool) + оценка клиента (bot_pool)."""
+    """Оценённые работы: сделка реализации (own_pool) + оценка клиента (bot_pool).
+
+    Две выборки одним приёмом: химчистка — `adminbot.amo_links` + `public.orders`,
+    уборка — `adminbot.cleaning_links` + `public.cleaning_orders` (ТЗ 2026-09-30,
+    задача 4). Схема `public` — только чтение.
+    """
 
     def __init__(self, bot_pool: asyncpg.Pool, own_pool: asyncpg.Pool) -> None:
         self.bot_pool = bot_pool
         self.own_pool = own_pool
 
     async def rated_orders(self) -> list[RatedOrder]:
+        orders = await self._rated(
+            kind=KIND_ORDER, links_table="adminbot.amo_links",
+            ratings_sql=(
+                "SELECT id, rating_score, rating_comment, rating_replied_at FROM public.orders "
+                "WHERE id = ANY($1::bigint[]) AND rating_score IS NOT NULL "
+                "AND rating_replied_at IS NOT NULL"
+            ),
+        )
+        # Уборку при удалении не стирают, а помечают `deleted_at` (химчистка при
+        # удалении исчезает из `public.orders` целиком) — удалённую не берём, как
+        # `db.order_alive_clause`.
+        cleanings = await self._rated(
+            kind=KIND_CLEANING, links_table="adminbot.cleaning_links",
+            ratings_sql=(
+                "SELECT id, rating_score, rating_comment, rating_replied_at "
+                "FROM public.cleaning_orders "
+                "WHERE id = ANY($1::bigint[]) AND rating_score IS NOT NULL "
+                "AND rating_replied_at IS NOT NULL AND deleted_at IS NULL"
+            ),
+        )
+        return orders + cleanings
+
+    async def _rated(self, *, kind: str, links_table: str, ratings_sql: str) -> list[RatedOrder]:
         async with self.own_pool.acquire() as conn:
             links = await conn.fetch(
-                "SELECT order_id, real_lead_id FROM adminbot.amo_links "
+                f"SELECT order_id, real_lead_id FROM {links_table} "
                 "WHERE status = 'done' AND real_lead_id IS NOT NULL"
             )
         if not links:
             return []
         lead_by_order = {row["order_id"]: row["real_lead_id"] for row in links}
         async with self.bot_pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT id, rating_score, rating_comment, rating_replied_at FROM public.orders "
-                "WHERE id = ANY($1::bigint[]) AND rating_score IS NOT NULL "
-                "AND rating_replied_at IS NOT NULL",
-                list(lead_by_order),
-            )
+            rows = await conn.fetch(ratings_sql, list(lead_by_order))
         return [
             RatedOrder(order_id=row["id"], lead_id=lead_by_order[row["id"]],
                       score=row["rating_score"], comment=row["rating_comment"],
-                      replied_at=row["rating_replied_at"])
+                      replied_at=row["rating_replied_at"], kind=kind)
             for row in rows
         ]
 

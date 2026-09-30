@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -485,6 +486,79 @@ async def test_order_and_cleaning_with_same_number_have_separate_states():
     assert store.state(12, kind=KIND_ORDER).status == STATUS_DONE
 
 
+# --- уборка: тексты по виду работы (ТЗ 2026-09-30, задача 4) ---
+
+async def test_cleaning_score_low_texts_name_the_cleaning():
+    source, store, letters = MemorySource(), MemoryStore(), Letters()
+    amo = FakeAmo()
+    lead_id = 43100
+    _lead(amo, lead_id, responsible_user_id=777)
+    amo.add_task(lead_id, task_id=31, task_type_id=ids.TASK_TYPE_FEEDBACK)
+    sync = await _armed(source, store, amo, letters)
+    source.add(_order(12, lead_id=lead_id, score=4, comment="4", replied_at=REPLIED,
+                      kind=KIND_CLEANING))
+
+    assert await sync.tick() == 1
+
+    [task] = amo.calls_of("create_task")
+    assert task["text"] == "Клиент оценил уборку №12 на 4 — узнать, что не так."
+    [(_lead_id, note)] = amo.calls_of("add_note")
+    assert note == (
+        "🤖 Клиент оценил уборку №12 на 4 в боте (04.09 12:46).\n"
+        "Ответ клиента: «4».\n"
+        "Поставил задачу «Связаться», «Повторный заказ» закрыл."
+    )
+    assert amo.task_results[31] == (
+        "🤖 Клиент оценил уборку в боте на 4, поставлена задача «Связаться».")
+    assert store.state(12, kind=KIND_CLEANING).status == STATUS_DONE
+
+
+async def test_cleaning_score5_closes_task_with_cleaning_text():
+    source, store, letters = MemorySource(), MemoryStore(), Letters()
+    amo = FakeAmo()
+    lead_id = 43101
+    amo.add_task(lead_id, task_id=32, task_type_id=ids.TASK_TYPE_FEEDBACK)
+    sync = await _armed(source, store, amo, letters)
+    source.add(_order(13, lead_id=lead_id, score=5, kind=KIND_CLEANING))
+
+    assert await sync.tick() == 1
+
+    assert amo.task_results[32] == "🤖 Клиент оценил уборку в боте на 5."
+
+
+async def test_journal_names_the_work_by_kind(caplog):
+    caplog.set_level(logging.INFO, logger="adminbot.feedback.sync")
+    source, store, letters = MemorySource(), MemoryStore(), Letters()
+    amo = FakeAmo()
+    amo.add_task(43200, task_id=41, task_type_id=ids.TASK_TYPE_FEEDBACK)
+    amo.add_task(43201, task_id=42, task_type_id=ids.TASK_TYPE_FEEDBACK)
+    sync = await _armed(source, store, amo, letters)
+    source.add(_order(12, lead_id=43200, score=5, kind=KIND_ORDER))
+    source.add(_order(12, lead_id=43201, score=5, kind=KIND_CLEANING))
+
+    await sync.tick()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "Заказ №12 (сделка 43200), оценка 5: done" in messages
+    assert "Уборка №12 (сделка 43201), оценка 5: done" in messages
+
+
+async def test_journal_failure_names_the_cleaning(caplog):
+    caplog.set_level(logging.INFO, logger="adminbot.feedback.sync")
+    source, store, letters = MemorySource(), MemoryStore(), Letters()
+    amo = FakeAmo()
+    sync = await _armed(source, store, amo, letters)
+    source.add(_order(14, lead_id=43300, score=3, kind=KIND_CLEANING))
+    amo.fail_on = "get_lead_tasks_of_type"
+
+    await sync.tick()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(message.startswith("Уборка №14 (сделка 43300): попытка 1/3 не удалась")
+               for message in messages)
+    assert not any(message.startswith("Заказ №14") for message in messages)
+
+
 # --- лимит за проход ---
 
 async def test_batch_limit_is_20_orders_oldest_first():
@@ -559,3 +633,47 @@ def test_failure_text_matches_exact_lines():
         "Ошибка: amoCRM 500: сбой",
         "https://example.amocrm.ru/leads/detail/777",
     ]
+
+
+def _cleaning(score: int = 4) -> RatedOrder:
+    return RatedOrder(order_id=12, lead_id=777, score=score, comment=str(score),
+                      replied_at=REPLIED, kind=KIND_CLEANING)
+
+
+def test_cleaning_note_text():
+    assert note_text(_cleaning(), feedback_task="not_yet") == (
+        "🤖 Клиент оценил уборку №12 на 4 в боте (04.09 12:46).\n"
+        "Ответ клиента: «4».\n"
+        "Поставил задачу «Связаться»; «Повторный заказ» закрою, когда он появится."
+    )
+
+
+def test_cleaning_contact_task_text():
+    assert contact_task_text(_cleaning()) == "Клиент оценил уборку №12 на 4 — узнать, что не так."
+
+
+def test_cleaning_feedback_result_text():
+    assert feedback_result_text(5, kind=KIND_CLEANING) == "🤖 Клиент оценил уборку в боте на 5."
+    assert feedback_result_text(4, kind=KIND_CLEANING) == (
+        "🤖 Клиент оценил уборку в боте на 4, поставлена задача «Связаться».")
+    assert feedback_result_text(5, kind=KIND_ORDER) == "🤖 Клиент оценил заказ в боте на 5."
+
+
+def test_cleaning_rehearsal_text():
+    text = rehearsal_text(_cleaning(), ['поставил бы «Связаться»'],
+                          base_url="https://example.amocrm.ru")
+
+    assert text.splitlines()[0].endswith("Репетиция: уборка №12, оценка 4.")
+
+
+def test_order_rehearsal_text_names_the_order():
+    order = RatedOrder(order_id=605, lead_id=777, score=3, comment="3", replied_at=REPLIED)
+    text = rehearsal_text(order, [], base_url="https://example.amocrm.ru")
+
+    assert text.splitlines()[0].endswith("Репетиция: заказ №605, оценка 3.")
+
+
+def test_cleaning_failure_text():
+    text = failure_text(_cleaning(3), "amoCRM 500: сбой", base_url="https://example.amocrm.ru")
+
+    assert text.splitlines()[0] == "⚠️ Не смог обработать оценку 3 по уборке №12, сделай руками."
