@@ -72,6 +72,7 @@ class LeadInfo:
     closed_date: Optional[date] = None     # когда сделку закрыли
     created_date: Optional[date] = None    # когда сделку завели
     specialist_ids: tuple[int, ...] = ()   # поле «Специалист»: enum-значения мастеров
+    service_ids: tuple[int, ...] = ()      # поле «Услуга»: enum-значения (сверка с видом заказа)
     price: Optional[Decimal] = None        # бюджет сделки: часто плановый или заглушка
     name: Optional[str] = None             # для карточки-вопроса владельцу
     address: Optional[str] = None          # для карточки-вопроса владельцу (задача 7, ТЗ 2026-09-22)
@@ -103,7 +104,8 @@ class Decision:
       ask_owner_stale  — свежих сделок нет, есть старые хвосты: «заводи новую» / «сам разберусь»
       ask_owner_unrelated — единственная подходящая по дате сделка выглядит чужой
                             (другой мастер и сумма в разы): «заводи новую» / «сам разберусь»
-      already_done     — заказ уже проведён руками: только привязать, не трогать
+      ask_owner_other  — выбрана сделка с «Услугой» из группы «Другое»: сам не берёт
+      already_done    — заказ уже проведён руками: только привязать, не трогать
     """
 
     kind: str
@@ -289,10 +291,29 @@ def _pick_completed(order_date: date, realization: list[LeadInfo],
     return None
 
 
+def service_verdict(lead: LeadInfo, order_group: str) -> str:
+    """Как «Услуга» сделки соотносится с видом заказа.
+
+    fits    — есть услуга из группы заказа (хоть одна из нескольких);
+    other   — своей нет, но есть «Другое»: решает владелец;
+    alien   — все услуги из чужих групп: сделка не про этот заказ;
+    unknown — услуги нет или она удалена из справочника: как было до сверки.
+    """
+    groups = {ids.SERVICE_GROUPS[s] for s in lead.service_ids if s in ids.SERVICE_GROUPS}
+    if not groups:
+        return "unknown"
+    if order_group in groups:
+        return "fits"
+    if ids.SERVICE_GROUP_OTHER in groups:
+        return "other"
+    return "alien"
+
+
 def match(*, order_date: date, candidates: Iterable[LeadInfo],
           master_specialist_ids: Sequence[int] = (),
           taken_lead_ids: Collection[int] = (),
-          order_amount: Optional[Decimal] = None) -> Decision:
+          order_amount: Optional[Decimal] = None,
+          order_group: Optional[str] = None) -> Decision:
     """Решить, что делать с заказом бота, по списку сделок его телефона.
 
     taken_lead_ids — сделки, уже закреплённые за другими заказами этого клиента.
@@ -301,6 +322,9 @@ def match(*, order_date: date, candidates: Iterable[LeadInfo],
 
     order_amount — сумма чека. Нужна не для выбора, а для отсева заведомо чужих
     сделок: работа на 4500 ₽ не может быть сделкой на 17 550 ₽ другого мастера.
+
+    order_group — группа услуг заказа (`ids.SERVICE_GROUP_*`) для сверки с «Услугой»
+    сделки. None — сверки нет: выключатель выключен или вид заказа неизвестен.
     """
 
     # 1. Ковровые и архивные воронки — не наш случай. Заказ, заведённый в боте,
@@ -309,6 +333,25 @@ def match(*, order_date: date, candidates: Iterable[LeadInfo],
     taken = set(taken_lead_ids)
     ours = [lead for lead in candidates
             if lead.pipeline_id not in ids.PIPELINES_IGNORED and lead.lead_id not in taken]
+
+    # Сверка «Услуги» (решения владельца 2026-09-30): сделка чужой группы для заказа
+    # не существует — уборка Дарьи №9 ушла в сделку дивана, единственную открытую.
+    # Сделку «Другое» робот сам не берёт ни по какому пути: спрашивает владельца.
+    other_service: set[int] = set()
+    if order_group is not None:
+        verdicts = {lead.lead_id: service_verdict(lead, order_group) for lead in ours}
+        ours = [lead for lead in ours if verdicts[lead.lead_id] != "alien"]
+        other_service = {lead_id for lead_id, verdict in verdicts.items() if verdict == "other"}
+
+    decision = _route(order_date, ours, master_specialist_ids, order_amount)
+    if decision.lead_id is not None and decision.lead_id in other_service:
+        return Decision(kind="ask_owner_other", options=(decision.lead_id,))
+    return decision
+
+
+def _route(order_date: date, ours: list[LeadInfo], master_specialist_ids: Sequence[int],
+           order_amount: Optional[Decimal]) -> Decision:
+    """Шаги 2–7: путь заказа среди его сделок, уже очищенных от чужих воронок."""
 
     # Сделки, похожие на чужую работу, откладываем: сами их не трогаем, но и
     # молча заводить новую поверх них нельзя — спросим владельца (см. ниже).

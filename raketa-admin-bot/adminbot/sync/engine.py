@@ -20,14 +20,14 @@ from typing import Any, Callable, Optional, Sequence
 from adminbot.amo import ids
 from adminbot.amo.client import AmoError
 from adminbot.amo.fields import (
-    MOSCOW_TZ, date_field, datetime_field, enum_field, field_value, lead_contact_ids,
-    order_date_msk, specialist_ids, text_field,
+    MOSCOW_TZ, date_field, datetime_field, enum_field, enum_ids, field_value,
+    lead_contact_ids, order_date_msk, specialist_ids, text_field,
 )
 from adminbot.config import DEFAULT_SERVICE_BY_MASTER
 from adminbot.models import AmoLink, Order
 from adminbot.phone import mask, normalize_phone
 from adminbot.sync.checklist import StepContext, next_step
-from adminbot.sync.matcher import PLACEHOLDER_PRICE, Decision, LeadInfo, match
+from adminbot.sync.matcher import PLACEHOLDER_PRICE, Decision, LeadInfo, match, service_verdict
 from adminbot.sync.specialists import SpecialistIndex
 from adminbot.sync.store import LinkStore
 from adminbot.sync.waiting import waited_since
@@ -59,7 +59,7 @@ def service_enums(by_master: dict[str, str]) -> dict[str, int]:
 SERVICE_BY_MASTER: dict[str, int] = service_enums(DEFAULT_SERVICE_BY_MASTER)
 
 # Решения матчера, требующие вмешательства владельца.
-_ASK_KINDS = ("ask_owner", "ask_owner_stale", "ask_owner_unrelated")
+_ASK_KINDS = ("ask_owner", "ask_owner_stale", "ask_owner_unrelated", "ask_owner_other")
 
 # Как решение матчера превращается в путь заказа.
 _PATH_BY_KIND = {
@@ -107,6 +107,7 @@ class Engine:
         salesbot_wait_sec: int = DEFAULT_SALESBOT_WAIT_SEC,
         child_by_note: bool = False,
         service_by_master: Optional[dict[str, int]] = None,
+        service_check: bool = False,
         now: Callable[[], datetime] = lambda: datetime.now(MOSCOW_TZ),
     ) -> None:
         self.amo = amo
@@ -120,6 +121,9 @@ class Engine:
         # «первую свободную» сделку по телефону (задача 1 ТЗ 2026-09-22).
         # Выключено — старое поведение (AMO_CHILD_BY_NOTE, откат одной командой).
         self.child_by_note = child_by_note
+        # Сверка «Услуги» сделки с видом заказа (п.8, решения владельца 2026-09-30).
+        # Выключено — старое поведение (AMO_SERVICE_CHECK, откат одной командой).
+        self.service_check = service_check
         self.now = now
         # Черновые заметки в пределах одного заказа: лиды-дубли и найденный контакт.
         # У каждого движка свои — в сервисе их работает несколько сразу (наблюдатель,
@@ -237,6 +241,7 @@ class Engine:
             master_specialist_ids=self._master_enums(order),
             taken_lead_ids=taken,
             order_amount=order.amount_total,
+            order_group=self._order_group(order) if self.service_check else None,
         )
         log.info("%s №%s (%s): решение — %s",
                  order.label, order.order_id, mask(order.phone10), decision.kind)
@@ -458,8 +463,13 @@ class Engine:
                     return StepResult(stop=True)
                 return StepResult()
         else:
+            # «Первая свободная» тоже сверяет услугу: иначе заказ, для которого матчер
+            # отверг сделку дивана, получил бы её здесь как дочку.
+            group = self._order_group(order) if self.service_check else None
             for lead in await self.amo.find_leads_by_phone(order.phone10):
                 info = self._to_lead_info(lead)
+                if group is not None and service_verdict(info, group) not in ("fits", "unknown"):
+                    continue
                 if info.pipeline_id == ids.PIPELINE_REALIZATION and info.is_open:
                     await self.store.update(order.order_id, real_lead_id=info.lead_id,
                                             status="in_progress")
@@ -602,6 +612,10 @@ class Engine:
                     return enum_id
         return None                       # мастер неизвестен — поле не выдумываем
 
+    def _order_group(self, order: Order) -> Optional[str]:
+        """Группа услуг заказа для сверки со сделкой; None — вид работы неизвестен."""
+        return ids.SERVICE_GROUPS.get(self._service_enum(order))
+
     def _master_enums(self, order: Order) -> tuple[int, ...]:
         # То же и со «Специалистом»: у уборки это всегда Ольга, а бригадир идёт
         # в примечание сделки (решение владельца 2026-09-10).
@@ -657,6 +671,7 @@ class Engine:
             closed_date=_stamp_to_date(lead.get("closed_at")),
             created_date=_stamp_to_date(lead.get("created_at")),
             specialist_ids=specialist_ids(lead),
+            service_ids=enum_ids(lead, ids.FIELD_SERVICE),
             price=None if lead.get("price") is None else Decimal(str(lead["price"])),
             name=lead.get("name"),
             address=field_value(lead, ids.FIELD_ADDRESS),

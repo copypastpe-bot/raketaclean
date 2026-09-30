@@ -176,6 +176,8 @@ class App:
             "репетиция" if self.settings.amo_sync_dry_run else "БОЕВОЙ",
             self.settings.backlog_from,
         )
+        log.info("Сверка услуги при выборе сделки: %s",
+                 "включена" if self.settings.amo_service_check else "выключена")
         background = [
             asyncio.create_task(self.watcher.run_forever(self.stop), name="watcher"),
             asyncio.create_task(self.reconciler.run_forever(self.stop), name="reconcile"),
@@ -295,6 +297,7 @@ async def build_app(settings: Settings) -> App:
                     dry_run=settings.amo_sync_dry_run,
                     salesbot_wait_sec=settings.salesbot_wait_sec,
                     child_by_note=settings.amo_child_by_note,
+                    service_check=settings.amo_service_check,
                     service_by_master=services)
 
     # На российском сервере имя api.telegram.org не разрешается: если заданы
@@ -405,11 +408,13 @@ async def build_app(settings: Settings) -> App:
         rehearsal_engine=lambda scratch: Engine(
             amo=rehearsal_amo, store=scratch, specialists=specialists, dry_run=True,
             salesbot_wait_sec=settings.salesbot_wait_sec,
-            child_by_note=settings.amo_child_by_note, service_by_master=services),
+            child_by_note=settings.amo_child_by_note,
+            service_check=settings.amo_service_check, service_by_master=services),
         live_engine=Engine(amo=live_amo, store=PgLinkStore(own_pool),
                            specialists=specialists, dry_run=False,
                            salesbot_wait_sec=settings.salesbot_wait_sec,
                            child_by_note=settings.amo_child_by_note,
+                           service_check=settings.amo_service_check,
                            service_by_master=services),
     )
 
@@ -545,6 +550,7 @@ def _build_cleaning(settings: Settings, bot_pool: Any, own_pool: Any, mail: Owne
         dry_run=settings.cleaning_sync_dry_run,
         salesbot_wait_sec=settings.salesbot_wait_sec,
         child_by_note=settings.amo_child_by_note,
+        service_check=settings.amo_service_check,
         service_by_master=services,
     )
     watcher = Watcher(

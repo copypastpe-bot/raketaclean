@@ -58,6 +58,10 @@ SERVICE_ENUM_MATTRESS = 128971      # «Чистка матрасов»
 SERVICE_ENUM_CARPETING = 128981     # «Чистка ковролина»
 SERVICE_ENUM_RUG_HOME = 878959      # «чистка ковра на дому» — не ковры партнёра
 SERVICE_ENUM_WINDOWS = 933169       # «Мойка окон»
+SERVICE_ENUM_SOFA_PREMIUM = 878955  # «Диван премиум»
+SERVICE_ENUM_OTHER = 128983         # «Другое» — нестандартные работы
+SERVICE_ENUM_RUG_PICKUP = 878957    # «Ковер вывоз» — на фабрику своими силами, не «Кристалл»
+SERVICE_ENUM_FACADES = 933167       # «Фасады/Вывески»
 FIELD_SPECIALIST = 39243            # Специалист (multiselect): мастер, выполнявший заказ
 # «Специалист» уборки — всегда Ольга Скоропашкина, кто бы ни был бригадиром
 # (решение владельца 2026-09-10). Бригадир уходит в примечание сделки.
@@ -115,6 +119,27 @@ PIPELINES_IGNORED_CARPETS = frozenset((PIPELINE_CARPETS_LEGACY, *PIPELINE_ARCHIV
 FIELD_CARPET_PICKUP = 1414101         # «Дата забора ковра»   ← колонка «Факт забор»
 FIELD_CARPET_RETURN = 1414103         # «Дата возврата ковра» ← колонка «Факт сдача»
 SERVICE_ENUM_CARPETS = 947369         # «Ковры КРИСТАЛ» в списке «Услуга»
+
+# Группы «Услуги» (решение владельца 2026-09-30): по ним робот сверяет сделку
+# с видом заказа. Значения, удалённые из справочника, ни в какую группу не входят
+# и выбору сделки не мешают.
+SERVICE_GROUP_HOME = "home"            # химчистка на дому у заказчика
+SERVICE_GROUP_CLEANING = "cleaning"    # уборка
+SERVICE_GROUP_CARPETS = "carpets"      # ковры партнёра «Кристалл», из календаря не приходят
+SERVICE_GROUP_OTHER = "other"          # вывоз своими силами и нестандартные работы
+SERVICE_GROUPS: dict[int, str] = {
+    SERVICE_ENUM_FURNITURE: SERVICE_GROUP_HOME,
+    SERVICE_ENUM_MATTRESS: SERVICE_GROUP_HOME,
+    SERVICE_ENUM_CARPETING: SERVICE_GROUP_HOME,
+    SERVICE_ENUM_RUG_HOME: SERVICE_GROUP_HOME,
+    SERVICE_ENUM_SOFA_PREMIUM: SERVICE_GROUP_HOME,
+    SERVICE_ENUM_CLEANING: SERVICE_GROUP_CLEANING,
+    SERVICE_ENUM_WINDOWS: SERVICE_GROUP_CLEANING,
+    SERVICE_ENUM_CARPETS: SERVICE_GROUP_CARPETS,
+    SERVICE_ENUM_OTHER: SERVICE_GROUP_OTHER,
+    SERVICE_ENUM_RUG_PICKUP: SERVICE_GROUP_OTHER,
+    SERVICE_ENUM_FACADES: SERVICE_GROUP_OTHER,
+}
 SPECIALIST_ENUM_CARPETS = 947245      # «Кристал» в списке «Специалист»
 
 # «Район города» (поле FIELD_DISTRICT): название из отчёта партнёра → значение списка.

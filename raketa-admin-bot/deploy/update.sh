@@ -15,6 +15,9 @@
 #   sudo raketa-admin-bot-update --contact-check-on|--contact-check-off
 #                                             сверка «номер + имя» записи с контактом сделки
 #                                             и напоминание владельцу при расхождении
+#   sudo raketa-admin-bot-update --service-check-on|--service-check-off
+#                                             сверка «Услуги» сделки с видом заказа
+#                                             при выборе сделки (заказы и уборки)
 #   sudo raketa-admin-bot-update --deletions-on --deletions-rehearsal   удаления заказов: репетиция
 #   sudo raketa-admin-bot-update --deletions-live                      удаления заказов: боевой режим
 #   sudo raketa-admin-bot-update --deletions-off                       удаления заказов: выключить
@@ -74,6 +77,7 @@ CLEANING=""
 ADDRESS_REMINDER=""
 CHILD_BY_NOTE=""
 CONTACT_CHECK=""
+SERVICE_CHECK=""
 DELETIONS=""
 DELETIONS_DRY=""
 WIRE_PAYMENT=""
@@ -130,6 +134,8 @@ for arg in "$@"; do
         --child-by-note-off) CHILD_BY_NOTE=0 ;;
         --contact-check-on)  CONTACT_CHECK=1 ;;
         --contact-check-off) CONTACT_CHECK=0 ;;
+        --service-check-on)  SERVICE_CHECK=1 ;;
+        --service-check-off) SERVICE_CHECK=0 ;;
         --deletions-on)        DELETIONS=1 ;;
         --deletions-off)       DELETIONS=0 ;;
         --deletions-live)      DELETIONS_DRY=0 ;;
@@ -327,6 +333,7 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$ADDRESS_REMINDER" ] && set_flag ADDRESS_REMINDER_ENABLED "$ADDRESS_REMINDER"
 [ -n "$CHILD_BY_NOTE" ] && set_flag AMO_CHILD_BY_NOTE "$CHILD_BY_NOTE"
 [ -n "$CONTACT_CHECK" ] && set_flag GCAL_CONTACT_CHECK_ENABLED "$CONTACT_CHECK"
+[ -n "$SERVICE_CHECK" ] && set_flag AMO_SERVICE_CHECK "$SERVICE_CHECK"
 [ -n "$DELETIONS" ] && set_flag ORDER_DELETIONS_ENABLED "$DELETIONS"
 [ -n "$DELETIONS_DRY" ] && set_flag ORDER_DELETIONS_DRY_RUN "$DELETIONS_DRY"
 [ -n "$WIRE_PAYMENT" ] && set_flag WIRE_PAYMENT_ENABLED "$WIRE_PAYMENT"
