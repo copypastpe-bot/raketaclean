@@ -198,11 +198,24 @@ async def test_path_b_primary_lead_contact_matching_is_not_a_mismatch(amo):
 
 # --- путь А: не сверяем никогда ---
 
+async def _owner_chose_realization(store, order, lead_id: int) -> None:
+    """Путь А: сделку второй воронки выбрал владелец кнопкой.
+
+    Сам матчер вторую воронку с 2026-09-30 не смотрит (решение владельца),
+    поэтому в путь А запись попадает только так.
+    """
+    await store.create(order.event_id, kind=order.kind.value, phone10=order.phone10)
+    await store.update(order.event_id, status="new", path="A", real_lead_id=lead_id,
+                       event_data=order.to_dict())
+
+
 async def test_path_a_existing_realization_deal_is_never_checked(amo):
     amo.add_lead(41400001, ids.PIPELINE_REALIZATION, ids.REAL_STAGE_CREATED)
     amo.leads[41400001]["_embedded"] = {"contacts": [{"id": 555}]}
     amo.contacts.append(contact_with_phone(555, "Ирина", "9004445566"))   # разошлось бы
-    engine = build(amo)
+    store = MemoryCalendarStore(now=lambda: NOW)
+    await _owner_chose_realization(store, an_order(), 41400001)
+    engine = build(amo, store=store)
 
     link = await engine.process(an_order())
 
@@ -231,6 +244,7 @@ async def test_refresh_phone_change_matching_the_deal_is_not_a_mismatch(amo):
     amo.leads[41400001]["_embedded"] = {"contacts": [{"id": 555}]}
     amo.contacts.append(contact_with_phone(555, "Юлия", "9009991122"))
     store = MemoryCalendarStore(now=lambda: NOW)
+    await _owner_chose_realization(store, an_order(), 41400001)
     engine = build(amo, store=store)
     await engine.process(an_order())
 
