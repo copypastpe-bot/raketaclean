@@ -126,6 +126,23 @@ async def test_retry_keeps_the_chosen_path():
     assert link.status == "new" and link.path == "B"
 
 
+async def test_answer_frees_the_card_for_the_next_question():
+    """После ответа робот забывает старую карточку — следующий вопрос придёт новой.
+
+    Номер карточки — признак «уже спросили» для наблюдателя. Не сотри его
+    ответ, повторный вопрос по тому же заказу (после «Проверить ещё раз»)
+    не ушёл бы, а у старой карточки кнопок уже нет. Тот же брак 30.09
+    подвесил запись календаря.
+    """
+    link = AmoLink(order_id=596, phone10="9601861067", status="waiting_owner",
+                   path="B", question=QUESTION, question_msg_id=777)
+    answers = make_answers(link)
+
+    await answers.on_choice(FakeCallback("amosync:596:retry"))
+
+    assert answers.store.links[596].question_msg_id is None
+
+
 async def test_buttons_disappear_after_the_answer():
     """Карточка перестаёт быть кликабельной: дважды на один вопрос не ответишь."""
     answers = make_answers()
@@ -368,6 +385,16 @@ async def make_carpet_answers():
     store = MemoryCarpetStore()
     await store.create(44426, "9601945325")
     return CarpetAnswers(owner_tg_id=OWNER_ID, store=store), store
+
+
+async def test_carpet_answer_frees_the_card_for_the_next_question():
+    """Ковры: тот же признак «уже спросили» — ответ его стирает."""
+    answers, store = await make_carpet_answers()
+    await store.update(44426, status="waiting_owner", question_msg_id=777)
+
+    await answers.on_choice(FakeCallback("carpet:44426:new"))
+
+    assert (await store.get(44426)).question_msg_id is None
 
 
 async def test_carpet_owner_takes_it_over_is_logged_as_manual():

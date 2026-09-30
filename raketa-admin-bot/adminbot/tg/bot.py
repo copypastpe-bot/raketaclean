@@ -275,10 +275,12 @@ class CarpetAnswers:
         # 2026-09-21-evening-summary-rework.md): без этого «Сам разберусь»
         # неотличимо от автоматического already_done, и посчитать «Передано
         # администратору» не по чему.
+        # Номер карточки забываем: иначе новый вопрос по заказу не уйдёт
+        # (см. CalendarAnswers.on_choice, случай 30.09).
         await self.store.update_and_log(
             partner_id, action="answer_owner", dry_run=False,
             entity=("lead" if kind == "lead" else None), amo_id=lead_id,
-            payload={"choice": kind}, **fields)
+            payload={"choice": kind}, question_msg_id=None, **fields)
         log.info("Ковры, заказ партнёра №%s: владелец выбрал %s", partner_id, kind)
         await callback.answer()
         await callback.message.edit_text(f"Ковры, заказ №{partner_id}: {reply}")
@@ -425,10 +427,12 @@ class OwnerAnswers:
         # summary-rework.md): без этого «Сам разберусь» неотличимо от
         # автоматического already_done, и «Передано администратору» не
         # посчитать.
+        # Номер карточки забываем: иначе новый вопрос по заказу не уйдёт
+        # (см. CalendarAnswers.on_choice, случай 30.09).
         await self.store.update_and_log(
             order_id, action="answer_owner", dry_run=False,
             entity=("lead" if kind == "lead" else None), amo_id=lead_id,
-            payload={"choice": kind}, **fields)
+            payload={"choice": kind}, question_msg_id=None, **fields)
         log.info("%s №%s: владелец выбрал %s", self.label, order_id, kind)
         await callback.answer()
         await callback.message.edit_text(f"{self.label} №{order_id}: {reply}")
