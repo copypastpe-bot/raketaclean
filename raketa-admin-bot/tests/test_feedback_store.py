@@ -159,6 +159,18 @@ async def test_store_update_rejects_unknown_field(pool):
         await store.update(601, MODE_LIVE, created_at=None)
 
 
+async def test_store_rejects_unknown_status(pool):
+    """Опечатка в статусе (миграция 019, CHECK на adminbot.feedback_state.status)
+    падает в базе, а не тихо остаётся неверным значением."""
+    import asyncpg
+
+    store = PgFeedbackStore(pool)
+    await store.register(MODE_LIVE, [601])
+
+    with pytest.raises(asyncpg.CheckViolationError):
+        await store.update(601, MODE_LIVE, status="in_progress")
+
+
 async def test_migration_019_applies_twice_without_error(pool):
     """Фикстура уже применила миграции один раз (петлёй по всем файлам) — второй раз здесь."""
     async with pool.acquire() as conn:
