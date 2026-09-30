@@ -393,7 +393,7 @@ now_deletions_dry=$(flag_of ORDER_DELETIONS_DRY_RUN)
 echo "удаления: $([ "$now_deletions" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_deletions_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключены')"
 now_wire_payment=$(flag_of WIRE_PAYMENT_ENABLED)
 now_wire_payment_dry=$(flag_of WIRE_PAYMENT_DRY_RUN)
-echo "оплата по счёту: $([ "$now_wire_payment" = 1 ] && echo "ВКЛЮЧЕНА, $([ "$now_wire_payment_dry" = 1 ] && echo 'репетиция' || echo 'БОЕВОЙ режим')" || echo 'выключена')"
+echo "оплата по счёту: $([ "$now_wire_payment" = 1 ] && echo "ВКЛЮЧЕНА, $([ "$now_wire_payment_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключена')"
 now_promo_callback=$(flag_of PROMO_CALLBACK_ENABLED)
 now_promo_callback_dry=$(flag_of PROMO_CALLBACK_DRY_RUN)
 echo "отклики на промо: $([ "$now_promo_callback" = 1 ] && echo "ВКЛЮЧЕНЫ, $([ "$now_promo_callback_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключены')"
