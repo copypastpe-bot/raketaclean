@@ -146,6 +146,12 @@ rating_requested_at timestamptz, rating_replied_at timestamptz` (типы — к
 4. Поведение для химчистки не меняется: существующие тесты цикла — зелёные без правки смысла.
 5. Полный прогон админ-бота, коммит.
 
+Выполнено: 2026-09-30, 44843fa. Сигнатуры хранилища (`PgFeedbackStore`, протокол
+`FeedbackStore` в `sync.py`): `states(mode) -> dict[FeedbackKey, FeedbackState]`,
+`register(mode, keys: Sequence[FeedbackKey])`, `update(kind, order_id, mode, **fields)`;
+`FeedbackKey = tuple[str, int]` — `(kind, order_id)`, в `models.py`; у `RatedOrder` и
+`FeedbackState` свойство `.key`. `started_at` / `save_started_at` не менялись.
+
 ## Задача 4. Админ-бот: оценки уборок в цикле и тексты по виду работы
 
 **Файлы:** `adminbot/feedback/store.py` (`PgFeedbackSource.rated_orders`),
