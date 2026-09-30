@@ -86,6 +86,8 @@ rating_requested_at timestamptz, rating_replied_at timestamptz` (типы — к
    rating_score = NULL, rating_comment = NULL WHERE id = $1` (зеркало химчистки).
 5. Тесты зелёные, коммит.
 
+Выполнено: 2026-09-30, eda3a98
+
 ## Задача 2. Рабочий бот: ответ-цифра — к уборке или к химчистке
 
 **Файлы:** `bot.py` (`_select_pending_rating_order`, `_process_rating_response`,
