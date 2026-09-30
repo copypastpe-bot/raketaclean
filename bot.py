@@ -3767,6 +3767,7 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
                 conn,
                 client_row=client,
                 order_id=rating_order["id"],
+                kind=rating_order["kind"],
                 rating_score=rating_score,
                 raw_text=normalized_text,
             )
@@ -3858,16 +3859,40 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
 
 RATING_LOOKBACK_DAYS = 30
 
+# Вид работы, к которой относится ответ-цифра клиента, → её таблица
+# (ТЗ docs/plans/2026-09-30-cleaning-ratings.md, задача 2).
+_RATING_TABLES = {"order": "orders", "cleaning": "cleaning_orders"}
+
 
 async def _select_pending_rating_order(conn: asyncpg.Connection, client_id: int) -> asyncpg.Record | None:
+    """Работа клиента, к которой отнести ответ-цифру: `kind` ('order'|'cleaning') и `id`.
+
+    Кандидаты — работы за 30 дней без оценки. Заказы химчистки — как раньше;
+    уборки — только те, по которым оценку просили (у уборок до выката оценку не
+    ловим, решение владельца 30.09), и не удалённые. Берётся одна — с самой свежей
+    просьбой по обеим таблицам вместе.
+    """
     return await conn.fetchrow(
         """
-        SELECT id
-        FROM orders
-        WHERE client_id = $1
-          AND rating_score IS NULL
-          AND created_at >= NOW() - INTERVAL '30 days'
-        ORDER BY COALESCE(rating_requested_at, created_at) DESC
+        SELECT kind, id
+        FROM (
+            SELECT 'order' AS kind, id,
+                   COALESCE(rating_requested_at, created_at) AS asked_at
+            FROM orders
+            WHERE client_id = $1
+              AND rating_score IS NULL
+              AND created_at >= NOW() - INTERVAL '30 days'
+            UNION ALL
+            SELECT 'cleaning' AS kind, id,
+                   rating_requested_at AS asked_at
+            FROM cleaning_orders
+            WHERE client_id = $1
+              AND rating_score IS NULL
+              AND rating_requested_at IS NOT NULL
+              AND deleted_at IS NULL
+              AND created_at >= NOW() - INTERVAL '30 days'
+        ) AS candidates
+        ORDER BY asked_at DESC
         LIMIT 1
         """,
         client_id,
@@ -3879,12 +3904,14 @@ async def _process_rating_response(
     *,
     client_row: Mapping[str, Any],
     order_id: int,
+    kind: str,
     rating_score: int,
     raw_text: str,
 ) -> None:
+    table = _RATING_TABLES[kind]
     await conn.execute(
-        """
-        UPDATE orders
+        f"""
+        UPDATE {table}
         SET rating_score = $1,
             rating_comment = $2,
             rating_replied_at = NOW()
@@ -3894,7 +3921,7 @@ async def _process_rating_response(
         raw_text.strip(),
         order_id,
     )
-    payload = {"order_id": order_id, "score": rating_score}
+    payload = {"order_id": order_id, "score": rating_score, "kind": kind}
     client_id = int(client_row["id"])
     if rating_score >= 5:
         await _try_enqueue_notification(
@@ -3903,7 +3930,7 @@ async def _process_rating_response(
             client_id=client_id,
             payload=payload,
         )
-        await _notify_rating_admins(client_row, order_id, rating_score, raw_text, notify=False)
+        await _notify_rating_admins(client_row, order_id, rating_score, raw_text, notify=False, kind=kind)
     elif rating_score == 4:
         await _try_enqueue_notification(
             conn,
@@ -3911,7 +3938,7 @@ async def _process_rating_response(
             client_id=client_id,
             payload=payload,
         )
-        await _notify_rating_admins(client_row, order_id, rating_score, raw_text, notify=True)
+        await _notify_rating_admins(client_row, order_id, rating_score, raw_text, notify=True, kind=kind)
     else:
         await _try_enqueue_notification(
             conn,
@@ -3919,7 +3946,8 @@ async def _process_rating_response(
             client_id=client_id,
             payload=payload,
         )
-        await _notify_rating_admins(client_row, order_id, rating_score, raw_text, notify=True, urgent=True)
+        await _notify_rating_admins(client_row, order_id, rating_score, raw_text, notify=True, urgent=True,
+                                    kind=kind)
 
 
 async def _notify_rating_admins(
@@ -3929,14 +3957,16 @@ async def _notify_rating_admins(
     message_text: str,
     notify: bool = True,
     urgent: bool = False,
+    kind: str = "order",
 ) -> None:
     if not notify or not ADMIN_TG_IDS:
         return
     prefix = "⚠️" if urgent else ("ℹ️" if rating_score == 4 else "✅")
     name = (client_row.get("full_name") or "Клиент").strip() or "Клиент"
     phone = client_row.get("phone") or "неизвестно"
+    work = f"уборке №{order_id}" if kind == "cleaning" else f"заказу #{order_id}"
     lines = [
-        f"{prefix} Оценка {rating_score} по заказу #{order_id}",
+        f"{prefix} Оценка {rating_score} по {work}",
         f"Клиент: {name}",
         f"Телефон: {phone}",
     ]

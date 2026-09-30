@@ -92,6 +92,16 @@ CREATE TABLE {SCHEMA}.orders (
     rating_requested_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT NOW()
 );
+-- С 2026-09-30 ответ-цифра ищет и уборку, по которой просили оценку
+-- (ТЗ docs/plans/2026-09-30-cleaning-ratings.md, задача 2).
+CREATE TABLE {SCHEMA}.cleaning_orders (
+    id serial PRIMARY KEY,
+    client_id integer,
+    rating_score smallint,
+    rating_requested_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    deleted_at timestamptz
+);
 """
 
 CLIENT_PHONE = "+7 916 111-22-33"
