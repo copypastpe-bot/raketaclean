@@ -105,15 +105,15 @@ This project (Rules 4.2):
 
 Files longer than 500 lines and their function maps:
 
-- `bot.py` (15070 lines) -> `bot.py.map.md`
-- `raketa-admin-bot/adminbot/main.py` (1296 lines) -> `raketa-admin-bot/adminbot/main.py.map.md`
+- `bot.py` (14935 lines) -> `bot.py.map.md`
+- `raketa-admin-bot/adminbot/main.py` (1466 lines) -> `raketa-admin-bot/adminbot/main.py.map.md`
 - `raketa-admin-bot/adminbot/db.py` (1772 lines) -> `raketa-admin-bot/adminbot/db.py.map.md`
-- `raketa-admin-bot/adminbot/gcal/engine.py` (1130 lines) -> `raketa-admin-bot/adminbot/gcal/engine.py.map.md`
-- `raketa-admin-bot/adminbot/sync/engine.py` (761 lines) -> `raketa-admin-bot/adminbot/sync/engine.py.map.md`
+- `raketa-admin-bot/adminbot/gcal/engine.py` (1163 lines) -> `raketa-admin-bot/adminbot/gcal/engine.py.map.md`
+- `raketa-admin-bot/adminbot/sync/engine.py` (771 lines) -> `raketa-admin-bot/adminbot/sync/engine.py.map.md`
 - `raketa-admin-bot/adminbot/tg/bot.py` (701 lines) -> `raketa-admin-bot/adminbot/tg/bot.py.map.md`
-- `raketa-admin-bot/adminbot/tg/cards.py` (618 lines) -> `raketa-admin-bot/adminbot/tg/cards.py.map.md`
+- `raketa-admin-bot/adminbot/tg/cards.py` (619 lines) -> `raketa-admin-bot/adminbot/tg/cards.py.map.md`
 - `cleaning/handlers.py` (1487 lines) -> `cleaning/handlers.py.map.md`
-- `raketa-notify/notifyd/db.py` (548 lines) -> `raketa-notify/notifyd/db.py.map.md`
+- `raketa-notify/notifyd/db.py` (550 lines) -> `raketa-notify/notifyd/db.py.map.md`
 
 ## Server work (owner decision 2026-09-21)
 
