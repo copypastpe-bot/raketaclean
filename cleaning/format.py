@@ -62,12 +62,18 @@ def _olya_line(olya_balance: Decimal) -> str:
 
 
 def format_dividend_payout_alert(
-    *, recipients: list[str], shares: list[Decimal], balance_after: Decimal
+    *,
+    recipients: list[str],
+    shares: list[Decimal],
+    balance_after: Decimal,
+    olya_balance: Decimal | None = None,  # остаток денег Оли; None — строки нет
 ) -> str:
     """Сообщение в кассовый чат: кто сколько получил и что осталось."""
     lines = ["Выплата прибыли:"]
     lines += [f"{name} — {_money(share)}₽" for name, share in zip(recipients, shares)]
     lines.append(f"Остаток в кассе: {_money(balance_after)}₽")
+    if olya_balance is not None:
+        lines.append(_olya_line(olya_balance))
     return "\n".join(lines)
 
 
@@ -77,11 +83,14 @@ def format_dividend_payout_confirm(
     recipients: list[str],
     shares: list[Decimal],
     balance: Decimal,
+    source_line: str | None = None,  # «Источник: …» — из чьих денег; None — строки нет
 ) -> str:
     """Что человек видит перед подтверждением: деньги живые, показываем всё."""
     lines = [f"Выплата прибыли {_money(total)}₽:"]
     lines += [f"{name} — {_money(share)}₽" for name, share in zip(recipients, shares)]
     lines.append(f"В кассе {_money(balance)}₽, останется {_money(balance - total)}₽.")
+    if source_line:
+        lines.append(source_line)
     lines.append("Подтвердить?")
     return "\n".join(lines)
 

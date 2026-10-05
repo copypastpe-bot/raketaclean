@@ -19,7 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from notifications import NotificationRules, enqueue_notification
 
-from .access import can_create_cleaning_order, has_permission
+from .access import can_create_cleaning_order, get_user_role, has_permission
 from .admin_ops import (
     add_cash_expense,
     add_cash_income,
@@ -181,6 +181,61 @@ def _confirm_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Отменить")],
         ],
         resize_keyboard=True,
+    )
+
+
+# ---------- шаг «Оля / Дима»: из чьих денег операция ----------
+# Деньги Оли — наличные компании на руках у бригадира клининга; «Дима» — обычная
+# касса. Админские операции с кассой спрашивают, чьи деньги (решение владельца
+# 05.10, ТЗ docs/plans/2026-10-05-olya-money-register.md, задача 3). Кнопки —
+# как у выбора «Дима / Женя» в bot.py (`expense_owner_kb`).
+
+CASH_HOLDER_QUESTION_SPEND = (
+    "Из чьих денег? «Оля» — деньги на руках у Оли, «Дима» — обычная касса."
+)
+CASH_HOLDER_QUESTION_INCOME = (
+    "Куда вносим? «Оля» — деньги на руках у Оли, «Дима» — обычная касса."
+)
+_CASH_HOLDER_ANSWERS = {
+    "оля": CASH_HOLDER_OLYA,
+    "olya": CASH_HOLDER_OLYA,
+    "дима": CASH_HOLDER_DIMA,
+    "dima": CASH_HOLDER_DIMA,
+}
+
+
+def _cash_holder_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Оля"), KeyboardButton(text="Дима")],
+            [KeyboardButton(text="Отмена")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _parse_cash_holder(text: str | None) -> str | None:
+    """«Оля» → 'olya', «Дима» → 'dima', прочее → None."""
+    return _CASH_HOLDER_ANSWERS.get((text or "").strip().lower())
+
+
+def _cash_holder_line(cash_holder: str, *, income: bool = False) -> str:
+    """Строка подтверждения: из чьих денег (или куда, для прихода)."""
+    label = "деньги Оли" if cash_holder == CASH_HOLDER_OLYA else "касса (Дима)"
+    return f"{'Куда' if income else 'Источник'}: {label}"
+
+
+async def _ask_cash_holder(msg: Message, *, income: bool = False) -> None:
+    await msg.answer(
+        CASH_HOLDER_QUESTION_INCOME if income else CASH_HOLDER_QUESTION_SPEND,
+        reply_markup=_cash_holder_kb(),
+    )
+
+
+async def _reask_cash_holder(msg: Message) -> None:
+    await msg.answer(
+        "Выберите «Оля» или «Дима» кнопками ниже.", reply_markup=_cash_holder_kb()
     )
 
 
@@ -905,7 +960,16 @@ async def foreman_expense_start(msg: Message, state: FSMContext, **kw) -> None:
     if not await _has_permission(pool, msg.from_user.id, "cleaning_record_expense"):
         await msg.answer("Команда доступна только клинерам и администраторам.")
         return
+    async with pool.acquire() as conn:
+        role = await get_user_role(conn, msg.from_user.id)
     await state.clear()
+    if role == "cleaner":
+        # Расход кнопкой Оли — всегда из её денег, без вопроса (решение 05.10, п.3).
+        await state.update_data(cash_holder=CASH_HOLDER_OLYA)
+    else:
+        # Админ ведёт этот сценарий — спросим «Оля / Дима», как в остальных
+        # админских операциях с кассой (решение координатора к задаче 3).
+        await state.update_data(ask_cash_holder=True)
     await state.set_state(CleaningForemanExpenseFSM.amount)
     await msg.answer("Введите сумму расхода:", reply_markup=cancel_kb)
 
@@ -931,12 +995,31 @@ async def foreman_expense_category(msg: Message, state: FSMContext) -> None:
         await msg.answer("Выберите категорию кнопкой.", reply_markup=_expense_category_kb())
         return
     await state.update_data(category=category)
+    data = await state.get_data()
+    if data.get("ask_cash_holder"):
+        await state.set_state(CleaningForemanExpenseFSM.cash_holder)
+        await _ask_cash_holder(msg)
+        return
     await state.set_state(CleaningForemanExpenseFSM.comment)
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="Без комментария")], [KeyboardButton(text="Отмена")]],
         resize_keyboard=True,
     )
     await msg.answer("Комментарий? (введите текст или нажмите «Без комментария»)", reply_markup=kb)
+
+
+@router.message(CleaningForemanExpenseFSM.cash_holder, F.text)
+async def foreman_expense_cash_holder(msg: Message, state: FSMContext) -> None:
+    cash_holder = _parse_cash_holder(msg.text)
+    if cash_holder is None:
+        await _reask_cash_holder(msg)
+        return
+    await state.update_data(cash_holder=cash_holder)
+    await state.set_state(CleaningForemanExpenseFSM.comment)
+    await msg.answer(
+        "Комментарий? (введите текст или нажмите «Без комментария»)",
+        reply_markup=_comment_kb(),
+    )
 
 
 @router.message(CleaningForemanExpenseFSM.comment, F.text)
@@ -948,13 +1031,15 @@ async def foreman_expense_comment(msg: Message, state: FSMContext) -> None:
     data = await state.get_data()
     amount = Decimal(data["amount"])
     await state.set_state(CleaningForemanExpenseFSM.confirm)
-    await msg.answer(
-        "Подтвердите расход:\n"
-        f"Категория: {data['category']}\n"
-        f"Сумма: {_money_str(amount)}₽\n"
-        f"Комментарий: {comment}",
-        reply_markup=_confirm_kb(),
-    )
+    lines = [
+        "Подтвердите расход:",
+        f"Категория: {data['category']}",
+        f"Сумма: {_money_str(amount)}₽",
+    ]
+    if data.get("ask_cash_holder"):
+        lines.append(_cash_holder_line(data["cash_holder"]))
+    lines.append(f"Комментарий: {comment}")
+    await msg.answer("\n".join(lines), reply_markup=_confirm_kb())
 
 
 @router.message(CleaningForemanExpenseFSM.confirm, F.text == "Провести")
@@ -965,15 +1050,19 @@ async def foreman_expense_confirm(msg: Message, state: FSMContext, **kw) -> None
     amount = Decimal(data["amount"])
     category = data["category"]
     comment = data.get("comment") or "Расход"
+    # Клинер — всегда деньги Оли (решение 05.10, п.3); админ выбрал на шаге
+    # «Оля / Дима». Без отметки в данных — как раньше, деньги Оли.
+    cash_holder = data.get("cash_holder") or CASH_HOLDER_OLYA
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Расход кнопкой Оли — всегда из её денег (решение 05.10).
             await add_cash_expense(
                 conn, category=category, amount=amount, comment=comment,
-                cash_holder=CASH_HOLDER_OLYA,
+                cash_holder=cash_holder,
             )
             balance_after = await get_cleaning_balance(conn)
-            olya_balance = await get_olya_balance(conn)
+            olya_balance = (
+                await get_olya_balance(conn) if cash_holder == CASH_HOLDER_OLYA else None
+            )
     await send_cleaning_money_flow(
         bot,
         format_cash_op_alert(
@@ -1060,11 +1149,33 @@ async def div_amount(msg: Message, state: FSMContext, **kw) -> None:
         await msg.answer(text, reply_markup=cancel_kb)
         return
 
-    await state.update_data(amount=str(amount))
+    # Касса на момент ввода суммы — для текста подтверждения после шага
+    # «Оля / Дима»; проведение всё равно перепроверит кассу в своей транзакции.
+    await state.update_data(
+        amount=str(amount),
+        balance=str(balance),
+        shares=[str(share) for share in shares],
+    )
+    await state.set_state(CleaningDividendFSM.cash_holder)
+    await _ask_cash_holder(msg)
+
+
+@router.message(CleaningDividendFSM.cash_holder, F.text)
+async def div_cash_holder(msg: Message, state: FSMContext) -> None:
+    cash_holder = _parse_cash_holder(msg.text)
+    if cash_holder is None:
+        await _reask_cash_holder(msg)
+        return
+    await state.update_data(cash_holder=cash_holder)
+    data = await state.get_data()
     await state.set_state(CleaningDividendFSM.confirm)
     await msg.answer(
         format_dividend_payout_confirm(
-            total=amount, recipients=recipients, shares=shares, balance=balance
+            total=Decimal(data["amount"]),
+            recipients=configured_recipients(),
+            shares=[Decimal(share) for share in data["shares"]],
+            balance=Decimal(data["balance"]),
+            source_line=_cash_holder_line(cash_holder),
         ),
         reply_markup=_confirm_kb(),
     )
@@ -1076,7 +1187,9 @@ async def div_provesti(msg: Message, state: FSMContext, **kw) -> None:
     bot = kw["bot"]
     data = await state.get_data()
     amount = Decimal(data["amount"])
+    cash_holder = data["cash_holder"]
     recipients = configured_recipients()
+    olya_balance = None
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -1089,12 +1202,13 @@ async def div_provesti(msg: Message, state: FSMContext, **kw) -> None:
             if status != PAYOUT_OK:
                 payout_id = None
             else:
-                # Выбор «Оля / Дима» у админа — ТЗ 2026-10-05, задача 3; пока касса.
                 payout_id = await record_dividend(
                     conn, amount=amount, comment=dividend_comment(),
-                    cash_holder=CASH_HOLDER_DIMA,
+                    cash_holder=cash_holder,
                 )
                 balance = await get_cleaning_balance(conn)
+                if cash_holder == CASH_HOLDER_OLYA:
+                    olya_balance = await get_olya_balance(conn)
 
     await state.clear()
     if payout_id is None:
@@ -1108,7 +1222,8 @@ async def div_provesti(msg: Message, state: FSMContext, **kw) -> None:
     await send_cleaning_money_flow(
         bot,
         format_dividend_payout_alert(
-            recipients=recipients, shares=shares, balance_after=balance
+            recipients=recipients, shares=shares, balance_after=balance,
+            olya_balance=olya_balance,
         ),
     )
     await msg.answer(
@@ -1223,6 +1338,17 @@ async def cash_add_amount(msg: Message, state: FSMContext) -> None:
         await msg.answer("Нужно число > 0.", reply_markup=cancel_kb)
         return
     await state.update_data(amount=str(amount))
+    await state.set_state(CleaningCashAddFSM.cash_holder)
+    await _ask_cash_holder(msg, income=True)
+
+
+@router.message(CleaningCashAddFSM.cash_holder, F.text)
+async def cash_add_cash_holder(msg: Message, state: FSMContext) -> None:
+    cash_holder = _parse_cash_holder(msg.text)
+    if cash_holder is None:
+        await _reask_cash_holder(msg)
+        return
+    await state.update_data(cash_holder=cash_holder)
     await state.set_state(CleaningCashAddFSM.comment)
     await msg.answer("Комментарий (или «-»):", reply_markup=cancel_kb)
 
@@ -1237,6 +1363,7 @@ async def cash_add_comment(msg: Message, state: FSMContext) -> None:
     await state.set_state(CleaningCashAddFSM.confirm)
     await msg.answer(
         f"Подтвердите приход: {data['method']} {_money_str(Decimal(data['amount']))}₽"
+        f"\n{_cash_holder_line(data['cash_holder'], income=True)}"
         + (f"\nКомментарий: {comment}" if comment else ""),
         reply_markup=_confirm_kb(),
     )
@@ -1250,14 +1377,17 @@ async def cash_add_provesti(msg: Message, state: FSMContext, **kw) -> None:
     amount = Decimal(data["amount"])
     method = data["method"]
     comment = data.get("comment") or None
+    cash_holder = data["cash_holder"]
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Выбор «Оля / Дима» у админа — ТЗ 2026-10-05, задача 3; пока касса.
             await add_cash_income(
                 conn, method=method, amount=amount, comment=comment,
-                cash_holder=CASH_HOLDER_DIMA,
+                cash_holder=cash_holder,
             )
             balance_after = await get_cleaning_balance(conn)
+            olya_balance = (
+                await get_olya_balance(conn) if cash_holder == CASH_HOLDER_OLYA else None
+            )
     await send_cleaning_money_flow(
         bot,
         format_cash_op_alert(
@@ -1266,6 +1396,7 @@ async def cash_add_provesti(msg: Message, state: FSMContext, **kw) -> None:
             amount=amount,
             comment=comment,
             balance_after=balance_after,
+            olya_balance=olya_balance,
         ),
     )
     await msg.answer(
@@ -1312,6 +1443,17 @@ async def cash_exp_amount(msg: Message, state: FSMContext) -> None:
         await msg.answer("Нужно число > 0.", reply_markup=cancel_kb)
         return
     await state.update_data(amount=str(amount))
+    await state.set_state(CleaningCashExpenseFSM.cash_holder)
+    await _ask_cash_holder(msg)
+
+
+@router.message(CleaningCashExpenseFSM.cash_holder, F.text)
+async def cash_exp_cash_holder(msg: Message, state: FSMContext) -> None:
+    cash_holder = _parse_cash_holder(msg.text)
+    if cash_holder is None:
+        await _reask_cash_holder(msg)
+        return
+    await state.update_data(cash_holder=cash_holder)
     await state.set_state(CleaningCashExpenseFSM.comment)
     await msg.answer("Комментарий (или «-»):", reply_markup=cancel_kb)
 
@@ -1326,6 +1468,7 @@ async def cash_exp_comment(msg: Message, state: FSMContext) -> None:
     await state.set_state(CleaningCashExpenseFSM.confirm)
     await msg.answer(
         f"Подтвердите расход: {data['category']} {_money_str(Decimal(data['amount']))}₽"
+        f"\n{_cash_holder_line(data['cash_holder'])}"
         + (f"\nКомментарий: {comment}" if comment else ""),
         reply_markup=_confirm_kb(),
     )
@@ -1339,14 +1482,17 @@ async def cash_exp_provesti(msg: Message, state: FSMContext, **kw) -> None:
     amount = Decimal(data["amount"])
     category = data["category"]
     comment = data.get("comment") or None
+    cash_holder = data["cash_holder"]
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Выбор «Оля / Дима» у админа — ТЗ 2026-10-05, задача 3; пока касса.
             await add_cash_expense(
                 conn, category=category, amount=amount, comment=comment,
-                cash_holder=CASH_HOLDER_DIMA,
+                cash_holder=cash_holder,
             )
             balance_after = await get_cleaning_balance(conn)
+            olya_balance = (
+                await get_olya_balance(conn) if cash_holder == CASH_HOLDER_OLYA else None
+            )
     await send_cleaning_money_flow(
         bot,
         format_cash_op_alert(
@@ -1355,6 +1501,7 @@ async def cash_exp_provesti(msg: Message, state: FSMContext, **kw) -> None:
             amount=amount,
             comment=comment,
             balance_after=balance_after,
+            olya_balance=olya_balance,
         ),
     )
     await msg.answer(
@@ -1388,6 +1535,17 @@ async def cash_wd_amount(msg: Message, state: FSMContext) -> None:
         await msg.answer("Нужно число > 0.", reply_markup=cancel_kb)
         return
     await state.update_data(amount=str(amount))
+    await state.set_state(CleaningCashWithdrawalFSM.cash_holder)
+    await _ask_cash_holder(msg)
+
+
+@router.message(CleaningCashWithdrawalFSM.cash_holder, F.text)
+async def cash_wd_cash_holder(msg: Message, state: FSMContext) -> None:
+    cash_holder = _parse_cash_holder(msg.text)
+    if cash_holder is None:
+        await _reask_cash_holder(msg)
+        return
+    await state.update_data(cash_holder=cash_holder)
     await state.set_state(CleaningCashWithdrawalFSM.comment)
     await msg.answer("Комментарий (или «-»):", reply_markup=cancel_kb)
 
@@ -1402,6 +1560,7 @@ async def cash_wd_comment(msg: Message, state: FSMContext) -> None:
     await state.set_state(CleaningCashWithdrawalFSM.confirm)
     await msg.answer(
         f"Подтвердите изъятие: {_money_str(Decimal(data['amount']))}₽"
+        f"\n{_cash_holder_line(data['cash_holder'])}"
         + (f"\nКомментарий: {comment}" if comment else ""),
         reply_markup=_confirm_kb(),
     )
@@ -1414,13 +1573,16 @@ async def cash_wd_provesti(msg: Message, state: FSMContext, **kw) -> None:
     data = await state.get_data()
     amount = Decimal(data["amount"])
     comment = data.get("comment") or None
+    cash_holder = data["cash_holder"]
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Выбор «Оля / Дима» у админа — ТЗ 2026-10-05, задача 3; пока касса.
             await add_cash_withdrawal(
-                conn, amount=amount, comment=comment, cash_holder=CASH_HOLDER_DIMA,
+                conn, amount=amount, comment=comment, cash_holder=cash_holder,
             )
             balance_after = await get_cleaning_balance(conn)
+            olya_balance = (
+                await get_olya_balance(conn) if cash_holder == CASH_HOLDER_OLYA else None
+            )
     await send_cleaning_money_flow(
         bot,
         format_cash_op_alert(
@@ -1429,6 +1591,7 @@ async def cash_wd_provesti(msg: Message, state: FSMContext, **kw) -> None:
             amount=amount,
             comment=comment,
             balance_after=balance_after,
+            olya_balance=olya_balance,
         ),
     )
     await msg.answer(

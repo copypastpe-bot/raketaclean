@@ -20,8 +20,12 @@ class CleaningOrderFSM(StatesGroup):
     confirm = State()
 
 
+# cash_holder — шаг «Оля / Дима»: из чьих денег операция (cleaning_cashbook.cash_holder,
+# ТЗ docs/plans/2026-10-05-olya-money-register.md, задача 3).
+
 class CleaningDividendFSM(StatesGroup):
     amount = State()
+    cash_holder = State()
     confirm = State()
 
 
@@ -32,6 +36,7 @@ class CleaningDividendCancelFSM(StatesGroup):
 class CleaningCashAddFSM(StatesGroup):
     method = State()
     amount = State()
+    cash_holder = State()
     comment = State()
     confirm = State()
 
@@ -39,12 +44,14 @@ class CleaningCashAddFSM(StatesGroup):
 class CleaningCashExpenseFSM(StatesGroup):
     category = State()
     amount = State()
+    cash_holder = State()
     comment = State()
     confirm = State()
 
 
 class CleaningCashWithdrawalFSM(StatesGroup):
     amount = State()
+    cash_holder = State()
     comment = State()
     confirm = State()
 
@@ -60,5 +67,6 @@ class CleaningClientLookupFSM(StatesGroup):
 class CleaningForemanExpenseFSM(StatesGroup):
     amount = State()
     category = State()
+    cash_holder = State()  # только у не-клинера; клинер всегда тратит деньги Оли
     comment = State()
     confirm = State()

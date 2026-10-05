@@ -112,7 +112,7 @@ Files longer than 500 lines and their function maps:
 - `raketa-admin-bot/adminbot/sync/engine.py` (771 lines) -> `raketa-admin-bot/adminbot/sync/engine.py.map.md`
 - `raketa-admin-bot/adminbot/tg/bot.py` (701 lines) -> `raketa-admin-bot/adminbot/tg/bot.py.map.md`
 - `raketa-admin-bot/adminbot/tg/cards.py` (619 lines) -> `raketa-admin-bot/adminbot/tg/cards.py.map.md`
-- `cleaning/handlers.py` (1545 lines) -> `cleaning/handlers.py.map.md`
+- `cleaning/handlers.py` (1708 lines) -> `cleaning/handlers.py.map.md`
 - `raketa-notify/notifyd/db.py` (550 lines) -> `raketa-notify/notifyd/db.py.map.md`
 
 ## Server work (owner decision 2026-09-21)
