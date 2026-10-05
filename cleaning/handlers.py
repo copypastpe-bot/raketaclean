@@ -21,17 +21,23 @@ from notifications import NotificationRules, enqueue_notification
 
 from .access import can_create_cleaning_order, get_user_role, has_permission
 from .admin_ops import (
+    CashMoveExceedsBalance,
     add_cash_expense,
     add_cash_income,
     add_cash_withdrawal,
     cancel_dividend,
     cancel_order,
+    cash_holder_label,
+    cash_move_route,
     list_recent_dividends,
+    record_cash_move,
 )
 from .cashbook import (
     get_cleaning_balance,
     get_cleaning_cash_report,
     get_cleaning_orders_list,
+    get_dima_balance,
+    get_holder_balance,
     get_olya_balance,
     list_olya_entries,
     record_dividend,
@@ -41,6 +47,7 @@ from .cashbook import (
 from .client import find_client_by_phone, normalize_phone, upsert_client
 from .constants import (
     CASH_HOLDER_DIMA,
+    CASH_HOLDER_DIMA_LABEL,
     CASH_HOLDER_OLYA,
     CASH_HOLDER_OLYA_LABEL,
     CLEANING_ALL_PAYMENT_LABELS,
@@ -52,6 +59,7 @@ from .constants import (
 )
 from .format import (
     format_cancel_order_alert,
+    format_cash_move_alert,
     format_cash_op_alert,
     format_cash_report,
     format_dividend_cancel_alert,
@@ -110,6 +118,7 @@ from .fsm import (
     CleaningCancelOrderFSM,
     CleaningCashAddFSM,
     CleaningCashExpenseFSM,
+    CleaningCashMoveFSM,
     CleaningCashWithdrawalFSM,
     CleaningClientLookupFSM,
     CleaningDividendCancelFSM,
@@ -366,6 +375,7 @@ async def start_cleaning_order(msg: Message, state: FSMContext, **data) -> None:
         CleaningClientLookupFSM,
         CleaningForemanExpenseFSM,
         CleaningDividendCancelFSM,
+        CleaningCashMoveFSM,
     ),
     F.text.in_({"Отмена", "Отменить"}),
 )
@@ -1633,6 +1643,153 @@ async def cash_wd_provesti(msg: Message, state: FSMContext, **kw) -> None:
     await msg.answer(
         f"Изъятие проведено. Касса: {_money_str(balance_after)}₽",
         reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.clear()
+
+
+# ---------- /cleaning_move: перемещение между кучками ----------
+# «Деньги Ольга» ↔ «Касса (Дима)»; вся касса клининга не меняется (ТЗ
+# docs/plans/2026-10-05-olya-money-move.md, задача 3). Остаток источника
+# проверяется на шаге суммы и ещё раз под замком при записи (record_cash_move).
+
+_CASH_MOVE_SOURCES = {
+    CASH_HOLDER_OLYA_LABEL: CASH_HOLDER_OLYA,
+    CASH_HOLDER_DIMA_LABEL: CASH_HOLDER_DIMA,
+}
+
+
+def _cash_move_source_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=CASH_HOLDER_OLYA_LABEL),
+                KeyboardButton(text=CASH_HOLDER_DIMA_LABEL),
+            ],
+            [KeyboardButton(text="Отмена")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _cash_move_exceeds_text(label: str, balance: Decimal) -> str:
+    return f"Нельзя больше остатка: в «{label}» {_money_str(balance)}₽."
+
+
+@router.message(Command("cleaning_move"))
+async def start_cash_move(msg: Message, state: FSMContext, **kw) -> None:
+    pool: asyncpg.Pool = kw["pool"]
+    if not await _has_permission(pool, msg.from_user.id, "cleaning_manage_cash"):
+        await msg.answer("Команда доступна только администраторам.")
+        return
+    await state.clear()
+    await state.set_state(CleaningCashMoveFSM.source)
+    await msg.answer("Откуда перемещаем?", reply_markup=_cash_move_source_kb())
+
+
+@router.message(CleaningCashMoveFSM.source, F.text)
+async def cash_move_source(msg: Message, state: FSMContext, **kw) -> None:
+    source = _CASH_MOVE_SOURCES.get(msg.text.strip())
+    if source is None:
+        await msg.answer(
+            f"Выберите «{CASH_HOLDER_OLYA_LABEL}» или «{CASH_HOLDER_DIMA_LABEL}» "
+            "кнопками ниже.",
+            reply_markup=_cash_move_source_kb(),
+        )
+        return
+    pool: asyncpg.Pool = kw["pool"]
+    async with pool.acquire() as conn:
+        balance = await get_holder_balance(conn, source)
+    label = cash_holder_label(source)
+    if balance <= 0:
+        await state.clear()
+        await msg.answer(
+            f"В «{label}» {_money_str(balance)}₽ — перемещать нечего.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+    await state.update_data(source=source)
+    await state.set_state(CleaningCashMoveFSM.amount)
+    await msg.answer(
+        f"{cash_move_route(source)}. Сейчас в «{label}»: {_money_str(balance)}₽. "
+        "Сумма (руб):",
+        reply_markup=cancel_kb,
+    )
+
+
+@router.message(CleaningCashMoveFSM.amount, F.text)
+async def cash_move_amount(msg: Message, state: FSMContext, **kw) -> None:
+    amount = parse_amount(msg.text)
+    if amount is None or amount <= 0:
+        await msg.answer("Нужно число > 0.", reply_markup=cancel_kb)
+        return
+    source = (await state.get_data())["source"]
+    pool: asyncpg.Pool = kw["pool"]
+    async with pool.acquire() as conn:
+        balance = await get_holder_balance(conn, source)
+    if amount > balance:
+        await msg.answer(
+            _cash_move_exceeds_text(cash_holder_label(source), balance),
+            reply_markup=cancel_kb,
+        )
+        return
+    await state.update_data(amount=str(amount))
+    await state.set_state(CleaningCashMoveFSM.comment)
+    await msg.answer("Комментарий (или «-»):", reply_markup=cancel_kb)
+
+
+@router.message(CleaningCashMoveFSM.comment, F.text)
+async def cash_move_comment(msg: Message, state: FSMContext) -> None:
+    comment = msg.text.strip()
+    if comment == "-":
+        comment = ""
+    await state.update_data(comment=comment)
+    data = await state.get_data()
+    await state.set_state(CleaningCashMoveFSM.confirm)
+    await msg.answer(
+        "Подтвердите перемещение"
+        f"\n{cash_move_route(data['source'])}: {_money_str(Decimal(data['amount']))}₽"
+        + (f"\nКомментарий: {comment}" if comment else ""),
+        reply_markup=_confirm_kb(),
+    )
+
+
+@router.message(CleaningCashMoveFSM.confirm, F.text == "Провести")
+async def cash_move_provesti(msg: Message, state: FSMContext, **kw) -> None:
+    pool: asyncpg.Pool = kw["pool"]
+    bot = kw["bot"]
+    data = await state.get_data()
+    source = data["source"]
+    amount = Decimal(data["amount"])
+    comment = data.get("comment") or None
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                move_id = await record_cash_move(
+                    conn, source=source, amount=amount, comment=comment
+                )
+                # Замок перемещений держится до конца транзакции — остатки
+                # для чата согласованы с записью.
+                olya_balance = await get_olya_balance(conn)
+                dima_balance = await get_dima_balance(conn)
+    except CashMoveExceedsBalance as exc:
+        await state.clear()
+        await msg.answer(
+            _cash_move_exceeds_text(exc.label, exc.balance),
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+    await send_cleaning_money_flow(
+        bot,
+        format_cash_move_alert(
+            route=cash_move_route(source),
+            amount=amount,
+            comment=comment,
+            olya_balance=olya_balance,
+            dima_balance=dima_balance,
+        ),
+    )
+    await msg.answer(
+        f"Перемещение #{move_id} проведено.", reply_markup=ReplyKeyboardRemove()
     )
     await state.clear()
 

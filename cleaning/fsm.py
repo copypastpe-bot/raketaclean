@@ -56,6 +56,14 @@ class CleaningCashWithdrawalFSM(StatesGroup):
     confirm = State()
 
 
+class CleaningCashMoveFSM(StatesGroup):
+    # Перемещение между кучками «Деньги Ольга» ↔ «Касса (Дима)»
+    # (ТЗ docs/plans/2026-10-05-olya-money-move.md, задача 3).
+    source = State()
+    amount = State()
+    comment = State()
+    confirm = State()
+
 class CleaningCancelOrderFSM(StatesGroup):
     confirm = State()
 

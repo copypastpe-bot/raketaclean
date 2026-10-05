@@ -151,6 +151,36 @@ def format_cash_op_alert(
     return "\n".join(lines)
 
 
+def _cash_holders_lines(*, olya_balance: Decimal, dima_balance: Decimal) -> list[str]:
+    """Остатки двух кучек кассы клининга — хвост сообщений о перемещении."""
+    return [
+        _olya_line(olya_balance),
+        f"{CASH_HOLDER_DIMA_LABEL}: {_money(dima_balance)}₽",
+    ]
+
+
+def format_cash_move_alert(
+    *,
+    route: str,              # «Деньги Ольга → Касса (Дима)» или обратно
+    amount: Decimal,
+    comment: str | None,
+    olya_balance: Decimal,
+    dima_balance: Decimal,
+) -> str:
+    """Перемещение между кучками (ТЗ docs/plans/2026-10-05-olya-money-move.md, решение 5)."""
+    lines = [
+        "🔁 Перемещение денег",
+        f"{route}: {_money(amount)}₽",
+    ]
+    if comment:
+        lines.append(f"Комментарий: {comment}")
+    lines.append("")
+    lines.extend(
+        _cash_holders_lines(olya_balance=olya_balance, dima_balance=dima_balance)
+    )
+    return "\n".join(lines)
+
+
 def format_cash_report(*, label: str, report: dict, balance_after: Decimal) -> str:
     lines = [f"📊 Касса клининга — {label}"]
     lines.append(f"Приход: {_money(report['income_total'])}₽")
