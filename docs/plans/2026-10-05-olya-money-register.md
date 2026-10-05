@@ -59,6 +59,8 @@
 
 ### Задача 1. Поле и миграция
 
+Выполнено: 451c4b7
+
 - `app/migrations/0017_cleaning_cashbook_cash_holder.sql`: `ADD COLUMN IF NOT EXISTS
   cash_holder text` + `CHECK (cash_holder IN ('olya','dima'))` (идемпотентно, через `DO $$`
   как в соседних миграциях; образец — `0016_cleaning_orders_rating.sql`).
