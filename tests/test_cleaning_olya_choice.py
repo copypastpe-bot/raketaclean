@@ -40,8 +40,8 @@ from cleaning.fsm import (
     CleaningForemanExpenseFSM,
 )
 
-SPEND_Q = "Из чьих денег? «Оля» — деньги на руках у Оли, «Дима» — обычная касса."
-INCOME_Q = "Куда вносим? «Оля» — деньги на руках у Оли, «Дима» — обычная касса."
+SPEND_Q = "Источник? «Оля» — Деньги Ольга, «Дима» — обычная касса."
+INCOME_Q = "Куда вносим? «Оля» — Деньги Ольга, «Дима» — обычная касса."
 UNRECOGNIZED = "Команда не распознана. Выберите действие на клавиатуре ниже."
 
 _user_ids = itertools.count(910_001)
@@ -268,14 +268,14 @@ class CashExpenseChoiceTests(_DispatchCase):
         confirm = await self.send("хлорка")
         self.assertEqual(
             confirm,
-            ["Подтвердите расход: Химия 500₽\nИсточник: деньги Оли\nКомментарий: хлорка"],
+            ["Подтвердите расход: Химия 500₽\nИсточник: Деньги Ольга\nКомментарий: хлорка"],
         )
         await self.send("Провести")
         self.assertEqual(
             self.add_cash_expense.await_args.kwargs["cash_holder"], CASH_HOLDER_OLYA
         )
         self.get_olya_balance.assert_awaited_once()
-        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Оли: 4 200₽")
+        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
         self.assertIsNone(await self.state())
 
     async def test_dima(self):
@@ -288,7 +288,7 @@ class CashExpenseChoiceTests(_DispatchCase):
             self.add_cash_expense.await_args.kwargs["cash_holder"], CASH_HOLDER_DIMA
         )
         self.get_olya_balance.assert_not_awaited()
-        self.assertNotIn("Деньги Оли", self.chat_text())
+        self.assertNotIn("Деньги Ольга", self.chat_text())
 
 
 class CashAddChoiceTests(_DispatchCase):
@@ -303,12 +303,12 @@ class CashAddChoiceTests(_DispatchCase):
         await self._until_choice()
         await self.send("Оля")
         confirm = await self.send("-")
-        self.assertEqual(confirm, ["Подтвердите приход: Наличные 1 000₽\nКуда: деньги Оли"])
+        self.assertEqual(confirm, ["Подтвердите приход: Наличные 1 000₽\nКуда: Деньги Ольга"])
         await self.send("Провести")
         self.assertEqual(
             self.add_cash_income.await_args.kwargs["cash_holder"], CASH_HOLDER_OLYA
         )
-        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Оли: 4 200₽")
+        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
 
     async def test_dima(self):
         await self._until_choice()
@@ -323,7 +323,7 @@ class CashAddChoiceTests(_DispatchCase):
             self.add_cash_income.await_args.kwargs["cash_holder"], CASH_HOLDER_DIMA
         )
         self.get_olya_balance.assert_not_awaited()
-        self.assertNotIn("Деньги Оли", self.chat_text())
+        self.assertNotIn("Деньги Ольга", self.chat_text())
 
 
 class CashWithdrawalChoiceTests(_DispatchCase):
@@ -337,12 +337,12 @@ class CashWithdrawalChoiceTests(_DispatchCase):
         await self._until_choice()
         await self.send("Оля")
         confirm = await self.send("-")
-        self.assertEqual(confirm, ["Подтвердите изъятие: 700₽\nИсточник: деньги Оли"])
+        self.assertEqual(confirm, ["Подтвердите изъятие: 700₽\nИсточник: Деньги Ольга"])
         await self.send("Провести")
         self.assertEqual(
             self.add_cash_withdrawal.await_args.kwargs["cash_holder"], CASH_HOLDER_OLYA
         )
-        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Оли: 4 200₽")
+        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
 
     async def test_dima(self):
         await self._until_choice()
@@ -354,7 +354,7 @@ class CashWithdrawalChoiceTests(_DispatchCase):
             self.add_cash_withdrawal.await_args.kwargs["cash_holder"], CASH_HOLDER_DIMA
         )
         self.get_olya_balance.assert_not_awaited()
-        self.assertNotIn("Деньги Оли", self.chat_text())
+        self.assertNotIn("Деньги Ольга", self.chat_text())
 
 
 class DividendChoiceTests(_DispatchCase):
@@ -374,7 +374,7 @@ class DividendChoiceTests(_DispatchCase):
                 "Дима — 1 000₽\n"
                 "Женя — 1 000₽\n"
                 "В кассе 50 000₽, останется 48 000₽.\n"
-                "Источник: деньги Оли\n"
+                "Источник: Деньги Ольга\n"
                 "Подтвердить?"
             ],
         )
@@ -384,7 +384,7 @@ class DividendChoiceTests(_DispatchCase):
         self.assertEqual(
             self.record_dividend.await_args.kwargs["cash_holder"], CASH_HOLDER_OLYA
         )
-        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Оли: 4 200₽")
+        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
 
     async def test_dima(self):
         await self._until_choice()
@@ -395,7 +395,7 @@ class DividendChoiceTests(_DispatchCase):
             self.record_dividend.await_args.kwargs["cash_holder"], CASH_HOLDER_DIMA
         )
         self.get_olya_balance.assert_not_awaited()
-        self.assertNotIn("Деньги Оли", self.chat_text())
+        self.assertNotIn("Деньги Ольга", self.chat_text())
 
 
 class ForemanExpenseAdminChoiceTests(_DispatchCase):
@@ -416,14 +416,14 @@ class ForemanExpenseAdminChoiceTests(_DispatchCase):
             confirm,
             [
                 "Подтвердите расход:\nКатегория: ГСМ\nСумма: 300₽\n"
-                "Источник: деньги Оли\nКомментарий: Расход"
+                "Источник: Деньги Ольга\nКомментарий: Расход"
             ],
         )
         await self.send("Провести")
         self.assertEqual(
             self.add_cash_expense.await_args.kwargs["cash_holder"], CASH_HOLDER_OLYA
         )
-        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Оли: 4 200₽")
+        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
 
     async def test_dima(self):
         await self._until_choice()
@@ -441,7 +441,7 @@ class ForemanExpenseAdminChoiceTests(_DispatchCase):
             self.add_cash_expense.await_args.kwargs["cash_holder"], CASH_HOLDER_DIMA
         )
         self.get_olya_balance.assert_not_awaited()
-        self.assertNotIn("Деньги Оли", self.chat_text())
+        self.assertNotIn("Деньги Ольга", self.chat_text())
 
 
 class ForemanExpenseCleanerNoChoiceTests(_DispatchCase):
@@ -466,7 +466,7 @@ class ForemanExpenseCleanerNoChoiceTests(_DispatchCase):
         self.assertEqual(
             self.add_cash_expense.await_args.kwargs["cash_holder"], CASH_HOLDER_OLYA
         )
-        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Оли: 4 200₽")
+        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
 
 
 if __name__ == "__main__":

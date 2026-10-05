@@ -159,12 +159,12 @@ class CleanerBalanceTests(_DispatchCase):
 class AdminBalanceTests(_DispatchCase):
     async def test_admin_sees_olya_money(self):
         replies = await self.send("/cleaning_balance")
-        self.assertEqual(replies, ["Касса клининга: 50 000₽\nДеньги Оли: 4 200₽"])
+        self.assertEqual(replies, ["Касса клининга: 50 000₽\nДеньги Ольга: 4 200₽"])
 
     async def test_superadmin_sees_olya_money(self):
         self.pool.conn.role = "superadmin"
         replies = await self.send("/cleaning_balance")
-        self.assertEqual(replies, ["Касса клининга: 50 000₽\nДеньги Оли: 4 200₽"])
+        self.assertEqual(replies, ["Касса клининга: 50 000₽\nДеньги Ольга: 4 200₽"])
 
 
 # ---------- /cleaning_olya ----------
@@ -193,7 +193,7 @@ class CleaningOlyaCommandTests(_DispatchCase):
         self.assertEqual(
             replies,
             [
-                "Деньги Оли: 4 200₽\n"
+                "Деньги Ольга: 4 200₽\n"
                 "\n"
                 "Последние операции:\n"
                 "05.10 14:30 | +5 000₽ | Приход/Наличные | Заказ #12\n"
@@ -208,7 +208,7 @@ class CleaningOlyaCommandTests(_DispatchCase):
 
     async def test_no_operations(self):
         replies = await self.send("/cleaning_olya")
-        self.assertEqual(replies, ["Деньги Оли: 4 200₽\nОпераций пока нет."])
+        self.assertEqual(replies, ["Деньги Ольга: 4 200₽\nОпераций пока нет."])
 
     async def test_unknown_stub_does_not_intercept(self):
         # заглушка ловит только текст не с «/»: команда доходит до роутера клининга

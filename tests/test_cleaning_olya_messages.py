@@ -63,34 +63,34 @@ class OrderAlertOlyaLineTests(unittest.TestCase):
     def test_without_olya_balance_no_line(self):
         # прочие вызовы (без нового параметра) не меняются
         text = format_order_provided_alert(**_order_alert_kwargs())
-        self.assertNotIn("Деньги Оли", text)
+        self.assertNotIn("Деньги Ольга", text)
 
     def test_with_olya_balance_last_line(self):
         text = format_order_provided_alert(**_order_alert_kwargs(olya_balance=D("12500")))
         lines = text.split("\n")
-        self.assertEqual(lines[-1], "Деньги Оли: 12 500₽")
+        self.assertEqual(lines[-1], "Деньги Ольга: 12 500₽")
         self.assertEqual(lines[-2], "Касса клининга: 87 540₽")
 
     def test_zero_olya_balance_still_shown(self):
         # ноль — это остаток, а не «не задело»
         text = format_order_provided_alert(**_order_alert_kwargs(olya_balance=D("0")))
-        self.assertIn("Деньги Оли: 0₽", text)
+        self.assertIn("Деньги Ольга: 0₽", text)
 
 
 class CashOpAlertOlyaLineTests(unittest.TestCase):
     def test_without_olya_balance_no_line(self):
         text = format_cash_op_alert(**_cash_op_kwargs())
-        self.assertNotIn("Деньги Оли", text)
+        self.assertNotIn("Деньги Ольга", text)
 
     def test_with_olya_balance_last_line(self):
         text = format_cash_op_alert(**_cash_op_kwargs(olya_balance=D("3200.50")))
         lines = text.split("\n")
-        self.assertEqual(lines[-1], "Деньги Оли: 3 200.50₽")
+        self.assertEqual(lines[-1], "Деньги Ольга: 3 200.50₽")
         self.assertEqual(lines[-2], "Остаток: 50 000₽")
 
     def test_negative_olya_balance_shown_with_minus(self):
         text = format_cash_op_alert(**_cash_op_kwargs(olya_balance=D("-1500")))
-        self.assertIn("Деньги Оли: -1 500₽", text)
+        self.assertIn("Деньги Ольга: -1 500₽", text)
 
 
 class IncomeCashHolderTests(unittest.TestCase):
@@ -306,16 +306,16 @@ class DispatchCleaningReportOlyaTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_payload_with_olya_balance_adds_line(self):
         text = await self._dispatch(_queued_payload(olya_balance="12500"))
-        self.assertIn("Деньги Оли: 12 500₽", text)
+        self.assertIn("Деньги Ольга: 12 500₽", text)
 
     async def test_payload_with_null_olya_balance_no_line(self):
         text = await self._dispatch(_queued_payload(olya_balance=None))
-        self.assertNotIn("Деньги Оли", text)
+        self.assertNotIn("Деньги Ольга", text)
 
     async def test_old_payload_without_key_no_line(self):
         # строки очереди, поставленные до выката, поля не знают
         text = await self._dispatch(_queued_payload())
-        self.assertNotIn("Деньги Оли", text)
+        self.assertNotIn("Деньги Ольга", text)
         self.assertIn("Уборка проведена #5", text)
 
 
@@ -348,7 +348,7 @@ class ForemanExpenseOlyaTests(unittest.IsolatedAsyncioTestCase):
         get_olya_balance.assert_awaited_once()
         text = send.await_args.args[1]
         self.assertIn("📒 Касса клининга: Расход", text)
-        self.assertEqual(text.split("\n")[-1], "Деньги Оли: 1 700₽")
+        self.assertEqual(text.split("\n")[-1], "Деньги Ольга: 1 700₽")
 
 
 if __name__ == "__main__":

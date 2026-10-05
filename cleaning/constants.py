@@ -28,6 +28,10 @@ CASHBOOK_KINDS_PNL = {CASHBOOK_KIND_INCOME, CASHBOOK_KIND_EXPENSE}
 # 'olya' — деньги компании на руках у Оли, 'dima' — обычная касса.
 CASH_HOLDER_OLYA = "olya"
 CASH_HOLDER_DIMA = "dima"
+# Подписи кучек, которые видит человек (решение владельца 05.10, ТЗ
+# docs/plans/2026-10-05-olya-money-move.md, задача 1).
+CASH_HOLDER_OLYA_LABEL = "Деньги Ольга"
+CASH_HOLDER_DIMA_LABEL = "Касса (Дима)"
 # Оплаты по уборке, которые попадают к Оле (решение владельца 05.10, п.1).
 CLEANING_OLYA_PAYMENT_METHODS = ("Наличные", "Карта")
 

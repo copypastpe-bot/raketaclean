@@ -6,6 +6,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from .constants import (
+    CASH_HOLDER_OLYA_LABEL,
     CASHBOOK_KIND_DEPOSIT,
     CASHBOOK_KIND_DIVIDEND,
     CASHBOOK_KIND_EXPENSE,
@@ -72,7 +73,7 @@ def format_order_provided_alert(
 
 def _olya_line(olya_balance: Decimal) -> str:
     """Строка остатка денег Оли в сообщениях в чат клининговых денег."""
-    return f"Деньги Оли: {_money(olya_balance)}₽"
+    return f"{CASH_HOLDER_OLYA_LABEL}: {_money(olya_balance)}₽"
 
 
 def format_dividend_payout_alert(

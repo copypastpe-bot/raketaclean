@@ -42,6 +42,7 @@ from .client import find_client_by_phone, normalize_phone, upsert_client
 from .constants import (
     CASH_HOLDER_DIMA,
     CASH_HOLDER_OLYA,
+    CASH_HOLDER_OLYA_LABEL,
     CLEANING_ALL_PAYMENT_LABELS,
     CLEANING_EXPENSE_CATEGORIES,
     CLEANING_GIFT_CERT_LABEL,
@@ -193,10 +194,10 @@ def _confirm_kb() -> ReplyKeyboardMarkup:
 # как у выбора «Дима / Женя» в bot.py (`expense_owner_kb`).
 
 CASH_HOLDER_QUESTION_SPEND = (
-    "Из чьих денег? «Оля» — деньги на руках у Оли, «Дима» — обычная касса."
+    f"Источник? «Оля» — {CASH_HOLDER_OLYA_LABEL}, «Дима» — обычная касса."
 )
 CASH_HOLDER_QUESTION_INCOME = (
-    "Куда вносим? «Оля» — деньги на руках у Оли, «Дима» — обычная касса."
+    f"Куда вносим? «Оля» — {CASH_HOLDER_OLYA_LABEL}, «Дима» — обычная касса."
 )
 _CASH_HOLDER_ANSWERS = {
     "оля": CASH_HOLDER_OLYA,
@@ -224,7 +225,7 @@ def _parse_cash_holder(text: str | None) -> str | None:
 
 def _cash_holder_line(cash_holder: str, *, income: bool = False) -> str:
     """Строка подтверждения: из чьих денег (или куда, для прихода)."""
-    label = "деньги Оли" if cash_holder == CASH_HOLDER_OLYA else "касса (Дима)"
+    label = CASH_HOLDER_OLYA_LABEL if cash_holder == CASH_HOLDER_OLYA else "касса (Дима)"
     return f"{'Куда' if income else 'Источник'}: {label}"
 
 
@@ -911,7 +912,7 @@ async def cleaning_balance_cmd(msg: Message, **kw) -> None:
         role = await get_user_role(conn, msg.from_user.id)
     # Деньги компании на руках у Оли (реестр денег Оли, ТЗ 2026-10-05, задача 4):
     # клинеру — «у вас на руках», остальным — «Деньги Оли».
-    olya_label = "У вас на руках" if role == "cleaner" else "Деньги Оли"
+    olya_label = "У вас на руках" if role == "cleaner" else CASH_HOLDER_OLYA_LABEL
     await msg.answer(
         f"Касса клининга: {_money_str(balance)}₽\n"
         f"{olya_label}: {_money_str(olya_balance)}₽"

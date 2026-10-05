@@ -57,13 +57,13 @@ def _cancel_order_kwargs(**over):
 class CancelOrderAlertOlyaLineTests(unittest.TestCase):
     def test_without_olya_balance_no_line(self):
         text = format_cancel_order_alert(**_cancel_order_kwargs())
-        self.assertNotIn("Деньги Оли", text)
+        self.assertNotIn("Деньги Ольга", text)
         self.assertEqual(text.split("\n")[-1], "Касса клининга: 81 540₽")
 
     def test_with_olya_balance_last_line(self):
         text = format_cancel_order_alert(**_cancel_order_kwargs(), olya_balance=D("6500"))
         lines = text.split("\n")
-        self.assertEqual(lines[-1], "Деньги Оли: 6 500₽")
+        self.assertEqual(lines[-1], "Деньги Ольга: 6 500₽")
         self.assertEqual(lines[-2], "Касса клининга: 81 540₽")
 
 
@@ -84,7 +84,7 @@ class DividendCancelAlertOlyaLineTests(unittest.TestCase):
             payout_id=17, amount=D("9999"), balance_after=D("20459"), olya_balance=D("0")
         )
         lines = text.split("\n")
-        self.assertEqual(lines[-1], "Деньги Оли: 0₽")
+        self.assertEqual(lines[-1], "Деньги Ольга: 0₽")
         self.assertEqual(lines[-2], "Остаток в кассе: 20 459₽")
 
 
@@ -231,7 +231,7 @@ class CancelHandlersOlyaLineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"↩️ Отменён заказ уборки #{order_id}", text)
         self.assertIn("Откатано строк кассы: 3", text)
         # 1 000 внесения остаются, приход 4 000 и расход 300 откатились.
-        self.assertEqual(text.split("\n")[-1], "Деньги Оли: 1 000₽")
+        self.assertEqual(text.split("\n")[-1], "Деньги Ольга: 1 000₽")
         self.assertEqual(await cashbook.get_olya_balance(self.conn), D("1000"))
 
     async def test_cancel_order_without_olya_rows_no_line(self):
@@ -245,7 +245,7 @@ class CancelHandlersOlyaLineTests(unittest.IsolatedAsyncioTestCase):
         text = await self._cancel_order(order_id)
 
         self.assertIn(f"↩️ Отменён заказ уборки #{order_id}", text)
-        self.assertNotIn("Деньги Оли", text)
+        self.assertNotIn("Деньги Ольга", text)
         self.assertEqual(text.split("\n")[-1], "Касса клининга: 1 000₽")
 
     # --- отмена выплаты ---
@@ -260,7 +260,7 @@ class CancelHandlersOlyaLineTests(unittest.IsolatedAsyncioTestCase):
         text = await self._cancel_dividend(payout_id)
 
         self.assertIn(f"↩️ Отменена выплата прибыли #{payout_id}", text)
-        self.assertEqual(text.split("\n")[-1], "Деньги Оли: 1 000₽")
+        self.assertEqual(text.split("\n")[-1], "Деньги Ольга: 1 000₽")
 
     async def test_cancel_dima_dividend_no_line(self):
         await self._deposit_olya("1000")
@@ -271,7 +271,7 @@ class CancelHandlersOlyaLineTests(unittest.IsolatedAsyncioTestCase):
         text = await self._cancel_dividend(payout_id)
 
         self.assertIn(f"↩️ Отменена выплата прибыли #{payout_id}", text)
-        self.assertNotIn("Деньги Оли", text)
+        self.assertNotIn("Деньги Ольга", text)
         self.assertEqual(text.split("\n")[-1], "Остаток в кассе: 1 000₽")
 
 
