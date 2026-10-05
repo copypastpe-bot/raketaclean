@@ -1277,8 +1277,8 @@ async def div_provesti(msg: Message, state: FSMContext, **kw) -> None:
                     olya_balance = await get_olya_balance(conn)
 
     await state.clear()
-    kb = await _after_op_kb(msg, state, kw, cleaning_main_kb())
     if payout_id is None:
+        kb = await _after_op_kb(msg, state, kw, cleaning_main_kb())
         await msg.answer(
             f"Касса изменилась, выплата не проведена. Сейчас в кассе {_money_str(balance)}₽.\n"
             "Начните заново.",
@@ -1293,6 +1293,9 @@ async def div_provesti(msg: Message, state: FSMContext, **kw) -> None:
             olya_balance=olya_balance,
         ),
     )
+    # Запрос роли (П1, task-3-fixes.md) — после отправки в чат, чтобы её сбой
+    # не помешал уведомлению о уже проведённой выплате.
+    kb = await _after_op_kb(msg, state, kw, cleaning_main_kb())
     await msg.answer(
         f"Выплата #{payout_id} проведена. Касса клининга: {_money_str(balance)}₽",
         reply_markup=kb,
@@ -1707,7 +1710,6 @@ async def cash_move_provesti(msg: Message, state: FSMContext, **kw) -> None:
         )
         return
     await state.clear()
-    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
     await send_cleaning_money_flow(
         bot,
         format_cash_move_alert(
@@ -1718,6 +1720,9 @@ async def cash_move_provesti(msg: Message, state: FSMContext, **kw) -> None:
             dima_balance=dima_balance,
         ),
     )
+    # Запрос роли (П1, task-3-fixes.md) — после отправки в чат, чтобы её сбой
+    # не помешал уведомлению о уже проведённом перемещении.
+    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
     await msg.answer(f"Перемещение #{move_id} проведено.", reply_markup=kb)
 
 
