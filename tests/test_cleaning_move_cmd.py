@@ -413,6 +413,37 @@ class ProvestiRefusedTests(_DispatchCase):
         self.get_dima_balance.assert_not_awaited()
 
 
+# ---------- сценарий сбрасывается до ответа админу (П1 итогового ревью) ----------
+
+
+class ProvestiAnswerFailsTests(_DispatchCase):
+    async def test_state_cleared_before_answer_so_retry_does_not_duplicate(self):
+        await self.send("/cleaning_move")
+        await self.send("Деньги Ольга")
+        await self.send("10000")
+        await self.send("-")
+
+        # Запись прошла, а ответ админу «падает» — как при тайм-ауте Telegram
+        # через прокси.
+        orig_make_request = self.session.make_request
+
+        async def failing_make_request(bot_, method, timeout=None):
+            raise RuntimeError("Telegram timeout")
+
+        self.session.make_request = failing_make_request
+        with self.assertRaises(RuntimeError):
+            await self.send("Провести")
+
+        self.record_cash_move.assert_awaited_once()
+        self.assertIsNone(await self.state())
+
+        self.session.make_request = orig_make_request
+        with mock.patch.object(bot, "has_permission", AsyncMock(return_value=True)):
+            replies = await self.send("Провести")
+        self.assertEqual(replies, [UNRECOGNIZED])
+        self.record_cash_move.assert_awaited_once()
+
+
 # ---------- «Отмена» ----------
 
 

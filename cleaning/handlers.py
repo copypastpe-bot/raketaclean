@@ -1785,6 +1785,7 @@ async def cash_move_provesti(msg: Message, state: FSMContext, **kw) -> None:
             reply_markup=ReplyKeyboardRemove(),
         )
         return
+    await state.clear()
     await send_cleaning_money_flow(
         bot,
         format_cash_move_alert(
@@ -1798,7 +1799,6 @@ async def cash_move_provesti(msg: Message, state: FSMContext, **kw) -> None:
     await msg.answer(
         f"Перемещение #{move_id} проведено.", reply_markup=ReplyKeyboardRemove()
     )
-    await state.clear()
 
 
 # ---------- /cleaning_move_delete [N]: удаление перемещения ----------
