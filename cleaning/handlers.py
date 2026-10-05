@@ -21,6 +21,7 @@ from notifications import NotificationRules, enqueue_notification
 
 from .access import can_create_cleaning_order, get_user_role, has_permission
 from .admin_ops import (
+    CashMoveDeleteGoesNegative,
     CashMoveExceedsBalance,
     add_cash_expense,
     add_cash_income,
@@ -29,6 +30,9 @@ from .admin_ops import (
     cancel_order,
     cash_holder_label,
     cash_move_route,
+    check_cash_move_delete,
+    delete_cash_move,
+    list_recent_cash_moves,
     list_recent_dividends,
     record_cash_move,
 )
@@ -60,6 +64,7 @@ from .constants import (
 from .format import (
     format_cancel_order_alert,
     format_cash_move_alert,
+    format_cash_move_delete_alert,
     format_cash_op_alert,
     format_cash_report,
     format_dividend_cancel_alert,
@@ -118,6 +123,7 @@ from .fsm import (
     CleaningCancelOrderFSM,
     CleaningCashAddFSM,
     CleaningCashExpenseFSM,
+    CleaningCashMoveDeleteFSM,
     CleaningCashMoveFSM,
     CleaningCashWithdrawalFSM,
     CleaningClientLookupFSM,
@@ -376,6 +382,7 @@ async def start_cleaning_order(msg: Message, state: FSMContext, **data) -> None:
         CleaningForemanExpenseFSM,
         CleaningDividendCancelFSM,
         CleaningCashMoveFSM,
+        CleaningCashMoveDeleteFSM,
     ),
     F.text.in_({"Отмена", "Отменить"}),
 )
@@ -1792,6 +1799,116 @@ async def cash_move_provesti(msg: Message, state: FSMContext, **kw) -> None:
         f"Перемещение #{move_id} проведено.", reply_markup=ReplyKeyboardRemove()
     )
     await state.clear()
+
+
+# ---------- /cleaning_move_delete [N]: удаление перемещения ----------
+# По образцу /cleaning_dividend_cancel (ТЗ docs/plans/2026-10-05-olya-money-move.md,
+# задача 4). Удаление проверяется на шаге подтверждения (check_cash_move_delete)
+# и ещё раз под замком при «Провести» (delete_cash_move).
+
+# id строк кассы — integer (serial): номер больше не может существовать, а в
+# запрос не влезет — отвечаем как на «не найдено».
+_PG_INT4_MAX = 2_147_483_647
+
+
+def _cash_move_not_found_text(move_id: int) -> str:
+    return f"Перемещение #{move_id} не найдено или уже удалено."
+
+
+def _cash_move_goes_negative_text(label: str, balance: Decimal) -> str:
+    return f"Нельзя: в «{label}» станет {_money_str(balance)}₽."
+
+
+@router.message(Command("cleaning_move_delete"))
+async def start_cash_move_delete(
+    msg: Message, state: FSMContext, command: CommandObject = None, **kw
+) -> None:
+    pool: asyncpg.Pool = kw["pool"]
+    if not await _has_permission(pool, msg.from_user.id, "cleaning_manage_cash"):
+        await msg.answer("Команда доступна только администраторам.")
+        return
+    arg = ((command.args if command else "") or "").strip()
+    if not arg.isdecimal():
+        async with pool.acquire() as conn:
+            rows = await list_recent_cash_moves(conn)
+        if not rows:
+            await msg.answer("Перемещений пока не было.")
+            return
+        lines = ["Последние перемещения:"]
+        lines += [
+            f"#{r['id']} — {cash_move_route(r['cash_holder'])}: "
+            f"{_money_str(Decimal(r['amount']))}₽, "
+            f"{r['happened_at'].astimezone(MOSCOW_TZ):%d.%m %H:%M}"
+            for r in rows
+        ]
+        lines.append("Удалить: /cleaning_move_delete N")
+        await msg.answer("\n".join(lines))
+        return
+
+    move_id = int(arg)
+    # Команда с номером начинает новый сценарий: прежнее подтверждение не висит.
+    await state.clear()
+    if move_id > _PG_INT4_MAX:
+        await msg.answer(_cash_move_not_found_text(move_id))
+        return
+    try:
+        async with pool.acquire() as conn:
+            move = await check_cash_move_delete(conn, move_id=move_id)
+    except CashMoveDeleteGoesNegative as exc:
+        await msg.answer(_cash_move_goes_negative_text(exc.label, exc.balance))
+        return
+    if move is None:
+        await msg.answer(_cash_move_not_found_text(move_id))
+        return
+    await state.update_data(move_id=move_id)
+    await state.set_state(CleaningCashMoveDeleteFSM.confirm)
+    await msg.answer(
+        f"Удалить перемещение #{move_id}?"
+        f"\n{cash_move_route(move['cash_holder'])}: {_money_str(Decimal(move['amount']))}₽",
+        reply_markup=_confirm_kb(),
+    )
+
+
+@router.message(CleaningCashMoveDeleteFSM.confirm, F.text == "Провести")
+async def cash_move_delete_provesti(msg: Message, state: FSMContext, **kw) -> None:
+    pool: asyncpg.Pool = kw["pool"]
+    bot = kw["bot"]
+    move_id = int((await state.get_data())["move_id"])
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                deleted = await delete_cash_move(conn, move_id=move_id)
+                if deleted is not None:
+                    # Замок перемещений держится до конца транзакции — остатки
+                    # для чата согласованы с удалением.
+                    olya_balance = await get_olya_balance(conn)
+                    dima_balance = await get_dima_balance(conn)
+    except CashMoveDeleteGoesNegative as exc:
+        await state.clear()
+        await msg.answer(
+            _cash_move_goes_negative_text(exc.label, exc.balance),
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+    await state.clear()
+    if deleted is None:
+        await msg.answer(
+            _cash_move_not_found_text(move_id), reply_markup=ReplyKeyboardRemove()
+        )
+        return
+    await send_cleaning_money_flow(
+        bot,
+        format_cash_move_delete_alert(
+            move_id=move_id,
+            route=cash_move_route(deleted["cash_holder"]),
+            amount=Decimal(deleted["amount"]),
+            olya_balance=olya_balance,
+            dima_balance=dima_balance,
+        ),
+    )
+    await msg.answer(
+        f"Перемещение #{move_id} удалено.", reply_markup=ReplyKeyboardRemove()
+    )
 
 
 # ---------- /cleaning_cancel_order N ----------

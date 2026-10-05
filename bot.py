@@ -12824,6 +12824,7 @@ async def cancel_any(msg: Message, state: FSMContext):
         "CleaningClientLookupFSM",
         "CleaningForemanExpenseFSM",
         "CleaningCashMoveFSM",
+        "CleaningCashMoveDeleteFSM",
     }
     prefix = current_state.split(":")[0] if current_state else ""
     if prefix in admin_prefixes or await has_permission(msg.from_user.id, "view_orders_reports"):

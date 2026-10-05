@@ -65,6 +65,12 @@ class CleaningCashMoveFSM(StatesGroup):
     confirm = State()
 
 
+class CleaningCashMoveDeleteFSM(StatesGroup):
+    # Удаление перемещения: /cleaning_move_delete N → «Провести»
+    # (ТЗ docs/plans/2026-10-05-olya-money-move.md, задача 4).
+    confirm = State()
+
+
 class CleaningCancelOrderFSM(StatesGroup):
     confirm = State()
 

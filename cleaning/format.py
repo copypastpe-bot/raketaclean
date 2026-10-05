@@ -181,6 +181,26 @@ def format_cash_move_alert(
     return "\n".join(lines)
 
 
+def format_cash_move_delete_alert(
+    *,
+    move_id: int,
+    route: str,              # «Деньги Ольга → Касса (Дима)» или обратно
+    amount: Decimal,
+    olya_balance: Decimal,
+    dima_balance: Decimal,
+) -> str:
+    """Удаление перемещения (ТЗ docs/plans/2026-10-05-olya-money-move.md, решение 6)."""
+    lines = [
+        f"🗑 Перемещение #{move_id} удалено",
+        f"{route}: {_money(amount)}₽",
+        "",
+    ]
+    lines.extend(
+        _cash_holders_lines(olya_balance=olya_balance, dima_balance=dima_balance)
+    )
+    return "\n".join(lines)
+
+
 def format_cash_report(*, label: str, report: dict, balance_after: Decimal) -> str:
     lines = [f"📊 Касса клининга — {label}"]
     lines.append(f"Приход: {_money(report['income_total'])}₽")
