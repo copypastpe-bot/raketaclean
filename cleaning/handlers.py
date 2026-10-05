@@ -1357,9 +1357,10 @@ async def dividend_cancel_confirmed(msg: Message, state: FSMContext, **kw) -> No
             )
     await state.clear()
     if cancelled is None:
+        kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
         await msg.answer(
             f"Выплата #{payout_id} не найдена или уже отменена.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=kb,
         )
         return
     await send_cleaning_money_flow(
@@ -1371,9 +1372,10 @@ async def dividend_cancel_confirmed(msg: Message, state: FSMContext, **kw) -> No
             olya_balance=olya_balance,
         ),
     )
+    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
     await msg.answer(
         f"Выплата #{payout_id} отменена. Касса клининга: {_money_str(balance_after)}₽",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=kb,
     )
 
 
@@ -1569,11 +1571,12 @@ async def cash_wd_provesti(msg: Message, state: FSMContext, **kw) -> None:
             olya_balance=olya_balance,
         ),
     )
+    await state.clear()
+    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
     await msg.answer(
         f"Изъятие проведено. Касса: {_money_str(balance_after)}₽",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=kb,
     )
-    await state.clear()
 
 
 # ---------- /cleaning_move: перемещение между кучками ----------
@@ -1774,16 +1777,21 @@ async def start_cash_move_delete(
     # Команда с номером начинает новый сценарий: прежнее подтверждение не висит.
     await state.clear()
     if move_id > _PG_INT4_MAX:
-        await msg.answer(_cash_move_not_found_text(move_id))
+        kb = await _after_op_kb(msg, state, kw, None)
+        await msg.answer(_cash_move_not_found_text(move_id), reply_markup=kb)
         return
     try:
         async with pool.acquire() as conn:
             move = await check_cash_move_delete(conn, move_id=move_id)
     except CashMoveDeleteGoesNegative as exc:
-        await msg.answer(_cash_move_goes_negative_text(exc.label, exc.balance))
+        kb = await _after_op_kb(msg, state, kw, None)
+        await msg.answer(
+            _cash_move_goes_negative_text(exc.label, exc.balance), reply_markup=kb
+        )
         return
     if move is None:
-        await msg.answer(_cash_move_not_found_text(move_id))
+        kb = await _after_op_kb(msg, state, kw, None)
+        await msg.answer(_cash_move_not_found_text(move_id), reply_markup=kb)
         return
     await state.update_data(move_id=move_id)
     await state.set_state(CleaningCashMoveDeleteFSM.confirm)
@@ -1810,16 +1818,16 @@ async def cash_move_delete_provesti(msg: Message, state: FSMContext, **kw) -> No
                     dima_balance = await get_dima_balance(conn)
     except CashMoveDeleteGoesNegative as exc:
         await state.clear()
+        kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
         await msg.answer(
             _cash_move_goes_negative_text(exc.label, exc.balance),
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=kb,
         )
         return
     await state.clear()
     if deleted is None:
-        await msg.answer(
-            _cash_move_not_found_text(move_id), reply_markup=ReplyKeyboardRemove()
-        )
+        kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
+        await msg.answer(_cash_move_not_found_text(move_id), reply_markup=kb)
         return
     await send_cleaning_money_flow(
         bot,
@@ -1831,9 +1839,8 @@ async def cash_move_delete_provesti(msg: Message, state: FSMContext, **kw) -> No
             dima_balance=dima_balance,
         ),
     )
-    await msg.answer(
-        f"Перемещение #{move_id} удалено.", reply_markup=ReplyKeyboardRemove()
-    )
+    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
+    await msg.answer(f"Перемещение #{move_id} удалено.", reply_markup=kb)
 
 
 # ---------- /cleaning_cancel_order N ----------
@@ -1879,30 +1886,32 @@ async def cancel_order_confirmed(msg: Message, state: FSMContext, **kw) -> None:
                 if result and result["olya_rows_deleted"]
                 else None
             )
+    await state.clear()
     if result is None:
+        kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
         await msg.answer(
             f"Заказ #{order_id} не найден или уже отменён.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=kb,
         )
-    else:
-        await send_cleaning_money_flow(
-            bot,
-            format_cancel_order_alert(
-                order_id=result["order_id"],
-                address=result["address"],
-                total_amount=result["total_amount"],
-                bonuses_used=result["bonuses_used"],
-                bonuses_earned=result["bonuses_earned"],
-                cashbook_rows_deleted=result["cashbook_rows_deleted"],
-                balance_after=balance_after,
-                olya_balance=olya_balance,
-            ),
-        )
-        await msg.answer(
-            f"Заказ #{order_id} отменён. Касса: {_money_str(balance_after)}₽",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-    await state.clear()
+        return
+    await send_cleaning_money_flow(
+        bot,
+        format_cancel_order_alert(
+            order_id=result["order_id"],
+            address=result["address"],
+            total_amount=result["total_amount"],
+            bonuses_used=result["bonuses_used"],
+            bonuses_earned=result["bonuses_earned"],
+            cashbook_rows_deleted=result["cashbook_rows_deleted"],
+            balance_after=balance_after,
+            olya_balance=olya_balance,
+        ),
+    )
+    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
+    await msg.answer(
+        f"Заказ #{order_id} отменён. Касса: {_money_str(balance_after)}₽",
+        reply_markup=kb,
+    )
 
 
 # ---------- /cleaning_cash day|month|year ----------

@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import SendMessage
-from aiogram.types import Chat, Message, ReplyKeyboardRemove, Update, User
+from aiogram.types import Chat, Message, Update, User
 
 import bot
 import cleaning.handlers as cleaning_handlers
@@ -32,6 +32,8 @@ from cleaning.fsm import CleaningCashMoveDeleteFSM
 
 UNRECOGNIZED = "Команда не распознана. Выберите действие на клавиатуре ниже."
 CLEANING_MAIN_BUTTONS = ["🧹 Провести уборку", "🔍 Клиент", "💰 Баланс", "➖ Добавить расход"]
+# Админ после операции — в своём главном меню (docs/plans/2026-10-05-admin-menu.md, задача 3).
+ADMIN_ROOT_BUTTONS = [b.text for row in bot.admin_root_kb().keyboard for b in row]
 
 _user_ids = itertools.count(930_001)
 _update_ids = itertools.count(1)
@@ -306,18 +308,22 @@ class WithNumberTests(_DispatchCase):
         )
 
     async def test_not_found_or_deleted(self):
+        # Админ — в своём главном меню (docs/plans/2026-10-05-admin-menu.md, задача 3,
+        # правка П2 из task-3-fixes.md).
         self.check_delete.return_value = None
         replies = await self.send("/cleaning_move_delete 99")
         self.assertEqual(replies, ["Перемещение #99 не найдено или уже удалено."])
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.delete_move.assert_not_awaited()
 
     async def test_number_beyond_int4_is_not_found(self):
         # Номер не помещается в integer базы — до базы не доходим, отвечаем
-        # как на «не найдено».
+        # как на «не найдено». Админ — в своём главном меню (правка П2).
         replies = await self.send("/cleaning_move_delete 2147483648")
         self.assertEqual(replies, ["Перемещение #2147483648 не найдено или уже удалено."])
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.check_delete.assert_not_awaited()
 
     async def test_int4_max_goes_to_check(self):
@@ -327,21 +333,24 @@ class WithNumberTests(_DispatchCase):
         self.assertEqual(self.check_delete.await_args.kwargs, {"move_id": 2147483647})
 
     async def test_goes_negative_refused(self):
+        # Админ — в своём главном меню (правка П2).
         self.check_delete.side_effect = CashMoveDeleteGoesNegative(
             CASH_HOLDER_DIMA, D("-3000")
         )
         replies = await self.send("/cleaning_move_delete 12")
         self.assertEqual(replies, ["Нельзя: в «Касса (Дима)» станет -3 000₽."])
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.delete_move.assert_not_awaited()
 
     async def test_new_number_replaces_pending_confirmation(self):
         # Подтверждение одного номера, потом команда с несуществующим номером:
-        # старое подтверждение не должно остаться висеть.
+        # старое подтверждение не должно остаться висеть. Второй ответ — «не
+        # найдено», админ уходит в своё главное меню (правка П2).
         await self.send("/cleaning_move_delete 12")
         self.check_delete.return_value = None
         await self.send("/cleaning_move_delete 99")
-        self.assertIsNone(await self.state())
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
 
 
 # ---------- «Провести» ----------
@@ -353,12 +362,13 @@ class ProvestiTests(_DispatchCase):
         self.assertEqual(await self.state(), CleaningCashMoveDeleteFSM.confirm.state)
 
     async def test_deleted(self):
+        # Админ — в своём главном меню (правка П2, task-3-fixes.md).
         await self._until_confirm()
         replies = await self.send("Провести")
         self.assertNotIn(UNRECOGNIZED, replies)
         self.assertEqual(replies, ["Перемещение #12 удалено."])
-        self.assertIsInstance(self.last_markup(), ReplyKeyboardRemove)
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.delete_move.assert_awaited_once()
         self.assertEqual(self.delete_move.await_args.kwargs, {"move_id": 12})
         self.assertEqual(
@@ -388,26 +398,28 @@ class ProvestiTests(_DispatchCase):
         )
 
     async def test_goes_negative_on_provesti(self):
-        # Остаток изменился между подтверждением и «Провести».
+        # Остаток изменился между подтверждением и «Провести». Админ — в своём
+        # главном меню (правка П2, task-3-fixes.md).
         await self._until_confirm()
         self.delete_move.side_effect = CashMoveDeleteGoesNegative(
             CASH_HOLDER_DIMA, D("-2500")
         )
         replies = await self.send("Провести")
         self.assertEqual(replies, ["Нельзя: в «Касса (Дима)» станет -2 500₽."])
-        self.assertIsInstance(self.last_markup(), ReplyKeyboardRemove)
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.send_flow.assert_not_awaited()
         self.get_olya_balance.assert_not_awaited()
         self.get_dima_balance.assert_not_awaited()
 
     async def test_already_deleted_on_provesti(self):
+        # Админ — в своём главном меню (правка П2, task-3-fixes.md).
         await self._until_confirm()
         self.delete_move.return_value = None
         replies = await self.send("Провести")
         self.assertEqual(replies, ["Перемещение #12 не найдено или уже удалено."])
-        self.assertIsInstance(self.last_markup(), ReplyKeyboardRemove)
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.send_flow.assert_not_awaited()
 
     async def test_control_provesti_without_state_unknown_answers(self):
