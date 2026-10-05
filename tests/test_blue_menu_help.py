@@ -46,13 +46,17 @@ SHORT_HELP = "Если возникли проблемы, напишите @past
 ADMIN_HELP = {
     "Химчистка": [
         "whoami", "orders", "tx_last", "cash_balance", "daily_cash", "daily_profit",
-        "daily_orders", "my_daily", "mysalary", "myincome",
+        "daily_orders",
     ],
-    "Клининг": ["cleaning_cash", "cleaning_orders"],
+    # Решение владельца 05.10 (1б): отмену уборки и выплаты Дима видит в /help.
+    "Клининг": [
+        "cleaning_cash", "cleaning_orders", "cleaning_cancel_order", "cleaning_dividend_cancel",
+    ],
 }
 SUPERADMIN_HELP = {
     "Химчистка": ADMIN_HELP["Химчистка"] + ["tx_delete"],
-    "Клининг": ADMIN_HELP["Клининг"],
+    # У суперадмина обе отмены — в синем меню.
+    "Клининг": ["cleaning_cash", "cleaning_orders"],
 }
 
 # «Не включать» из «Состава /help админов»: работа этих команд есть на кнопках.
@@ -63,13 +67,11 @@ ON_BUTTONS = {
     "cleaning_cash_add", "cleaning_move", "cleaning_dividend", "cleaning_balance",
 }
 # «Не включать»: дубли /start и /cleaning_order (проводят только бригадиры).
-NOT_INCLUDED = {"admin_menu", "admin_panel", "cleaning_order"}
+NOT_INCLUDED = {"admin_menu", "admin_panel", "cleaning_order",
+                # Решение владельца 05.10 (3а): команды мастера, админам в /help не нужны.
+                "mysalary", "myincome"}
 # Недоступны admin: обработчик пускает только superadmin (проверяется ниже по коду).
 SUPERADMIN_ONLY = {"order_remove", "tx_remove", "bonus_backfill", "tx_delete"}
-# ВОПРОС ВЛАДЕЛЬЦУ (отчёт задачи 5): у admin есть права на эти команды
-# (cleaning_cancel_orders, cleaning_manage_cash), а ТЗ ставит их только в синее меню
-# superadmin. Места у admin в ТЗ нет — не придумываем, держим отдельной корзиной.
-ADMIN_NO_PLACE = {"cleaning_cancel_order", "cleaning_dividend_cancel"}
 
 CMD_LINE = re.compile(r"^/([a-z_]+)(?: \S.*?)? — \S.*$")
 
@@ -199,9 +201,11 @@ class EveryCommandHasOnePlaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_every_command_in_exactly_one_place(self):
         handlers = _registered_handlers(bot.dp)
         self.assertIn("help", handlers)  # обход обработчиков действительно что-то видит
+        # Решение владельца 05.10 (2а): /my_daily сломана с 02.12.2025 — удалена.
+        self.assertNotIn("my_daily", handlers)
         menus = await _menus()
         cases = {
-            "admin": (menus[1], await _help_text("admin"), SUPERADMIN_ONLY | ADMIN_NO_PLACE),
+            "admin": (menus[1], await _help_text("admin"), SUPERADMIN_ONLY),
             "superadmin": (menus[2], await _help_text("superadmin"), set()),
         }
         for role, (menu, help_text, elsewhere) in cases.items():

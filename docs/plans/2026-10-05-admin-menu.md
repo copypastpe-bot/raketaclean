@@ -95,8 +95,13 @@
 Группы: «Химчистка», «Клининг».
 
 - admin: `/whoami`, `/orders`, `/tx_last`, `/cash_balance`, `/daily_cash`, `/daily_profit`,
-  `/daily_orders`, `/my_daily`, `/mysalary`, `/myincome`, `/cleaning_cash`, `/cleaning_orders`.
-- superadmin: то же плюс `/tx_delete`.
+  `/daily_orders`, `/cleaning_cash`, `/cleaning_orders`, `/cleaning_cancel_order`,
+  `/cleaning_dividend_cancel` (последние две — решение владельца 05.10, 1б: Дима их выполняет).
+- superadmin: `/whoami` … `/cleaning_orders` как у admin, плюс `/tx_delete`; обе отмены у него
+  в синем меню.
+- Решения владельца 05.10 по итогам задачи 5: `/my_daily` удалена (сломана с 02.12.2025,
+  коммит 139f9d9) — 2а; `/mysalary`, `/myincome` в `/help` админов не включать (команды
+  мастера) — 3а.
 - Не включать: дубли `/start` (`/admin_menu`, `/admin_panel`); команды, чья работа есть на
   кнопках (`/find`, `/client_*`, `/income`, `/expense`, `/withdraw`, `/link_payment`, `/reports`,
   `/cash`, `/profit`, `/payments`, `/payroll`, `/cleaning_expense`, `/cleaning_cash_add`,

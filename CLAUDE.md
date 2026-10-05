@@ -105,7 +105,7 @@ This project (Rules 4.2):
 
 Files longer than 500 lines and their function maps:
 
-- `bot.py` (13879 lines) -> `bot.py.map.md`
+- `bot.py` (13878 lines) -> `bot.py.map.md`
 - `raketa-admin-bot/adminbot/main.py` (1466 lines) -> `raketa-admin-bot/adminbot/main.py.map.md`
 - `raketa-admin-bot/adminbot/db.py` (1772 lines) -> `raketa-admin-bot/adminbot/db.py.map.md`
 - `raketa-admin-bot/adminbot/gcal/engine.py` (1187 lines) -> `raketa-admin-bot/adminbot/gcal/engine.py.map.md`

@@ -8112,18 +8112,25 @@ async def help_cmd(msg: Message):
             "/daily_cash — сводка по кассе за сегодня",
             "/daily_profit — сводка по прибыли за сегодня и за всё время",
             "/daily_orders — сводка по заказам мастеров за сегодня",
-            "/my_daily — моя сводка за сегодня (заказы, оплаты, ЗП, наличка)",
-            "/mysalary [day|week|month|year] — моя зарплата за период, по умолчанию за месяц",
-            "/myincome — мои оплаты за сегодня по типам",
+        ]
+        cleaning_lines = [
+            "/cleaning_cash [day|month|year] — касса клининга за период, по умолчанию за день",
+            "/cleaning_orders [day|month] — уборки за период, по умолчанию за день",
         ]
         if role == "superadmin":
             dry_cleaning_lines.append("/tx_delete <id> — удалить транзакцию по номеру")
+        else:
+            # Решение владельца 05.10 (1б): у суперадмина обе отмены в синем меню,
+            # Дима видит их здесь.
+            cleaning_lines += [
+                "/cleaning_cancel_order N — отменить уборку по номеру",
+                "/cleaning_dividend_cancel [N] — отменить выплату прибыли; без номера — последние выплаты",
+            ]
         text = (
             "Химчистка:\n"
             + "\n".join(dry_cleaning_lines)
             + "\n\nКлининг:\n"
-            "/cleaning_cash [day|month|year] — касса клининга за период, по умолчанию за день\n"
-            "/cleaning_orders [day|month] — уборки за период, по умолчанию за день"
+            + "\n".join(cleaning_lines)
         )
     else:
         text = "Если возникли проблемы, напишите @pastushenko12"
@@ -11521,14 +11528,6 @@ async def my_income(msg: Message):
         return await msg.answer("Нет данных за сегодня.")
     lines = [f"{row['method']}: {row['total']}₽" for row in rows]
     await msg.answer("Сегодняшний приход по типам оплаты:\n" + "\n".join(lines))
-
-
-@dp.message(Command("my_daily"))
-async def my_daily_report(msg: Message):
-    if not await ensure_master(msg.from_user.id):
-        return await msg.answer("Доступно только мастерам.")
-    text = await build_master_daily_summary_text(msg.from_user.id)
-    await msg.answer(text, parse_mode=ParseMode.HTML)
 
 
 MASTER_SALARY_LABEL = "💼 Зарплата"
