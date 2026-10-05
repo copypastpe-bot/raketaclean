@@ -262,6 +262,39 @@ async def test_dead_order_link_is_not_offered_for_address_reminder(pool):
         pool, table=db.CLEANING_LINKS_TABLE) == []
 
 
+async def test_wire_payment_unlinked_candidates(pool):
+    """Решение владельца 2026-10-05: оплату отвязали после доводки сделки.
+
+    Кандидат — заказ по счёту, который снова ждёт оплату, при связке `done`
+    с отметкой `payment_synced_at`. Без отметки (робот сделку не доводил)
+    говорить владельцу не о чем.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE public.orders SET payment_method = 'р/с', "
+            "awaiting_wire_payment = true WHERE id = 596"
+        )
+    await db.create_link(pool, order_id=596, phone10="9601861067")
+    await db.update_link(pool, 596, status="done", path="A", real_lead_id=41463832)
+
+    since = date(2026, 8, 1)
+    waiting = await db.fetch_wire_unpaid_order_ids(pool, since)
+    assert waiting == {596}
+
+    # робот сделку оплатой не доводил — молчим
+    assert await db.fetch_links_with_wire_payment_synced(pool, waiting) == []
+
+    # доводил — кандидат
+    await db.update_link(pool, 596, payment_synced_at=datetime.now(timezone.utc))
+    unlinked = await db.fetch_links_with_wire_payment_synced(pool, waiting)
+    assert [link.order_id for link in unlinked] == [596]
+
+    # оплату снова привязали — заказ больше не ждёт, не кандидат
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE public.orders SET awaiting_wire_payment = false WHERE id = 596")
+    assert await db.fetch_wire_unpaid_order_ids(pool, since) == set()
+
+
 async def test_wire_payment_sync_candidates(pool):
     """Задача 11 (ТЗ 2026-09-22): кого доводить после оплаты по счёту.
 

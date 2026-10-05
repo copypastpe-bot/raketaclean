@@ -35,6 +35,8 @@ class WirePaymentSource(Protocol):
 
     async def due(self) -> list[tuple[Order, AmoLink]]: ...
 
+    async def unlinked(self) -> list[tuple[Order, AmoLink]]: ...
+
 
 class WirePaymentSync:
     """Раз в `poll_interval_sec` — доводит все «due» сделки, отчитывается о каждой."""
@@ -45,6 +47,7 @@ class WirePaymentSync:
         source: WirePaymentSource,
         engine: Any,
         on_synced: Optional[Callable[[Order, AmoLink, WirePaymentResult], Awaitable[Any]]] = None,
+        on_unlinked: Optional[Callable[[Order, AmoLink], Awaitable[Any]]] = None,
         poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC,
         dry_run: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -56,6 +59,10 @@ class WirePaymentSync:
         # поменял в CRM (`result.changed`): сумму, стадию или хотя бы одну
         # задачу. Молчит только если менять было нечего (ревью 23.09).
         self.on_synced = on_synced
+        # Оплату отвязали, а сделку робот уже провёл как оплаченную (решение
+        # владельца 2026-10-05): в CRM робот сам ничего не откатывает, только
+        # говорит владельцу.
+        self.on_unlinked = on_unlinked
         self.poll_interval_sec = poll_interval_sec
         self.sleep = sleep
         self.now = now
@@ -66,9 +73,11 @@ class WirePaymentSync:
         # заказы в памяти процесса — до перезапуска. В бою отметка в базе.
         self.dry_run = dry_run
         self._handled: set[int] = set()
+        self._unlinked_told: set[int] = set()
 
     async def tick(self) -> int:
         """Один проход. Возвращает, сколько сделок доведено."""
+        await self._tell_unlinked()
         due = await self.source.due()
         synced = 0
         for order, link in due:
@@ -100,6 +109,34 @@ class WirePaymentSync:
 
     # --- внутреннее ---
 
+    async def _tell_unlinked(self) -> None:
+        """Сказать владельцу про отвязанную оплату и снять отметку «доведено».
+
+        Снятая отметка — это и «уже сказали» (связка выпадает из выборки), и
+        возможность довести сделку заново после правильной привязки, если
+        владелец вернёт её в «Заказ выполнен». Сначала сообщение, потом
+        отметка: не ушло сообщение — отметку не трогаем, скажем на следующем
+        проходе. Репетиция в базу не пишет и помнит сказанное в памяти.
+        """
+        if self.on_unlinked is None:
+            return
+        for order, link in await self.source.unlinked():
+            if order.order_id in self._unlinked_told:
+                continue
+            try:
+                await self.on_unlinked(order, link)
+            except Exception:                          # noqa: BLE001 — Telegram бывает недоступен
+                log.exception("%s №%s: сообщение об отвязанной оплате не ушло",
+                              order.label, order.order_id)
+                continue
+            if self.dry_run:
+                self._unlinked_told.add(order.order_id)
+                continue
+            store = self.engine.store
+            await store.update(order.order_id, payment_synced_at=None)
+            await store.log(order.order_id, "wire_payment_unlinked", dry_run=False,
+                            payload={"lead_id": link.real_lead_id})
+
     async def _report(self, order: Order, link: AmoLink, result: WirePaymentResult) -> None:
         """Сообщение владельцу не должно ронять проход: Telegram бывает недоступен."""
         try:
@@ -130,6 +167,19 @@ class PgWirePaymentSource:
         links = await db.fetch_links_needing_wire_payment_sync(self.own_pool, wire_ids)
         if not links:
             return []
+        return await self._with_orders(links)
+
+    async def unlinked(self) -> list[tuple[Order, AmoLink]]:
+        """Заказы, снова ждущие оплату, у которых сделка уже доведена как оплаченная."""
+        waiting_ids = await db.fetch_wire_unpaid_order_ids(self.bot_pool, self.backlog_from)
+        if not waiting_ids:
+            return []
+        links = await db.fetch_links_with_wire_payment_synced(self.own_pool, waiting_ids)
+        if not links:
+            return []
+        return await self._with_orders(links)
+
+    async def _with_orders(self, links: list[AmoLink]) -> list[tuple[Order, AmoLink]]:
         orders = await db.fetch_orders_by_ids(self.bot_pool, [link.order_id for link in links])
         by_id = {order.order_id: order for order in orders}
         return [(by_id[link.order_id], link) for link in links if link.order_id in by_id]

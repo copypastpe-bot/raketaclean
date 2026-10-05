@@ -76,7 +76,8 @@ from adminbot.tg.calendar_cards import (
 from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
     carpet_held_text, carpet_question_card, carpet_report_text, mark_rehearsal,
-    order_done_text, question_card, summary_text, wire_payment_synced_text)
+    order_done_text, question_card, summary_text, wire_payment_synced_text,
+    wire_payment_unlinked_text)
 from adminbot.tg.feedback_cards import (
     failure_text as feedback_failure_text, rehearsal_text as feedback_rehearsal_text)
 from adminbot.tg.promo_cards import (
@@ -115,6 +116,7 @@ MAIL_AUTOCALL_CONNECTED = "autocall_connected"
 MAIL_AUTOCALL_NO_PHONE = "autocall_no_phone"
 MAIL_AUTOCALL_MANAGER = "autocall_manager"
 MAIL_WIRE_PAYMENT_SYNCED = "wire_payment_synced"
+MAIL_WIRE_PAYMENT_UNLINKED = "wire_payment_unlinked"
 MAIL_PROMO_CALLBACK_REHEARSAL = "promo_callback_rehearsal"
 MAIL_PROMO_CALLBACK_FAILED = "promo_callback_failed"
 MAIL_PROMO_CALLBACK_DONE = "promo_callback_done"
@@ -695,6 +697,7 @@ def _build_wire_payment(settings: Settings, bot_pool: Any, own_pool: Any, mail: 
         engine=engine,
         dry_run=dry_run,
         on_synced=_make_wire_payment_sender(mail, settings.amo_base_url, dry_run=dry_run),
+        on_unlinked=_make_wire_unlinked_sender(mail, settings.amo_base_url, dry_run=dry_run),
     )
     log.info("Оплата по счёту: включена, режим %s",
              "репетиция" if dry_run else "БОЕВОЙ")
@@ -1103,6 +1106,17 @@ def _make_wire_payment_sender(mail: OwnerMail, amo_base_url: str, *, dry_run: bo
                                      tasks_closed=result.tasks_closed,
                                      stage_moved=result.stage_moved, dry_run=dry_run),
             kind=MAIL_WIRE_PAYMENT_SYNCED, ref=order.order_id)
+
+    return send
+
+
+def _make_wire_unlinked_sender(mail: OwnerMail, amo_base_url: str, *, dry_run: bool = False):
+    """Оплату по счёту отвязали после доводки сделки (решение владельца 2026-10-05)."""
+
+    async def send(order, link) -> None:
+        await mail.send(
+            wire_payment_unlinked_text(order, link, base_url=amo_base_url, dry_run=dry_run),
+            kind=MAIL_WIRE_PAYMENT_UNLINKED, ref=order.order_id)
 
     return send
 

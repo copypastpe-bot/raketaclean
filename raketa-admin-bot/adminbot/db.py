@@ -690,6 +690,49 @@ async def fetch_links_needing_wire_payment_sync(
     return [_link_from_row(row) for row in rows]
 
 
+async def fetch_wire_unpaid_order_ids(bot_pool: asyncpg.Pool, since: date) -> set[int]:
+    """Заказы бота по счёту, которые ждут оплату (`awaiting_wire_payment=true`).
+
+    Пара к `fetch_wire_paid_order_ids`: вместе со связками, уже доведёнными
+    после оплаты, даёт заказы, оплату по которым отвязали (решение владельца
+    2026-10-05: рабочий бот откатывает заказ при удалении привязанного перевода).
+    """
+    async with bot_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id FROM public.orders
+            WHERE created_at >= ($1::date AT TIME ZONE 'Europe/Moscow')
+              AND lower(replace(payment_method, 'ё', 'е')) IN ('р/с', 'расчетный')
+              AND awaiting_wire_payment = true
+            """,
+            since,
+        )
+    return {row["id"] for row in rows}
+
+
+async def fetch_links_with_wire_payment_synced(
+    own_pool: asyncpg.Pool, order_ids: Collection[int]
+) -> list[AmoLink]:
+    """Из переданных номеров — связки, сделку которых робот уже довёл после оплаты.
+
+    Для заказа, снова ждущего оплату, это значит: оплату отвязали, а сделка
+    в CRM осталась проведённой как оплаченная — владельцу пора её поправить.
+    """
+    if not order_ids:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT * FROM {LINKS_TABLE}
+            WHERE order_id = ANY($1::bigint[]) AND status = 'done'
+              AND payment_synced_at IS NOT NULL
+            ORDER BY order_id
+            """,
+            list(order_ids),
+        )
+    return [_link_from_row(row) for row in rows]
+
+
 # --- ковры от партнёра ---
 
 # Путь строки, которую робот не проводил, а принял на веру из архивного файла

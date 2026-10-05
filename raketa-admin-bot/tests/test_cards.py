@@ -724,3 +724,21 @@ def test_wire_payment_synced_message_marks_rehearsal():
 
     assert not live_text.startswith("🎭")
     assert rehearsal.startswith("🎭 РЕПЕТИЦИЯ")
+
+
+def test_wire_payment_unlinked_text_asks_to_fix_the_deal_by_hand():
+    """Оплату по счёту отвязали, а сделку робот уже провёл (решение 2026-10-05)."""
+    from types import SimpleNamespace
+    from adminbot.tg.cards import wire_payment_unlinked_text
+
+    order = SimpleNamespace(order_id=681, label="Заказ", client_name="Ирина",
+                            phone10="9601861067")
+    link = SimpleNamespace(real_lead_id=31695001)
+    text = wire_payment_unlinked_text(order, link, base_url="https://x.amocrm.ru")
+
+    assert "№681" in text and "Ирина" in text
+    assert "9601861067" in text                       # владельцу — номер целиком
+    assert "отвязали" in text and "руками" in text
+    assert "«Заказ выполнен»" in text                 # как вернуть сделку роботу
+    assert "https://x.amocrm.ru/leads/detail/31695001" in text
+

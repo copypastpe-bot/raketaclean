@@ -40,11 +40,15 @@ def make_engine(amo, store, *, dry_run=False):
 class FakeSource:
     """Пары (заказ, связка), готовые к доводке — ровно то, что дали."""
 
-    def __init__(self, due):
+    def __init__(self, due, unlinked=()):
         self._due = list(due)
+        self._unlinked = list(unlinked)
 
     async def due(self):
         return list(self._due)
+
+    async def unlinked(self):
+        return list(self._unlinked)
 
 
 async def test_tick_completes_the_deal_and_reports_it():
@@ -241,3 +245,77 @@ async def test_live_mode_does_not_keep_handled_orders_in_memory():
     second = await sync.tick()
 
     assert (first, second) == (1, 1)
+
+
+# --- оплату отвязали после доводки (решение владельца 2026-10-05) ---
+
+def make_unlinked(order_id=588, lead_id=41463832_30):
+    """Заказ снова ждёт оплату по счёту, а сделку робот уже провёл как оплаченную."""
+    order = Order(order_id=order_id, phone10="9601861067", created_at=ORDER_MOMENT,
+                  amount_total=Decimal("1"), masters=[], client_name="Ирина",
+                  payment_method="р/с", awaiting_wire_payment=True)
+    link = make_link(order_id=order_id, real_lead_id=lead_id,
+                     payment_synced_at=ORDER_MOMENT)
+    return order, link
+
+
+async def test_unlinked_payment_is_reported_once_and_the_mark_is_cleared():
+    """Владелец узнаёт про отвязку, отметка «доведено» снимается, в амо ни шага.
+
+    Снятая отметка — и есть «уже сказали»: такая связка больше не попадает
+    в выборку отвязанных, а после правильной привязки робот снова её доведёт.
+    """
+    amo, store = FakeAmo(), FakeStore()
+    order, link = make_unlinked()
+    store.links[588] = link
+    reported = []
+
+    async def on_unlinked(order, link):
+        reported.append((order.order_id, link.real_lead_id))
+
+    sync = WirePaymentSync(source=FakeSource([], unlinked=[(order, link)]),
+                           engine=make_engine(amo, store), on_unlinked=on_unlinked)
+    await sync.tick()
+
+    assert reported == [(588, 41463832_30)]
+    assert store.links[588].payment_synced_at is None
+    assert [row["action"] for row in store.actions] == ["wire_payment_unlinked"]
+    assert amo.calls == []                       # в CRM робот сам ничего не делает
+
+
+async def test_unlinked_payment_in_rehearsal_writes_nothing_and_reports_once():
+    amo, store = FakeAmo(), FakeStore()
+    order, link = make_unlinked()
+    store.links[588] = link
+    reported = []
+
+    async def on_unlinked(order, link):
+        reported.append(order.order_id)
+
+    sync = WirePaymentSync(source=FakeSource([], unlinked=[(order, link)]),
+                           engine=make_engine(amo, store, dry_run=True),
+                           on_unlinked=on_unlinked, dry_run=True)
+    await sync.tick()
+    await sync.tick()
+
+    assert reported == [588]                     # второй проход не повторяет
+    assert store.links[588].payment_synced_at is not None
+    assert store.actions == []
+
+
+async def test_failed_report_keeps_the_mark_for_the_next_pass():
+    """Telegram не ответил — отметку не снимаем, иначе владелец не узнает никогда."""
+    amo, store = FakeAmo(), FakeStore()
+    order, link = make_unlinked()
+    store.links[588] = link
+
+    async def on_unlinked(order, link):
+        raise RuntimeError("telegram down")
+
+    sync = WirePaymentSync(source=FakeSource([], unlinked=[(order, link)]),
+                           engine=make_engine(amo, store), on_unlinked=on_unlinked)
+    await sync.tick()
+
+    assert store.links[588].payment_synced_at is not None
+    assert store.actions == []
+

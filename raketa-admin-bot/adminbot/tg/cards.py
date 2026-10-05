@@ -591,6 +591,31 @@ def order_done_text(order: Any, link: Any, *, base_url: str, dry_run: bool = Fal
     return mark_rehearsal("\n".join(lines), dry_run)
 
 
+def wire_payment_unlinked_text(order: Any, link: Any, *, base_url: str,
+                               dry_run: bool = False) -> str:
+    """Оплату по счёту отвязали, а сделка уже проведена как оплаченная (решение 2026-10-05).
+
+    Робот в CRM сам ничего не откатывает: владелец правит руками. Вернёт
+    сделку в «Заказ выполнен» — после правильной привязки робот доведёт её сам.
+    """
+    label = getattr(order, "label", "Заказ")
+    parts = [f"{label} №{order.order_id}"]
+    if getattr(order, "client_name", None):
+        parts.append(order.client_name)
+    parts.append(for_owner(order.phone10))
+    lines = [
+        "↩️ " + " · ".join(parts),
+        "Оплату по счёту отвязали — заказ снова ждёт оплату. Сделка уже проведена "
+        "как оплаченная, поправьте её руками.",
+        "Вернёте сделку в «Заказ выполнен» — после правильной привязки я проведу её сам "
+        "с верной суммой. Не вернёте — сумму в сделке исправьте сами.",
+    ]
+    lead_id = link.real_lead_id
+    if lead_id:
+        lines += ["", _deal_url(base_url, lead_id)]
+    return mark_rehearsal("\n".join(lines), dry_run)
+
+
 def wire_payment_synced_text(order: Any, link: Any, *, base_url: str, tasks_closed: int,
                              stage_moved: bool, dry_run: bool = False) -> str:
     """Сделка доведена после оплаты по счёту (задача 11, ТЗ 2026-09-22).
