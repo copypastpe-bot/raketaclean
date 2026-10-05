@@ -11443,6 +11443,7 @@ async def tx_remove_confirm(query: CallbackQuery, state: FSMContext):
 
     row: asyncpg.Record | None = None
     balance_after: Decimal | None = None
+    unlinked_order_id: int | None = None
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -11456,6 +11457,10 @@ async def tx_remove_confirm(query: CallbackQuery, state: FSMContext):
             )
             if row:
                 await _remove_jenya_card_entry(conn, row["id"])
+                # Ошибочно привязанный перевод: заказ снова ждёт оплату по счёту
+                # (решение владельца 2026-10-05), иначе правильную оплату к нему
+                # не привязать — только удалить заказ.
+                unlinked_order_id = await _unlink_wire_entry(conn, entry_id=row["id"])
                 balance_after = await get_cash_balance_excluding_withdrawals(conn)
 
     if not row:
@@ -11482,6 +11487,13 @@ async def tx_remove_confirm(query: CallbackQuery, state: FSMContext):
         f"Комментарий: {comment}",
         f"Остаток кассы: {balance_line}₽",
     ]
+    unlink_line = (
+        f"Оплата была привязана к заказу №{unlinked_order_id} — заказ снова ждёт оплату "
+        "по счёту, сумма 1 ₽, зарплата мастера по заказу обнулена (бензин оставлен)."
+        if unlinked_order_id else None
+    )
+    if unlink_line:
+        lines.append(unlink_line)
     await query.message.answer("\n".join(lines), reply_markup=admin_root_kb())
 
     if MONEY_FLOW_CHAT_ID:
@@ -11491,6 +11503,8 @@ async def tx_remove_confirm(query: CallbackQuery, state: FSMContext):
                 f"#{target_id} — {kind} {method} {amount_display}₽",
                 f"Касса - {balance_line}₽",
             ]
+            if unlink_line:
+                notify_lines.append(unlink_line)
             await bot.send_message(MONEY_FLOW_CHAT_ID, "\n".join(notify_lines))
         except Exception as exc:  # noqa: BLE001
             logging.warning("tx_remove notify failed for entry_id=%s: %s", target_id, exc)
@@ -13949,6 +13963,71 @@ async def _apply_wire_link(
     if order_row and order_row["client_id"]:
         await _enqueue_wire_payment_received(conn, client_id=int(order_row["client_id"]), amount=amount_dec)
     return amount_dec
+
+
+async def _unlink_wire_entry(conn: asyncpg.Connection, *, entry_id: int) -> int | None:
+    """Откатить привязку перевода, когда её транзакцию удалили (решение владельца 2026-10-05).
+
+    Обратная сторона `_apply_wire_link`: заказ снова «ждёт оплату по счёту»,
+    сумма и наличные — как до привязки, у мастеров база и доплата 0, бензин
+    остаётся. Прежние значения лежат в `calc_info` зарплаты (`base_amount`,
+    `cash_payment`), их и возвращаем; нет их — 1 ₽, так заводится любой заказ
+    по счёту. Вызывать внутри транзакции удаления, после пометки записи.
+    Возвращает номер откатанного заказа или None, если откатывать нечего:
+    запись не поступление по р/с, не привязана, заказ не по счёту либо у него
+    есть ещё одна живая привязанная оплата.
+    """
+    entry = await conn.fetchrow(
+        "SELECT order_id, kind, method FROM cashbook_entries WHERE id=$1", entry_id)
+    if not entry or entry["order_id"] is None:
+        return None
+    if entry["kind"] != "income" or entry["method"] != "р/с":
+        return None
+    order_id = int(entry["order_id"])
+    order = await conn.fetchrow("SELECT payment_method FROM orders WHERE id=$1", order_id)
+    if not order or (order["payment_method"] or "").strip().lower() not in {"р/с", "расчетный", "расчётный"}:
+        return None
+    other_live = await conn.fetchval(
+        """
+        SELECT 1 FROM cashbook_entries
+        WHERE order_id=$1 AND kind='income' AND method='р/с'
+          AND COALESCE(is_deleted, false)=FALSE AND id<>$2
+        LIMIT 1
+        """,
+        order_id, entry_id,
+    )
+    if other_live:
+        return None
+
+    before = await conn.fetchrow(
+        """
+        SELECT calc_info->>'base_amount' AS base_amount,
+               calc_info->>'cash_payment' AS cash_payment
+        FROM payroll_items WHERE order_id=$1 AND calc_info ? 'base_amount'
+        ORDER BY id LIMIT 1
+        """,
+        order_id,
+    )
+    amount_total = Decimal(before["base_amount"]) if before and before["base_amount"] else Decimal("1")
+    amount_cash = Decimal(before["cash_payment"]) if before and before["cash_payment"] else amount_total
+    await conn.execute(
+        """
+        UPDATE orders
+        SET amount_total=$1, amount_cash=$2, awaiting_wire_payment=TRUE
+        WHERE id=$3
+        """,
+        amount_total, amount_cash, order_id,
+    )
+    await conn.execute(
+        """
+        UPDATE payroll_items
+        SET base_pay=0, upsell_pay=0, total_pay=fuel_pay,
+            calc_info=COALESCE(calc_info, '{}'::jsonb) - 'wire_manual'
+        WHERE order_id=$1
+        """,
+        order_id,
+    )
+    return order_id
 
 
 async def _ensure_address_before_confirm(msg: Message, state: FSMContext):
