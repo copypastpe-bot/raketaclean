@@ -1,8 +1,9 @@
 """Права и синее меню по клинингу (решение владельца 2026-10-05).
 
 Выплату прибыли клининга проводят админы, не клинер: у роли cleaner права
-`cleaning_pay_dividend` нет. Админам в синее меню добавлен расход кассы
-клининга («Клининг: расход»), право на него у них было и раньше.
+`cleaning_pay_dividend` нет. Расход кассы клининга у всех один — `/cleaning_expense`
+(docs/plans/2026-10-05-admin-menu.md, решение 2): право на него у админов есть,
+а `/cleaning_cash_expense` из бота и из синего меню удалена.
 Права пишет в базу `init_permissions` из `ROLE_MATRIX` при каждом запуске,
 поэтому проверяем саму матрицу.
 """
@@ -21,7 +22,8 @@ class CleaningRolesTests(unittest.TestCase):
         for role in ("admin", "superadmin"):
             perms = bot.ROLE_MATRIX[role]
             self.assertIn("cleaning_pay_dividend", perms)
-            self.assertIn("cleaning_manage_cash", perms)       # право на /cleaning_cash_expense
+            self.assertIn("cleaning_manage_cash", perms)
+            self.assertIn("cleaning_record_expense", perms)    # право на /cleaning_expense
 
 
 class FakeConn:
@@ -66,9 +68,9 @@ class BlueMenuTests(unittest.IsolatedAsyncioTestCase):
                 menus[chat_id] = {cmd.command: cmd.description for cmd in call.args[0]}
         return menus
 
-    async def test_admin_menu_has_cleaning_cash_expense(self):
+    async def test_admin_menu_has_no_cleaning_cash_expense(self):
         menus = await self._menus()
-        self.assertEqual(menus[1].get("cleaning_cash_expense"), "Клининг: расход")
+        self.assertNotIn("cleaning_cash_expense", menus[1])
 
     async def test_cleaner_menu_has_no_dividend(self):
         menus = await self._menus()

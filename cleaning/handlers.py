@@ -122,7 +122,6 @@ from .dividend import (
 from .fsm import (
     CleaningCancelOrderFSM,
     CleaningCashAddFSM,
-    CleaningCashExpenseFSM,
     CleaningCashMoveDeleteFSM,
     CleaningCashMoveFSM,
     CleaningCashWithdrawalFSM,
@@ -375,7 +374,6 @@ async def start_cleaning_order(msg: Message, state: FSMContext, **data) -> None:
         CleaningOrderFSM,
         CleaningDividendFSM,
         CleaningCashAddFSM,
-        CleaningCashExpenseFSM,
         CleaningCashWithdrawalFSM,
         CleaningCancelOrderFSM,
         CleaningClientLookupFSM,
@@ -1454,111 +1452,6 @@ async def cash_add_provesti(msg: Message, state: FSMContext, **kw) -> None:
     )
     await msg.answer(
         f"Приход зачислен. Касса: {_money_str(balance_after)}₽",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await state.clear()
-
-
-# ---------- /cleaning_cash_expense (manual expense) ----------
-
-
-@router.message(Command("cleaning_cash_expense"))
-async def start_cash_expense(msg: Message, state: FSMContext, **kw) -> None:
-    pool: asyncpg.Pool = kw["pool"]
-    if not await _has_permission(pool, msg.from_user.id, "cleaning_manage_cash"):
-        await msg.answer("Команда доступна только администраторам.")
-        return
-    await state.clear()
-    await state.set_state(CleaningCashExpenseFSM.category)
-    await msg.answer(
-        "Ручной расход. Выберите категорию:",
-        reply_markup=_expense_category_kb(),
-    )
-
-
-@router.message(CleaningCashExpenseFSM.category, F.text)
-async def cash_exp_category(msg: Message, state: FSMContext) -> None:
-    if msg.text == "Готово":
-        await msg.answer("Категория обязательна.", reply_markup=_expense_category_kb())
-        return
-    if msg.text not in CLEANING_EXPENSE_CATEGORIES:
-        await msg.answer("Выберите категорию кнопкой.", reply_markup=_expense_category_kb())
-        return
-    await state.update_data(category=msg.text)
-    await state.set_state(CleaningCashExpenseFSM.amount)
-    await msg.answer("Сумма (руб):", reply_markup=cancel_kb)
-
-
-@router.message(CleaningCashExpenseFSM.amount, F.text)
-async def cash_exp_amount(msg: Message, state: FSMContext) -> None:
-    amount = parse_amount(msg.text)
-    if amount is None or amount <= 0:
-        await msg.answer("Нужно число > 0.", reply_markup=cancel_kb)
-        return
-    await state.update_data(amount=str(amount))
-    await state.set_state(CleaningCashExpenseFSM.cash_holder)
-    await _ask_cash_holder(msg)
-
-
-@router.message(CleaningCashExpenseFSM.cash_holder, F.text)
-async def cash_exp_cash_holder(msg: Message, state: FSMContext) -> None:
-    cash_holder = _parse_cash_holder(msg.text)
-    if cash_holder is None:
-        await _reask_cash_holder(msg)
-        return
-    await state.update_data(cash_holder=cash_holder)
-    await state.set_state(CleaningCashExpenseFSM.comment)
-    await msg.answer("Комментарий (или «-»):", reply_markup=cancel_kb)
-
-
-@router.message(CleaningCashExpenseFSM.comment, F.text)
-async def cash_exp_comment(msg: Message, state: FSMContext) -> None:
-    comment = msg.text.strip()
-    if comment == "-":
-        comment = ""
-    await state.update_data(comment=comment)
-    data = await state.get_data()
-    await state.set_state(CleaningCashExpenseFSM.confirm)
-    await msg.answer(
-        f"Подтвердите расход: {data['category']} {_money_str(Decimal(data['amount']))}₽"
-        f"\n{_cash_holder_line(data['cash_holder'])}"
-        + (f"\nКомментарий: {comment}" if comment else ""),
-        reply_markup=_confirm_kb(),
-    )
-
-
-@router.message(CleaningCashExpenseFSM.confirm, F.text == "Провести")
-async def cash_exp_provesti(msg: Message, state: FSMContext, **kw) -> None:
-    pool: asyncpg.Pool = kw["pool"]
-    bot = kw["bot"]
-    data = await state.get_data()
-    amount = Decimal(data["amount"])
-    category = data["category"]
-    comment = data.get("comment") or None
-    cash_holder = data["cash_holder"]
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await add_cash_expense(
-                conn, category=category, amount=amount, comment=comment,
-                cash_holder=cash_holder,
-            )
-            balance_after = await get_cleaning_balance(conn)
-            olya_balance = (
-                await get_olya_balance(conn) if cash_holder == CASH_HOLDER_OLYA else None
-            )
-    await send_cleaning_money_flow(
-        bot,
-        format_cash_op_alert(
-            op_label="Расход",
-            bucket=category,
-            amount=amount,
-            comment=comment,
-            balance_after=balance_after,
-            olya_balance=olya_balance,
-        ),
-    )
-    await msg.answer(
-        f"Расход списан. Касса: {_money_str(balance_after)}₽",
         reply_markup=ReplyKeyboardRemove(),
     )
     await state.clear()

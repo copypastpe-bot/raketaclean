@@ -1,11 +1,13 @@
 """Реестр денег Оли, задача 3 (docs/plans/2026-10-05-olya-money-register.md):
 выбор «Оля / Дима» в админских операциях с кассой клининга.
 
-Шаг выбора стоит после суммы, до комментария (у выплаты — до подтверждения) в
-пяти сценариях: приход `/cleaning_cash_add`, расход `/cleaning_cash_expense`,
+Шаг выбора стоит после суммы (у расхода — после категории), до комментария
+(у выплаты — до подтверждения) в четырёх сценариях: приход `/cleaning_cash_add`,
 изъятие `/cleaning_cash_withdrawal`, выплата прибыли `/cleaning_dividend` и
-расход бригадира `/cleaning_expense`, если его ведёт не клинер. Клинер в
-своём расходе по-прежнему тратит деньги Оли без вопроса.
+расход `/cleaning_expense`, если его ведёт не клинер. Клинер в своём расходе
+по-прежнему тратит деньги Оли без вопроса. Второй расход, `/cleaning_cash_expense`,
+удалён (docs/plans/2026-10-05-admin-menu.md, задача 2); его проверки перенесены
+на `/cleaning_expense`.
 
 Подтверждение показывает выбор; строка кассы получает `cash_holder`; строка
 `Деньги Оли: N₽` в чат клининговых денег — только при выборе «Оля».
@@ -34,7 +36,6 @@ import cleaning.handlers as cleaning_handlers
 from cleaning.constants import CASH_HOLDER_DIMA, CASH_HOLDER_OLYA
 from cleaning.fsm import (
     CleaningCashAddFSM,
-    CleaningCashExpenseFSM,
     CleaningCashWithdrawalFSM,
     CleaningDividendFSM,
     CleaningForemanExpenseFSM,
@@ -197,8 +198,6 @@ class UnknownStubDoesNotInterceptTests(_DispatchCase):
         # (состояние, данные до шага, состояние после, текст следующего вопроса)
         (CleaningCashAddFSM.cash_holder, {"method": "Наличные", "amount": "1000"},
          CleaningCashAddFSM.comment, "Комментарий (или «-»):"),
-        (CleaningCashExpenseFSM.cash_holder, {"category": "Химия", "amount": "500"},
-         CleaningCashExpenseFSM.comment, "Комментарий (или «-»):"),
         (CleaningCashWithdrawalFSM.cash_holder, {"amount": "700"},
          CleaningCashWithdrawalFSM.comment, "Комментарий (или «-»):"),
         (CleaningDividendFSM.cash_holder,
@@ -252,44 +251,6 @@ class UnknownStubDoesNotInterceptTests(_DispatchCase):
 
 
 # ---------- сценарии целиком ----------
-
-
-class CashExpenseChoiceTests(_DispatchCase):
-    async def _until_choice(self):
-        await self.send("/cleaning_cash_expense")
-        await self.send("Химия")
-        replies = await self.send("500")
-        self.assertEqual(replies, [SPEND_Q])
-        self.assertEqual(self.last_markup_texts(), ["Оля", "Дима", "Отмена"])
-        self.assertEqual(await self.state(), CleaningCashExpenseFSM.cash_holder.state)
-
-    async def test_olya(self):
-        await self._until_choice()
-        self.assertEqual(await self.send("Оля"), ["Комментарий (или «-»):"])
-        confirm = await self.send("хлорка")
-        self.assertEqual(
-            confirm,
-            ["Подтвердите расход: Химия 500₽\nИсточник: Деньги Ольга\nКомментарий: хлорка"],
-        )
-        await self.send("Провести")
-        self.assertEqual(
-            self.add_cash_expense.await_args.kwargs["cash_holder"], CASH_HOLDER_OLYA
-        )
-        self.get_olya_balance.assert_awaited_once()
-        self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
-        self.assertIsNone(await self.state())
-
-    async def test_dima(self):
-        await self._until_choice()
-        await self.send("Дима")
-        confirm = await self.send("-")
-        self.assertEqual(confirm, ["Подтвердите расход: Химия 500₽\nИсточник: касса (Дима)"])
-        await self.send("Провести")
-        self.assertEqual(
-            self.add_cash_expense.await_args.kwargs["cash_holder"], CASH_HOLDER_DIMA
-        )
-        self.get_olya_balance.assert_not_awaited()
-        self.assertNotIn("Деньги Ольга", self.chat_text())
 
 
 class CashAddChoiceTests(_DispatchCase):
@@ -400,18 +361,27 @@ class DividendChoiceTests(_DispatchCase):
 
 
 class ForemanExpenseAdminChoiceTests(_DispatchCase):
-    """Расход бригадира, который ведёт админ: тот же шаг выбора."""
+    """Расход `/cleaning_expense`, который ведёт админ: шаг выбора «Оля / Дима».
+
+    Единственный расход кассы клининга (docs/plans/2026-10-05-admin-menu.md,
+    задача 2): сюда перенесены проверки удалённого `/cleaning_cash_expense` —
+    кнопки выбора, остаток Оли только при «Оля», сценарий закрыт после «Провести».
+    """
 
     async def _until_choice(self):
         await self.send("/cleaning_expense")
         await self.send("300")
         replies = await self.send("ГСМ")
         self.assertEqual(replies, [SPEND_Q])
+        self.assertEqual(self.last_markup_texts(), ["Оля", "Дима", "Отмена"])
         self.assertEqual(await self.state(), CleaningForemanExpenseFSM.cash_holder.state)
 
     async def test_olya(self):
         await self._until_choice()
-        await self.send("Оля")
+        self.assertEqual(
+            await self.send("Оля"),
+            ["Комментарий? (введите текст или нажмите «Без комментария»)"],
+        )
         confirm = await self.send("Без комментария")
         self.assertEqual(
             confirm,
@@ -424,7 +394,9 @@ class ForemanExpenseAdminChoiceTests(_DispatchCase):
         self.assertEqual(
             self.add_cash_expense.await_args.kwargs["cash_holder"], CASH_HOLDER_OLYA
         )
+        self.get_olya_balance.assert_awaited_once()
         self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
+        self.assertIsNone(await self.state())
 
     async def test_dima(self):
         await self._until_choice()
@@ -443,6 +415,7 @@ class ForemanExpenseAdminChoiceTests(_DispatchCase):
         )
         self.get_olya_balance.assert_not_awaited()
         self.assertNotIn("Деньги Ольга", self.chat_text())
+        self.assertIsNone(await self.state())
 
 
 class ForemanExpenseCleanerNoChoiceTests(_DispatchCase):

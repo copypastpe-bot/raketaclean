@@ -41,14 +41,6 @@ class CleaningCashAddFSM(StatesGroup):
     confirm = State()
 
 
-class CleaningCashExpenseFSM(StatesGroup):
-    category = State()
-    amount = State()
-    cash_holder = State()
-    comment = State()
-    confirm = State()
-
-
 class CleaningCashWithdrawalFSM(StatesGroup):
     amount = State()
     cash_holder = State()

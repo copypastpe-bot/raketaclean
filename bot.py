@@ -7764,9 +7764,6 @@ async def set_commands():
         BotCommand(command="cleaning_cancel_order", description="Клининг: отменить заказ"),
         BotCommand(command="cleaning_dividend", description="Клининг: выплата прибыли"),
         BotCommand(command="cleaning_dividend_cancel", description="Клининг: отменить выплату"),
-        # Решение владельца 05.10: расход кассы клининга админам — командой,
-        # кнопки админского меню пересматриваются отдельно.
-        BotCommand(command="cleaning_cash_expense", description="Клининг: расход"),
         # Реестр денег Оли (ТЗ 2026-10-05, задача 4): остаток и операции — командой.
         BotCommand(command="cleaning_olya", description="Клининг: деньги Оли"),
     ]
@@ -12809,7 +12806,6 @@ async def cancel_any(msg: Message, state: FSMContext):
         "CleaningOrderFSM",
         "CleaningDividendFSM",
         "CleaningCashAddFSM",
-        "CleaningCashExpenseFSM",
         "CleaningCashWithdrawalFSM",
         "CleaningCancelOrderFSM",
         "CleaningClientLookupFSM",
