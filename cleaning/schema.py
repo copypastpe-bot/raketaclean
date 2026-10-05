@@ -1,5 +1,5 @@
 """Idempotent bootstrap of cleaning tables (mirrors 0006_cleaning.sql, 0010_cleaning_orders_comment.sql,
-0016_cleaning_orders_rating.sql)."""
+0016_cleaning_orders_rating.sql, 0017_cleaning_cashbook_cash_holder.sql)."""
 
 from __future__ import annotations
 
@@ -81,6 +81,31 @@ async def ensure_cleaning_schema(conn: asyncpg.Connection) -> None:
             created_at  timestamptz NOT NULL DEFAULT NOW(),
             deleted_at  timestamptz
         );
+        """
+    )
+    # Реестр денег Оли — «чьи деньги» у строки кассы (0017, ТЗ 2026-10-05).
+    await conn.execute(
+        """
+        ALTER TABLE cleaning_cashbook
+        ADD COLUMN IF NOT EXISTS cash_holder text;
+        """
+    )
+    await conn.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname = 'cleaning_cashbook_cash_holder_check'
+                  AND conrelid = 'cleaning_cashbook'::regclass
+            ) THEN
+                ALTER TABLE cleaning_cashbook
+                    ADD CONSTRAINT cleaning_cashbook_cash_holder_check
+                    CHECK (cash_holder IN ('olya', 'dima'));
+            END IF;
+        END
+        $$;
         """
     )
     await conn.execute(

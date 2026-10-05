@@ -13,6 +13,7 @@ from .constants import (
     CASHBOOK_KIND_EXPENSE,
     CASHBOOK_KIND_INCOME,
     CASHBOOK_KIND_WITHDRAWAL,
+    CASH_HOLDER_OLYA,
     CLEANING_DIVIDEND_METHOD,
     ZERO,
 )
@@ -24,18 +25,21 @@ async def record_income(
     method: str,
     amount: Decimal,
     order_id: int,
+    cash_holder: str,
     comment: str | None = None,
 ) -> None:
+    """cash_holder — чьи деньги: 'olya' | 'dima' (CASH_HOLDER_*), без умолчания."""
     await conn.execute(
         """
-        INSERT INTO cleaning_cashbook (kind, method, amount, comment, order_id)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO cleaning_cashbook (kind, method, amount, comment, order_id, cash_holder)
+        VALUES ($1, $2, $3, $4, $5, $6)
         """,
         CASHBOOK_KIND_INCOME,
         method,
         amount,
         comment,
         order_id,
+        cash_holder,
     )
 
 
@@ -44,36 +48,43 @@ async def record_expense(
     *,
     category: str,
     amount: Decimal,
+    cash_holder: str,
     order_id: int | None = None,
     comment: str | None = None,
 ) -> None:
+    """cash_holder — чьи деньги: 'olya' | 'dima' (CASH_HOLDER_*), без умолчания."""
     await conn.execute(
         """
-        INSERT INTO cleaning_cashbook (kind, method, amount, comment, order_id)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO cleaning_cashbook (kind, method, amount, comment, order_id, cash_holder)
+        VALUES ($1, $2, $3, $4, $5, $6)
         """,
         CASHBOOK_KIND_EXPENSE,
         category,
         amount,
         comment,
         order_id,
+        cash_holder,
     )
 
 
 async def record_dividend(
-    conn: asyncpg.Connection, *, amount: Decimal, comment: str
+    conn: asyncpg.Connection, *, amount: Decimal, comment: str, cash_holder: str
 ) -> int:
-    """Возвращает id строки: по нему администратор отменяет ошибочную выплату."""
+    """Возвращает id строки: по нему администратор отменяет ошибочную выплату.
+
+    cash_holder — из чьих денег выплата: 'olya' | 'dima' (CASH_HOLDER_*).
+    """
     return await conn.fetchval(
         """
-        INSERT INTO cleaning_cashbook (kind, method, amount, comment)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO cleaning_cashbook (kind, method, amount, comment, cash_holder)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id
         """,
         CASHBOOK_KIND_DIVIDEND,
         CLEANING_DIVIDEND_METHOD,
         amount,
         comment,
+        cash_holder,
     )
 
 
@@ -202,6 +213,54 @@ async def get_cleaning_balance(conn: asyncpg.Connection) -> Decimal:
         CASHBOOK_KIND_WITHDRAWAL,
     )
     return Decimal(value) if value is not None else ZERO
+
+
+async def get_olya_balance(conn: asyncpg.Connection) -> Decimal:
+    """Деньги компании на руках у Оли: тот же расчёт, что get_cleaning_balance,
+    но только по строкам cash_holder = 'olya'.
+
+    Строки до запуска реестра (cash_holder IS NULL) не входят — старт с нуля
+    (решение владельца 05.10). Отмены уборок и выплат выпадают по deleted_at.
+    """
+    value = await conn.fetchval(
+        """
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN kind IN ($1, $2) THEN amount
+            WHEN kind IN ($3, $4, $5) THEN -amount
+            ELSE 0
+          END
+        ), 0)::numeric(12,2)
+        FROM cleaning_cashbook
+        WHERE deleted_at IS NULL
+          AND cash_holder = $6
+        """,
+        CASHBOOK_KIND_INCOME,
+        CASHBOOK_KIND_DEPOSIT,
+        CASHBOOK_KIND_EXPENSE,
+        CASHBOOK_KIND_DIVIDEND,
+        CASHBOOK_KIND_WITHDRAWAL,
+        CASH_HOLDER_OLYA,
+    )
+    return Decimal(value) if value is not None else ZERO
+
+
+async def list_olya_entries(
+    conn: asyncpg.Connection, limit: int = 10
+) -> list[asyncpg.Record]:
+    """Последние операции по деньгам Оли, новые сверху; отменённые не показываем."""
+    return await conn.fetch(
+        """
+        SELECT id, happened_at, kind, method, amount, comment, order_id
+        FROM cleaning_cashbook
+        WHERE deleted_at IS NULL
+          AND cash_holder = $1
+        ORDER BY happened_at DESC, id DESC
+        LIMIT $2
+        """,
+        CASH_HOLDER_OLYA,
+        limit,
+    )
 
 
 async def get_cleaning_pnl(

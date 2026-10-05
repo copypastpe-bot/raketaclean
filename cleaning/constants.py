@@ -24,4 +24,11 @@ CASHBOOK_KINDS_DECREASE_BALANCE = {
 }
 CASHBOOK_KINDS_PNL = {CASHBOOK_KIND_INCOME, CASHBOOK_KIND_EXPENSE}
 
+# «Чьи деньги» у строки кассы (cleaning_cashbook.cash_holder, миграция 0017).
+# 'olya' — деньги компании на руках у Оли, 'dima' — обычная касса.
+CASH_HOLDER_OLYA = "olya"
+CASH_HOLDER_DIMA = "dima"
+# Оплаты по уборке, которые попадают к Оле (решение владельца 05.10, п.1).
+CLEANING_OLYA_PAYMENT_METHODS = ("Наличные", "Карта")
+
 ZERO = Decimal("0")

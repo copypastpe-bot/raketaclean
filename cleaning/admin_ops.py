@@ -21,51 +21,69 @@ from .constants import (
 
 
 async def add_cash_income(
-    conn: asyncpg.Connection, *, method: str, amount: Decimal, comment: str | None
+    conn: asyncpg.Connection,
+    *,
+    method: str,
+    amount: Decimal,
+    comment: str | None,
+    cash_holder: str,
 ) -> int:
-    """Ручной приход (deposit) — НЕ income от заказа, отдельная категория."""
+    """Ручной приход (deposit) — НЕ income от заказа, отдельная категория.
+
+    cash_holder — чьи деньги: 'olya' | 'dima' (CASH_HOLDER_*), без умолчания.
+    """
     return await conn.fetchval(
         """
-        INSERT INTO cleaning_cashbook (kind, method, amount, comment)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO cleaning_cashbook (kind, method, amount, comment, cash_holder)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id
         """,
         CASHBOOK_KIND_DEPOSIT,
         method,
         amount,
         comment,
+        cash_holder,
     )
 
 
 async def add_cash_expense(
-    conn: asyncpg.Connection, *, category: str, amount: Decimal, comment: str | None
+    conn: asyncpg.Connection,
+    *,
+    category: str,
+    amount: Decimal,
+    comment: str | None,
+    cash_holder: str,
 ) -> int:
+    """cash_holder — из чьих денег: 'olya' | 'dima' (CASH_HOLDER_*), без умолчания."""
     return await conn.fetchval(
         """
-        INSERT INTO cleaning_cashbook (kind, method, amount, comment)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO cleaning_cashbook (kind, method, amount, comment, cash_holder)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id
         """,
         CASHBOOK_KIND_EXPENSE,
         category,
         amount,
         comment,
+        cash_holder,
     )
 
 
 async def add_cash_withdrawal(
-    conn: asyncpg.Connection, *, amount: Decimal, comment: str | None
+    conn: asyncpg.Connection, *, amount: Decimal, comment: str | None, cash_holder: str
 ) -> int:
+    """cash_holder — из чьих денег: 'olya' | 'dima' (CASH_HOLDER_*), без умолчания."""
     return await conn.fetchval(
         """
-        INSERT INTO cleaning_cashbook (kind, method, amount, comment)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO cleaning_cashbook (kind, method, amount, comment, cash_holder)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id
         """,
         CASHBOOK_KIND_WITHDRAWAL,
         CLEANING_DIVIDEND_METHOD,  # тот же «Касса клининга» как single source
         amount,
         comment,
+        cash_holder,
     )
 
 

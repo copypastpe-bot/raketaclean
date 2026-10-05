@@ -38,9 +38,12 @@ from .cashbook import (
 )
 from .client import find_client_by_phone, normalize_phone, upsert_client
 from .constants import (
+    CASH_HOLDER_DIMA,
+    CASH_HOLDER_OLYA,
     CLEANING_ALL_PAYMENT_LABELS,
     CLEANING_EXPENSE_CATEGORIES,
     CLEANING_GIFT_CERT_LABEL,
+    CLEANING_OLYA_PAYMENT_METHODS,
     CLEANING_PAYMENT_METHODS,
     ZERO,
 )
@@ -706,6 +709,12 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
                     method=method,
                     amount=amount,
                     order_id=order_id,
+                    # «Наличные»/«Карта» — к Оле, «Расчётный» — касса (решение 05.10).
+                    cash_holder=(
+                        CASH_HOLDER_OLYA
+                        if method in CLEANING_OLYA_PAYMENT_METHODS
+                        else CASH_HOLDER_DIMA
+                    ),
                     comment=f"Заказ #{order_id}",
                 )
 
@@ -717,6 +726,7 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
                     amount=Decimal(e["amount"]),
                     order_id=order_id,
                     comment=e["category"],
+                    cash_holder=CASH_HOLDER_OLYA,  # расходы при проведении — из денег Оли
                 )
 
             # Бонусы клиента — обновляем общий баланс и пишем в bonus_transactions
@@ -940,7 +950,11 @@ async def foreman_expense_confirm(msg: Message, state: FSMContext, **kw) -> None
     comment = data.get("comment") or "Расход"
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await add_cash_expense(conn, category=category, amount=amount, comment=comment)
+            # Расход кнопкой Оли — всегда из её денег (решение 05.10).
+            await add_cash_expense(
+                conn, category=category, amount=amount, comment=comment,
+                cash_holder=CASH_HOLDER_OLYA,
+            )
             balance_after = await get_cleaning_balance(conn)
     await send_cleaning_money_flow(
         bot,
@@ -1056,8 +1070,10 @@ async def div_provesti(msg: Message, state: FSMContext, **kw) -> None:
             if status != PAYOUT_OK:
                 payout_id = None
             else:
+                # Выбор «Оля / Дима» у админа — ТЗ 2026-10-05, задача 3; пока касса.
                 payout_id = await record_dividend(
-                    conn, amount=amount, comment=dividend_comment()
+                    conn, amount=amount, comment=dividend_comment(),
+                    cash_holder=CASH_HOLDER_DIMA,
                 )
                 balance = await get_cleaning_balance(conn)
 
@@ -1217,7 +1233,11 @@ async def cash_add_provesti(msg: Message, state: FSMContext, **kw) -> None:
     comment = data.get("comment") or None
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await add_cash_income(conn, method=method, amount=amount, comment=comment)
+            # Выбор «Оля / Дима» у админа — ТЗ 2026-10-05, задача 3; пока касса.
+            await add_cash_income(
+                conn, method=method, amount=amount, comment=comment,
+                cash_holder=CASH_HOLDER_DIMA,
+            )
             balance_after = await get_cleaning_balance(conn)
     await send_cleaning_money_flow(
         bot,
@@ -1302,7 +1322,11 @@ async def cash_exp_provesti(msg: Message, state: FSMContext, **kw) -> None:
     comment = data.get("comment") or None
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await add_cash_expense(conn, category=category, amount=amount, comment=comment)
+            # Выбор «Оля / Дима» у админа — ТЗ 2026-10-05, задача 3; пока касса.
+            await add_cash_expense(
+                conn, category=category, amount=amount, comment=comment,
+                cash_holder=CASH_HOLDER_DIMA,
+            )
             balance_after = await get_cleaning_balance(conn)
     await send_cleaning_money_flow(
         bot,
@@ -1373,7 +1397,10 @@ async def cash_wd_provesti(msg: Message, state: FSMContext, **kw) -> None:
     comment = data.get("comment") or None
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await add_cash_withdrawal(conn, amount=amount, comment=comment)
+            # Выбор «Оля / Дима» у админа — ТЗ 2026-10-05, задача 3; пока касса.
+            await add_cash_withdrawal(
+                conn, amount=amount, comment=comment, cash_holder=CASH_HOLDER_DIMA,
+            )
             balance_after = await get_cleaning_balance(conn)
     await send_cleaning_money_flow(
         bot,
