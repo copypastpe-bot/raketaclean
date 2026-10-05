@@ -11026,30 +11026,6 @@ async def db_apply_cash_trigger(msg: Message):
         "✅ Legacy cash trigger on `orders` disabled. "
         "Order cashbook rows must now be created by the bot runtime only."
     )
-# ===== Admin: WIPE TEST DATA =====
-@dp.message(Command("wipe_test_data"))
-async def wipe_test_data(msg: Message):
-    # only admins/superadmins
-    if not await has_permission(msg.from_user.id, "import_leads"):
-        return await msg.answer("Только для администраторов.")
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            # Backup responsibility is external (psql \\copy). Here we just cleanup test data.
-            # 1) Clear staging
-            await conn.execute("TRUNCATE TABLE clients_raw RESTART IDENTITY;")
-            # 2) Clear operational tables (keep RBAC: staff/permissions/role_permissions)
-            for tbl in [
-                "orders",
-                "payroll_items",
-                "order_payroll",
-                "payroll",
-                "cashbook_entries",
-                "bonus_transactions",
-                "cashbook",
-                "clients"
-            ]:
-                await conn.execute(f"TRUNCATE TABLE {tbl} RESTART IDENTITY CASCADE;")
-    await msg.answer("Тестовые данные удалены. RBAC-таблицы сохранены.")
 
 # ===== Admin: UPLOAD CSV TO clients_raw =====
 
