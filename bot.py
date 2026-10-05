@@ -7270,44 +7270,33 @@ def norm_pay_method_py(p: str | None) -> str:
     return x
 
 async def set_commands():
+    # Синее меню по ролям — решение владельца 3 (ТЗ меню админа 2026-10-05).
+    # Остальные команды админов — на кнопках или в /help (help_cmd).
     default_cmds = [
-        BotCommand(command="start", description="Старт"),
+        BotCommand(command="start", description="Открыть меню"),
         BotCommand(command="help",  description="Помощь"),
-        BotCommand(command="whoami", description="Кто я"),
     ]
     admin_cmds = [
         *default_cmds,
-        BotCommand(command="order", description="Добавить заказ (мастер-меню)"),
-        BotCommand(command="my_daily", description="Моя сводка за сегодня"),
-        BotCommand(command="masters_all", description="Полный список мастеров"),
-        BotCommand(command="bonus_backfill", description="Пересчитать бонусы"),
-        BotCommand(command="tx_remove", description="Удалить транзакцию"),
-        BotCommand(command="order_remove", description="Удалить заказ"),
+        BotCommand(command="order", description="Добавить заказ"),
         BotCommand(command="dividend", description="Выплата дивидендов"),
         BotCommand(command="investment", description="Внесение инвестиций"),
         BotCommand(command="jenya_card", description="Баланс Карты Жени"),
-        BotCommand(command="cleaning_order", description="Клининг: провести уборку"),
-        BotCommand(command="cleaning_balance", description="Клининг: баланс"),
-        BotCommand(command="cleaning_cash", description="Клининг: касса"),
-        BotCommand(command="cleaning_orders", description="Клининг: заказы"),
-        # Решение владельца 16.09: эти три были доступны только тому, кто помнит
-        # их наизусть. Кнопок в админском меню не добавляем, только синее меню.
-        BotCommand(command="cleaning_cancel_order", description="Клининг: отменить заказ"),
-        BotCommand(command="cleaning_dividend", description="Клининг: выплата прибыли"),
+        BotCommand(command="add_master", description="Добавить мастера"),
+        BotCommand(command="list_masters", description="Список мастеров"),
+        BotCommand(command="masters_all", description="Полный список мастеров"),
+        BotCommand(command="remove_master", description="Деактивировать мастера"),
+        BotCommand(command="cleaning_cash_withdrawal", description="Клининг: изъятие из кассы"),
+        BotCommand(command="cleaning_move_delete", description="Клининг: удалить перемещение"),
+        BotCommand(command="cleaning_olya", description="Клининг: Деньги Ольга"),
+    ]
+    superadmin_cmds = [
+        *admin_cmds,
+        BotCommand(command="order_remove", description="Удалить заказ"),
+        BotCommand(command="tx_remove", description="Удалить транзакцию"),
+        BotCommand(command="bonus_backfill", description="Пересчитать бонусы"),
+        BotCommand(command="cleaning_cancel_order", description="Клининг: отменить уборку"),
         BotCommand(command="cleaning_dividend_cancel", description="Клининг: отменить выплату"),
-        # Реестр денег Оли (ТЗ 2026-10-05, задача 4): остаток и операции — командой.
-        BotCommand(command="cleaning_olya", description="Клининг: деньги Оли"),
-    ]
-    master_cmds = [
-        *default_cmds,
-        BotCommand(command="order", description="Добавить заказ"),
-        BotCommand(command="my_daily", description="Моя сводка за сегодня"),
-    ]
-    cleaner_cmds = [
-        *default_cmds,
-        BotCommand(command="cleaning_order", description="Клининг: провести уборку"),
-        BotCommand(command="cleaning_balance", description="Клининг: баланс"),
-        BotCommand(command="cleaning_expense", description="Клининг: добавить расход"),
     ]
     await bot.set_my_commands(default_cmds, scope=BotCommandScopeDefault())
     if pool is None:
@@ -7322,13 +7311,12 @@ async def set_commands():
         )
     for row in rows:
         role = row["role"]
-        if role in {"admin", "superadmin"}:
+        if role == "superadmin":
+            cmds = superadmin_cmds
+        elif role == "admin":
             cmds = admin_cmds
-        elif role == "cleaner":
-            cmds = cleaner_cmds
-        elif role == "master":
-            cmds = master_cmds
         else:
+            # Клинер, мастер и прочие роли — как без роли.
             cmds = default_cmds
         try:
             await bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=row["tg_user_id"]))
@@ -8112,70 +8100,33 @@ async def help_cmd(msg: Message):
         )
     role = rec["role"] if rec else None
 
+    # /help по ролям — решение владельца 4 и «Состав /help админов» (ТЗ меню админа
+    # 2026-10-05): админу — команды, которых нет ни на кнопках, ни в его синем меню.
     if role in ("admin", "superadmin"):
+        dry_cleaning_lines = [
+            "/whoami — кто я, мои права",
+            "/orders [day|month|year|ГГГГ-ММ|ГГГГ-ММ-ДД] [master:<tg_id>|master_id:<id>] — "
+            "заказы за период, по умолчанию за сегодня",
+            "/tx_last [N] — последние N транзакций, по умолчанию 30",
+            "/cash_balance — текущий остаток кассы",
+            "/daily_cash — сводка по кассе за сегодня",
+            "/daily_profit — сводка по прибыли за сегодня и за всё время",
+            "/daily_orders — сводка по заказам мастеров за сегодня",
+            "/my_daily — моя сводка за сегодня (заказы, оплаты, ЗП, наличка)",
+            "/mysalary [day|week|month|year] — моя зарплата за период, по умолчанию за месяц",
+            "/myincome — мои оплаты за сегодня по типам",
+        ]
+        if role == "superadmin":
+            dry_cleaning_lines.append("/tx_delete <id> — удалить транзакцию по номеру")
         text = (
-            "Команды администратора:\n"
-            "/admin_panel — открыть меню администратора\n"
-            "\n"
-            "/whoami — кто я, мои права\n"
-            "\n"
-            "/tx_last 10 — последние 10 транзакций\n"
-            "\n"
-            "/cash day — касса за день\n"
-            "\n"
-            "/profit day — прибыль за день\n"
-            "\n"
-            "/payments day — приход по типам оплаты за день\n"
-            "\n"
-            "/daily_cash — сводка по кассе за сегодня\n"
-            "\n"
-            "/daily_profit — сводка по прибыли за сегодня и всё время\n"
-            "\n"
-            "/daily_orders — сводка по заказам мастеров за сегодня\n"
-            "\n"
-            "/bonus_backfill — пересчитать историю бонусов (только суперадмин)\n"
-            "\n"
-            "/tx_remove — удалить приход/расход/изъятие (только суперадмин)\n"
-            "\n"
-            "/order_remove — удалить заказ (только суперадмин)\n"
-            "\n"
-            "/masters_all — полный список мастеров\n"
-            "\n"
-            "/order — открыть добавление заказа (клавиатура мастера)\n"
-        )
-    elif role == "master":
-        text = (
-            "Команды мастера:\n"
-            "/whoami — кто я, мои права\n"
-            "\n"
-            "/mysalary [period] — моя зарплата (day/week/month/year)\n"
-            "\n"
-            "/myincome — мои оплаты за сегодня по типам\n"
-            "\n"
-            "/my_daily — ежедневная сводка (заказы, оплаты, ЗП, наличка)\n"
-            "\n"
-            "Для оформления заказа используйте кнопки внизу."
-        )
-    elif role == "cleaner":
-        text = (
-            "Команды клинера:\n"
-            "/whoami — кто я, мои права\n"
-            "\n"
-            "/cleaning_order — провести уборку\n"
-            "\n"
-            "/cleaning_balance — баланс кассы клининга\n"
-            "\n"
-            "/find <телефон> — найти клиента\n"
-            "\n"
-            "Для работы используйте кнопки внизу."
+            "Химчистка:\n"
+            + "\n".join(dry_cleaning_lines)
+            + "\n\nКлининг:\n"
+            "/cleaning_cash [day|month|year] — касса клининга за период, по умолчанию за день\n"
+            "/cleaning_orders [day|month] — уборки за период, по умолчанию за день"
         )
     else:
-        text = (
-            "Доступные команды:\n"
-            "/whoami — кто я, мои права\n"
-            "\n"
-            "Если вы мастер или администратор и не видите нужные команды — обратитесь к менеджеру для выдачи прав."
-        )
+        text = "Если возникли проблемы, напишите @pastushenko12"
 
     await msg.answer(text)
 
