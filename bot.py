@@ -4594,6 +4594,21 @@ def admin_root_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
+async def admin_menu_idle(msg: Message, raw_state: str | None = None) -> bool:
+    """Фильтр кнопок меню админа: кнопка срабатывает, когда админ не внутри сценария.
+
+    Состояние в группе `AdminMenuFSM` — пропускает, как раньше фильтр `AdminMenuFSM.root`.
+    Состояния нет (перезапуск бота, отмена, конец операции) — пропускает только админа
+    (право `view_orders_reports`, как у заглушки `unknown`); остальных дальше ловит
+    заглушка, как раньше. Внутри любого другого сценария — не пропускает.
+    Своё право кнопка проверяет в обработчике. Ставится после фильтра текста:
+    `@dp.message(F.text == "…", admin_menu_idle)`.
+    """
+    if raw_state is not None:
+        return raw_state in AdminMenuFSM
+    return await has_permission(msg.from_user.id, "view_orders_reports")
+
+
 async def build_salary_master_kb() -> tuple[str, ReplyKeyboardMarkup]:
     """
     Возвращает подсказку и клавиатуру с активными мастерами для расчёта ЗП.
@@ -7978,7 +7993,7 @@ async def admin_menu_start(msg: Message, state: FSMContext):
     await msg.answer("Меню администратора:", reply_markup=admin_root_kb())
 
 
-@dp.message(AdminMenuFSM.root, F.text == "Изъятие")
+@dp.message(F.text == "Изъятие", admin_menu_idle)
 async def admin_withdraw_entry(msg: Message, state: FSMContext):
     if not await has_permission(msg.from_user.id, "record_cashflows"):
         return await msg.answer("Только для администраторов.")
@@ -8004,7 +8019,7 @@ async def admin_withdraw_entry(msg: Message, state: FSMContext):
     )
 
 
-@dp.message(AdminMenuFSM.root, F.text == "Клиенты")
+@dp.message(F.text == "Клиенты", admin_menu_idle)
 async def admin_clients_root(msg: Message, state: FSMContext):
     if not await has_permission(msg.from_user.id, "edit_client"):
         return await msg.answer("Только для администраторов.")
@@ -8013,7 +8028,7 @@ async def admin_clients_root(msg: Message, state: FSMContext):
     await msg.answer("Введите номер телефона клиента (8/ +7/ 9...):", reply_markup=client_find_phone_kb())
 
 
-@dp.message(AdminMenuFSM.root, F.text == "Мастера")
+@dp.message(F.text == "Мастера", admin_menu_idle)
 async def admin_masters_root(msg: Message, state: FSMContext):
     if not await has_permission(msg.from_user.id, "add_master"):
         return await msg.answer("Только для администраторов.")
@@ -9670,7 +9685,7 @@ async def reports_cancel(msg: Message, state: FSMContext):
     await msg.answer("Отменено. Возврат в меню администратора.", reply_markup=admin_root_kb())
 
 
-@dp.message(AdminMenuFSM.root, F.text == "Рассчитать ЗП")
+@dp.message(F.text == "Рассчитать ЗП", admin_menu_idle)
 async def admin_salary_start(msg: Message, state: FSMContext):
     if not await has_permission(msg.from_user.id, "view_orders_reports"):
         return await msg.answer("Только для администраторов.")
@@ -9827,7 +9842,7 @@ async def adm_root_whoami(msg: Message, state: FSMContext):
     return await whoami(msg)
 
 
-@dp.message(AdminMenuFSM.root, F.text == "Приход")
+@dp.message(F.text == "Приход", admin_menu_idle)
 async def income_wizard_start(msg: Message, state: FSMContext):
     if not await has_permission(msg.from_user.id, "manage_income"):
         return await msg.answer("Только для администраторов.")
@@ -10123,7 +10138,7 @@ async def link_payment_cmd(msg: Message, state: FSMContext):
     await state.update_data(wire_link_context={})
 
 
-@dp.message(AdminMenuFSM.root, F.text.casefold() == "привязать")
+@dp.message(F.text.casefold() == "привязать", admin_menu_idle)
 async def link_payment_menu(msg: Message, state: FSMContext):
     if not await has_permission(msg.from_user.id, "manage_income"):
         return await msg.answer("Только для администраторов.")
@@ -10440,7 +10455,7 @@ async def wire_link_pick_entry(msg: Message, state: FSMContext):
         )
 
 
-@dp.message(AdminMenuFSM.root, F.text.casefold() == "расход")
+@dp.message(F.text.casefold() == "расход", admin_menu_idle)
 async def expense_wizard_start(msg: Message, state: FSMContext):
     if not await has_permission(msg.from_user.id, "record_cashflows"):
         return await msg.answer("Только для администраторов.")
@@ -12804,6 +12819,7 @@ async def cancel_any(msg: Message, state: FSMContext):
     }
     prefix = current_state.split(":")[0] if current_state else ""
     if prefix in admin_prefixes or await has_permission(msg.from_user.id, "view_orders_reports"):
+        await state.set_state(AdminMenuFSM.root)
         return await msg.answer("Отменено.", reply_markup=admin_root_kb())
 
     if prefix in cleaning_prefixes:
@@ -14802,6 +14818,7 @@ async def unknown(msg: Message, state: FSMContext):
         return
     if await has_permission(msg.from_user.id, "view_orders_reports"):
         kb = admin_root_kb()
+        await state.set_state(AdminMenuFSM.root)
     else:
         async with pool.acquire() as conn:
             role = await get_user_role(conn, msg.from_user.id)

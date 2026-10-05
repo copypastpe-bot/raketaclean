@@ -352,7 +352,8 @@ class SourceStepTests(_DispatchCase):
         with mock.patch.object(bot, "has_permission", AsyncMock(return_value=True)):
             replies = await self.send("Касса (Дима)")
         self.assertEqual(replies, [UNRECOGNIZED])
-        self.assertIsNone(await self.state())
+        # Админу заглушка ставит главное меню (docs/plans/2026-10-05-admin-menu.md, задача 1).
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
 
 
 # ---------- шаг суммы ----------
