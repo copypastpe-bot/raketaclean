@@ -28,7 +28,10 @@ def format_order_provided_alert(
     profit: Decimal,
     balance_after: Decimal,
     comment: str | None = None,
+    olya_balance: Decimal | None = None,
 ) -> str:
+    """`olya_balance` — остаток денег Оли после уборки; None — уборка их не
+    задела, строки нет (реестр денег Оли, ТЗ 2026-10-05, задача 2)."""
     pay_line = ", ".join(f"{_money(a)}₽ {m}" for m, a in payments) or "—"
     exp_line = ", ".join(f"{m} {_money(a)}₽" for m, a in expenses) or "—"
     lines = [
@@ -48,7 +51,14 @@ def format_order_provided_alert(
         f"Прибыль по заказу: {_money(profit)}₽",
         f"Касса клининга: {_money(balance_after)}₽",
     ]
+    if olya_balance is not None:
+        lines.append(_olya_line(olya_balance))
     return "\n".join(lines)
+
+
+def _olya_line(olya_balance: Decimal) -> str:
+    """Строка остатка денег Оли в сообщениях в чат клининговых денег."""
+    return f"Деньги Оли: {_money(olya_balance)}₽"
 
 
 def format_dividend_payout_alert(
@@ -93,6 +103,7 @@ def format_cash_op_alert(
     amount: Decimal,
     comment: str | None,
     balance_after: Decimal,
+    olya_balance: Decimal | None = None,  # остаток денег Оли; None — строки нет
 ) -> str:
     lines = [
         f"📒 Касса клининга: {op_label}",
@@ -101,6 +112,8 @@ def format_cash_op_alert(
     if comment:
         lines.append(f"Комментарий: {comment}")
     lines.append(f"Остаток: {_money(balance_after)}₽")
+    if olya_balance is not None:
+        lines.append(_olya_line(olya_balance))
     return "\n".join(lines)
 
 

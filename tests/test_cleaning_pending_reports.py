@@ -424,6 +424,9 @@ class DoProvestiCleaningChainTests(unittest.IsolatedAsyncioTestCase):
                  cleaning_handlers, "get_cleaning_balance", AsyncMock(return_value=Decimal("50000"))
              ), \
              mock.patch.object(
+                 cleaning_handlers, "get_olya_balance", AsyncMock(return_value=Decimal("3500"))
+             ), \
+             mock.patch.object(
                  cleaning_handlers, "_enqueue_cleaning_completed_notifications", AsyncMock()
              ):
             await cleaning_handlers.do_provesti(msg, state, pool=pool)

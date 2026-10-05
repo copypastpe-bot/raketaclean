@@ -6757,6 +6757,7 @@ async def _dispatch_cleaning_order_report(
         bonuses_earned=Decimal(str(payload.get("bonuses_earned", "0"))),
         profit=Decimal(str(payload.get("profit", "0"))),
         balance_after=Decimal(str(payload.get("balance_after", "0"))),
+        olya_balance=None if payload.get("olya_balance") is None else Decimal(str(payload["olya_balance"])),
     )
     await send_cleaning_money_flow(bot, text)
 

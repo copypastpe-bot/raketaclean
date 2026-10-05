@@ -32,6 +32,7 @@ from .cashbook import (
     get_cleaning_balance,
     get_cleaning_cash_report,
     get_cleaning_orders_list,
+    get_olya_balance,
     record_dividend,
     record_expense,
     record_income,
@@ -584,6 +585,7 @@ async def _enqueue_cleaning_order_report(
     bonuses_earned: Decimal,
     profit: Decimal,
     balance_after: Decimal,
+    olya_balance: Decimal | None = None,
 ) -> None:
     """Кладёт проведённую уборку в очередь `pending_order_reports`
     (`kind='cleaning'`). Сообщение в кассу клининга уйдёт из
@@ -591,7 +593,11 @@ async def _enqueue_cleaning_order_report(
     `adminbot.cleaning_links` — с адресом или без него, — либо по
     предохранителю в 30 минут. Номера уборок и заказов пересекаются, поэтому
     контур в очереди различает явный признак `kind`, а не догадка по
-    `order_id` (задача 3 ТЗ «адреса в клининге», 2026-09-17)."""
+    `order_id` (задача 3 ТЗ «адреса в клининге», 2026-09-17).
+
+    `olya_balance` — остаток денег Оли после уборки, None — уборка их не
+    задела; едет в payload, строку «Деньги Оли» добавит отправка
+    (реестр денег Оли, ТЗ 2026-10-05, задача 2)."""
     payload = {
         "order_id": order_id,
         "foreman_name": foreman_name,
@@ -605,6 +611,7 @@ async def _enqueue_cleaning_order_report(
         "bonuses_earned": str(bonuses_earned),
         "profit": str(profit),
         "balance_after": str(balance_after),
+        "olya_balance": str(olya_balance) if olya_balance is not None else None,
     }
     await conn.execute(
         """
@@ -615,6 +622,14 @@ async def _enqueue_cleaning_order_report(
         order_id,
         json.dumps(payload, ensure_ascii=False),
     )
+
+
+def _income_cash_holder(method: str) -> str:
+    """Чьи деньги приход по уборке: «Наличные»/«Карта» — к Оле, остальное
+    («Расчётный») — касса (решение владельца 05.10, п.1)."""
+    if method in CLEANING_OLYA_PAYMENT_METHODS:
+        return CASH_HOLDER_OLYA
+    return CASH_HOLDER_DIMA
 
 
 @router.message(CleaningOrderFSM.confirm, F.text == "Провести")
@@ -703,22 +718,21 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
                     amount,
                 )
             parts = [PaymentPart(p["method"], Decimal(p["amount"])) for p in payments]
+            touches_olya = False  # задела ли уборка деньги Оли
             for method, amount in cashbook_rows_from_payments(parts):
+                holder = _income_cash_holder(method)
+                touches_olya = touches_olya or holder == CASH_HOLDER_OLYA
                 await record_income(
                     conn,
                     method=method,
                     amount=amount,
                     order_id=order_id,
-                    # «Наличные»/«Карта» — к Оле, «Расчётный» — касса (решение 05.10).
-                    cash_holder=(
-                        CASH_HOLDER_OLYA
-                        if method in CLEANING_OLYA_PAYMENT_METHODS
-                        else CASH_HOLDER_DIMA
-                    ),
+                    cash_holder=holder,
                     comment=f"Заказ #{order_id}",
                 )
 
             expenses = data.get("expenses") or []
+            touches_olya = touches_olya or bool(expenses)
             for e in expenses:
                 await record_expense(
                     conn,
@@ -780,6 +794,8 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
             )
 
             balance_after = await get_cleaning_balance(conn)
+            # остаток Оли — в той же транзакции, что и запись; не задела — строки нет
+            olya_balance = await get_olya_balance(conn) if touches_olya else None
             income_sum = sum(
                 (a for _, a in cashbook_rows_from_payments(parts)), ZERO
             )
@@ -810,6 +826,7 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
                 bonuses_earned=Decimal(bonus_earned),
                 profit=profit,
                 balance_after=balance_after,
+                olya_balance=olya_balance,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("cleaning order report enqueue failed for order_id=%s: %s", order_id, e)
@@ -956,6 +973,7 @@ async def foreman_expense_confirm(msg: Message, state: FSMContext, **kw) -> None
                 cash_holder=CASH_HOLDER_OLYA,
             )
             balance_after = await get_cleaning_balance(conn)
+            olya_balance = await get_olya_balance(conn)
     await send_cleaning_money_flow(
         bot,
         format_cash_op_alert(
@@ -964,6 +982,7 @@ async def foreman_expense_confirm(msg: Message, state: FSMContext, **kw) -> None
             amount=amount,
             comment=comment,
             balance_after=balance_after,
+            olya_balance=olya_balance,
         ),
     )
     await state.clear()
