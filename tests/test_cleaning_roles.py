@@ -74,6 +74,12 @@ class BlueMenuTests(unittest.IsolatedAsyncioTestCase):
         menus = await self._menus()
         self.assertNotIn("cleaning_dividend", menus[2])
 
+    async def test_admin_menu_has_olya_money(self):
+        # Реестр денег Оли, задача 4: остаток и операции — командой в синем меню.
+        menus = await self._menus()
+        self.assertEqual(menus[1].get("cleaning_olya"), "Клининг: деньги Оли")
+        self.assertNotIn("cleaning_olya", menus[2])
+
 
 if __name__ == "__main__":
     unittest.main()

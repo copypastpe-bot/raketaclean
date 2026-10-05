@@ -7752,6 +7752,8 @@ async def set_commands():
         # Решение владельца 05.10: расход кассы клининга админам — командой,
         # кнопки админского меню пересматриваются отдельно.
         BotCommand(command="cleaning_cash_expense", description="Клининг: расход"),
+        # Реестр денег Оли (ТЗ 2026-10-05, задача 4): остаток и операции — командой.
+        BotCommand(command="cleaning_olya", description="Клининг: деньги Оли"),
     ]
     master_cmds = [
         *default_cmds,

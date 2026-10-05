@@ -3,6 +3,20 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from zoneinfo import ZoneInfo
+
+from .constants import (
+    CASHBOOK_KIND_DEPOSIT,
+    CASHBOOK_KIND_DIVIDEND,
+    CASHBOOK_KIND_EXPENSE,
+    CASHBOOK_KIND_INCOME,
+    CASHBOOK_KIND_WITHDRAWAL,
+    CASHBOOK_KINDS_DECREASE_BALANCE,
+    CASHBOOK_KINDS_INCREASE_BALANCE,
+    CLEANING_DIVIDEND_METHOD,
+)
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
 def _money(value: Decimal) -> str:
@@ -186,4 +200,47 @@ def format_cancel_order_alert(
         f"Снято начисленных бонусов: {bonuses_earned}",
         f"Касса клининга: {_money(balance_after)}₽",
     ]
+    return "\n".join(lines)
+
+
+# Подписи видов строк кассы в реестре денег Оли (`/cleaning_olya`).
+_OLYA_KIND_LABELS = {
+    CASHBOOK_KIND_INCOME: "Приход",
+    CASHBOOK_KIND_DEPOSIT: "Внесение",
+    CASHBOOK_KIND_EXPENSE: "Расход",
+    CASHBOOK_KIND_DIVIDEND: "Выплата прибыли",
+    CASHBOOK_KIND_WITHDRAWAL: "Изъятие",
+}
+
+
+def format_olya_register(*, balance: Decimal, entries: list) -> str:
+    """Остаток денег Оли и последние операции, по образцу «Карты Жени» в bot.py.
+
+    Строка операции: `дата | ±сумма | вид/категория | комментарий`. Знак — как в
+    остатке (`get_olya_balance`): приход и внесение плюс, расход, выплата и
+    изъятие минус. Способ оплаты или категорию пишем после вида; у выплаты и
+    изъятия там служебное «Касса клининга» — его не показываем.
+    """
+    lines = [_olya_line(balance)]
+    if not entries:
+        lines.append("Операций пока нет.")
+        return "\n".join(lines)
+    lines.append("")
+    lines.append("Последние операции:")
+    for row in entries:
+        dt = row["happened_at"].astimezone(MOSCOW_TZ).strftime("%d.%m %H:%M")
+        kind = row["kind"]
+        if kind in CASHBOOK_KINDS_INCREASE_BALANCE:
+            sign = "+"
+        elif kind in CASHBOOK_KINDS_DECREASE_BALANCE:
+            sign = "-"
+        else:
+            sign = ""
+        amount = _money(Decimal(row["amount"] or 0))
+        what = _OLYA_KIND_LABELS.get(kind, kind)
+        method = (row["method"] or "").strip()
+        if method and method != CLEANING_DIVIDEND_METHOD:
+            what = f"{what}/{method}"
+        comment = (row["comment"] or "").strip() or "—"
+        lines.append(f"{dt} | {sign}{amount}₽ | {what} | {comment}")
     return "\n".join(lines)

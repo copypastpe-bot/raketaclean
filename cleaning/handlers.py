@@ -33,6 +33,7 @@ from .cashbook import (
     get_cleaning_cash_report,
     get_cleaning_orders_list,
     get_olya_balance,
+    list_olya_entries,
     record_dividend,
     record_expense,
     record_income,
@@ -55,6 +56,7 @@ from .format import (
     format_dividend_cancel_alert,
     format_dividend_payout_alert,
     format_dividend_payout_confirm,
+    format_olya_register,
     format_orders_list,
 )
 
@@ -905,7 +907,31 @@ async def cleaning_balance_cmd(msg: Message, **kw) -> None:
         return
     async with pool.acquire() as conn:
         balance = await get_cleaning_balance(conn)
-    await msg.answer(f"Касса клининга: {_money_str(balance)}₽")
+        olya_balance = await get_olya_balance(conn)
+        role = await get_user_role(conn, msg.from_user.id)
+    # Деньги компании на руках у Оли (реестр денег Оли, ТЗ 2026-10-05, задача 4):
+    # клинеру — «у вас на руках», остальным — «Деньги Оли».
+    olya_label = "У вас на руках" if role == "cleaner" else "Деньги Оли"
+    await msg.answer(
+        f"Касса клининга: {_money_str(balance)}₽\n"
+        f"{olya_label}: {_money_str(olya_balance)}₽"
+    )
+
+
+# ---------- /cleaning_olya ----------
+
+
+@router.message(Command("cleaning_olya"))
+async def cleaning_olya_cmd(msg: Message, **kw) -> None:
+    """Деньги Оли для админов: остаток и последние 10 операций."""
+    pool: asyncpg.Pool = kw["pool"]
+    if not await _has_permission(pool, msg.from_user.id, "cleaning_manage_cash"):
+        await msg.answer("Команда доступна только администраторам.")
+        return
+    async with pool.acquire() as conn:
+        balance = await get_olya_balance(conn)
+        entries = await list_olya_entries(conn, limit=10)
+    await msg.answer(format_olya_register(balance=balance, entries=entries))
 
 
 # ---------- cleaner client lookup ----------
