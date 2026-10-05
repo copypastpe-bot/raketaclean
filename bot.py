@@ -4626,6 +4626,19 @@ async def admin_menu_idle(msg: Message, raw_state: str | None = None) -> bool:
     return await has_permission(msg.from_user.id, "view_orders_reports")
 
 
+async def admin_menu_return(state: FSMContext) -> ReplyKeyboardMarkup:
+    """Админ закончил клининговую операцию: состояние `AdminMenuFSM.root` и его главное меню.
+
+    Роутер клининга (`cleaning/handlers.py`, `_after_op_kb`) получает функцию из
+    данных диспетчера — так он не импортирует bot.py (ТЗ 2026-10-05-admin-menu, задача 3).
+    """
+    await state.set_state(AdminMenuFSM.root)
+    return admin_root_kb()
+
+
+dp["admin_menu_return"] = admin_menu_return
+
+
 async def build_salary_master_kb() -> tuple[str, ReplyKeyboardMarkup]:
     """
     Возвращает подсказку и клавиатуру с активными мастерами для расчёта ЗП.

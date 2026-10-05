@@ -437,11 +437,16 @@ class CancelTests(_DispatchCase):
 
     async def test_otmenit_on_confirm(self):
         # Кнопка «Отменить» из `_confirm_kb()` — обработчик `cancel` роутера клининга.
+        # Админ после неё — в своём главном меню, как после «Отмена»
+        # (docs/plans/2026-10-05-admin-menu.md, задача 3).
         await self.send("/cleaning_move_delete 12")
         replies = await self.send("Отменить")
         self.assertEqual(replies, ["Отменено."])
-        self.assertEqual(self.last_markup_texts(), CLEANING_MAIN_BUTTONS)
-        self.assertIsNone(await self.state())
+        self.assertEqual(
+            self.last_markup_texts(),
+            [b.text for row in bot.admin_root_kb().keyboard for b in row],
+        )
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.delete_move.assert_not_awaited()
         self.send_flow.assert_not_awaited()
 

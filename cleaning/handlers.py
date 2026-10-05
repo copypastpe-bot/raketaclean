@@ -19,7 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from notifications import NotificationRules, enqueue_notification
 
-from .access import can_create_cleaning_order, get_user_role, has_permission
+from .access import can_create_cleaning_order, get_user_role, has_permission, is_cleaning_admin
 from .admin_ops import (
     CashMoveDeleteGoesNegative,
     CashMoveExceedsBalance,
@@ -277,6 +277,25 @@ async def _has_permission(pool: asyncpg.Pool, tg_user_id: int, permission: str) 
         return await has_permission(conn, tg_user_id, permission)
 
 
+async def _after_op_kb(msg: Message, state: FSMContext, kw: dict, default):
+    """Клавиатура в конце клининговой операции: админу — его главное меню.
+
+    Админ (роль admin/superadmin) после операции возвращается в главное меню
+    админа с состоянием `AdminMenuFSM.root` (ТЗ 2026-10-05-admin-menu, задача 3).
+    Меню живёт в bot.py; бот передаёт его роутеру данными диспетчера
+    (`dp["admin_menu_return"]`, как `dp["pool"]`), без импорта bot.py.
+    Остальным (Оля) и при вызове без бота — `default`, как было.
+    Вызывать после `state.clear()`: функция бота ставит состояние сама.
+    """
+    admin_menu_return = kw.get("admin_menu_return")
+    if admin_menu_return is not None:
+        async with kw["pool"].acquire() as conn:
+            is_admin = await is_cleaning_admin(conn, msg.from_user.id)
+        if is_admin:
+            return await admin_menu_return(state)
+    return default
+
+
 def _is_valid_phone(s: str) -> bool:
     digits = [c for c in s if c.isdigit()]
     return 10 <= len(digits) <= 11
@@ -384,9 +403,10 @@ async def start_cleaning_order(msg: Message, state: FSMContext, **data) -> None:
     ),
     F.text.in_({"Отмена", "Отменить"}),
 )
-async def cancel(msg: Message, state: FSMContext) -> None:
+async def cancel(msg: Message, state: FSMContext, **kw) -> None:
     await state.clear()
-    await msg.answer("Отменено.", reply_markup=cleaning_main_kb())
+    kb = await _after_op_kb(msg, state, kw, cleaning_main_kb())
+    await msg.answer("Отменено.", reply_markup=kb)
 
 
 @router.message(CleaningOrderFSM.phone, F.text)
@@ -1120,9 +1140,10 @@ async def foreman_expense_confirm(msg: Message, state: FSMContext, **kw) -> None
         ),
     )
     await state.clear()
+    kb = await _after_op_kb(msg, state, kw, cleaning_main_kb())
     await msg.answer(
         f"Расход списан. Касса: {_money_str(balance_after)}₽",
-        reply_markup=cleaning_main_kb(),
+        reply_markup=kb,
     )
 
 
@@ -1256,11 +1277,12 @@ async def div_provesti(msg: Message, state: FSMContext, **kw) -> None:
                     olya_balance = await get_olya_balance(conn)
 
     await state.clear()
+    kb = await _after_op_kb(msg, state, kw, cleaning_main_kb())
     if payout_id is None:
         await msg.answer(
             f"Касса изменилась, выплата не проведена. Сейчас в кассе {_money_str(balance)}₽.\n"
             "Начните заново.",
-            reply_markup=cleaning_main_kb(),
+            reply_markup=kb,
         )
         return
 
@@ -1273,7 +1295,7 @@ async def div_provesti(msg: Message, state: FSMContext, **kw) -> None:
     )
     await msg.answer(
         f"Выплата #{payout_id} проведена. Касса клининга: {_money_str(balance)}₽",
-        reply_markup=cleaning_main_kb(),
+        reply_markup=kb,
     )
 
 
@@ -1453,11 +1475,12 @@ async def cash_add_provesti(msg: Message, state: FSMContext, **kw) -> None:
             olya_balance=olya_balance,
         ),
     )
+    await state.clear()
+    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
     await msg.answer(
         f"Приход зачислен. Касса: {_money_str(balance_after)}₽",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=kb,
     )
-    await state.clear()
 
 
 # ---------- /cleaning_cash_withdrawal ----------
@@ -1605,9 +1628,10 @@ async def cash_move_source(msg: Message, state: FSMContext, **kw) -> None:
     label = cash_holder_label(source)
     if balance <= 0:
         await state.clear()
+        kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
         await msg.answer(
             f"В «{label}» {_money_str(balance)}₽ — перемещать нечего.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=kb,
         )
         return
     await state.update_data(source=source)
@@ -1676,12 +1700,14 @@ async def cash_move_provesti(msg: Message, state: FSMContext, **kw) -> None:
                 dima_balance = await get_dima_balance(conn)
     except CashMoveExceedsBalance as exc:
         await state.clear()
+        kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
         await msg.answer(
             _cash_move_exceeds_text(exc.label, exc.balance),
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=kb,
         )
         return
     await state.clear()
+    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
     await send_cleaning_money_flow(
         bot,
         format_cash_move_alert(
@@ -1692,9 +1718,7 @@ async def cash_move_provesti(msg: Message, state: FSMContext, **kw) -> None:
             dima_balance=dima_balance,
         ),
     )
-    await msg.answer(
-        f"Перемещение #{move_id} проведено.", reply_markup=ReplyKeyboardRemove()
-    )
+    await msg.answer(f"Перемещение #{move_id} проведено.", reply_markup=kb)
 
 
 # ---------- /cleaning_move_delete [N]: удаление перемещения ----------

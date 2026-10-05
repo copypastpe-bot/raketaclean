@@ -396,7 +396,8 @@ class ForemanExpenseAdminChoiceTests(_DispatchCase):
         )
         self.get_olya_balance.assert_awaited_once()
         self.assertEqual(self.chat_text().split("\n")[-1], "Деньги Ольга: 4 200₽")
-        self.assertIsNone(await self.state())
+        # Админ после расхода — в своём главном меню (ТЗ меню админа, задача 3).
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
 
     async def test_dima(self):
         await self._until_choice()
@@ -415,7 +416,7 @@ class ForemanExpenseAdminChoiceTests(_DispatchCase):
         )
         self.get_olya_balance.assert_not_awaited()
         self.assertNotIn("Деньги Ольга", self.chat_text())
-        self.assertIsNone(await self.state())
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
 
 
 class ForemanExpenseCleanerNoChoiceTests(_DispatchCase):

@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import SendMessage
-from aiogram.types import Chat, Message, ReplyKeyboardRemove, Update, User
+from aiogram.types import Chat, Message, Update, User
 
 import bot
 import cleaning.handlers as cleaning_handlers
@@ -37,6 +37,8 @@ UNRECOGNIZED = "Команда не распознана. Выберите де�
 ASK_SOURCE = "Откуда перемещаем?"
 SOURCE_BUTTONS = ["Деньги Ольга", "Касса (Дима)", "Отмена"]
 CLEANING_MAIN_BUTTONS = ["🧹 Провести уборку", "🔍 Клиент", "💰 Баланс", "➖ Добавить расход"]
+# Админ после операции — в своём главном меню (docs/plans/2026-10-05-admin-menu.md, задача 3).
+ADMIN_ROOT_BUTTONS = [b.text for row in bot.admin_root_kb().keyboard for b in row]
 
 _user_ids = itertools.count(920_001)
 _update_ids = itertools.count(1)
@@ -268,8 +270,8 @@ class OlyaToDimaTests(_DispatchCase):
 
         replies = await self.send("Провести")
         self.assertEqual(replies, ["Перемещение #41 проведено."])
-        self.assertIsInstance(self.last_markup(), ReplyKeyboardRemove)
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
 
         self.record_cash_move.assert_awaited_once()
         self.assertEqual(
@@ -338,14 +340,16 @@ class SourceStepTests(_DispatchCase):
         await self.send("/cleaning_move")
         replies = await self.send("Деньги Ольга")
         self.assertEqual(replies, ["В «Деньги Ольга» 0₽ — перемещать нечего."])
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
 
     async def test_negative_balance_closes_scenario(self):
         self.holder_balances[CASH_HOLDER_DIMA] = D("-3000")
         await self.send("/cleaning_move")
         replies = await self.send("Касса (Дима)")
         self.assertEqual(replies, ["В «Касса (Дима)» -3 000₽ — перемещать нечего."])
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
 
     async def test_control_without_state_unknown_answers(self):
         # Контроль самой проверки: вне сценария текст кнопки ловит заглушка.
@@ -407,8 +411,8 @@ class ProvestiRefusedTests(_DispatchCase):
         )
         replies = await self.send("Провести")
         self.assertEqual(replies, ["Нельзя больше остатка: в «Деньги Ольга» 2 000₽."])
-        self.assertIsInstance(self.last_markup(), ReplyKeyboardRemove)
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.send_flow.assert_not_awaited()
         self.get_olya_balance.assert_not_awaited()
         self.get_dima_balance.assert_not_awaited()
@@ -436,12 +440,13 @@ class ProvestiAnswerFailsTests(_DispatchCase):
             await self.send("Провести")
 
         self.record_cash_move.assert_awaited_once()
-        self.assertIsNone(await self.state())
+        # Сценарий закрыт до ответа: админ уже в главном меню (задача 3 ТЗ меню админа).
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
 
         self.session.make_request = orig_make_request
         with mock.patch.object(bot, "has_permission", AsyncMock(return_value=True)):
             replies = await self.send("Провести")
-        self.assertEqual(replies, [UNRECOGNIZED])
+        self.assertEqual(replies, ["Выберите действие на клавиатуре ниже."])
         self.record_cash_move.assert_awaited_once()
 
 
@@ -480,7 +485,8 @@ class CancelTests(_DispatchCase):
         await self.send("-")
         replies = await self.send("Отменить")
         self.assertEqual(replies, ["Отменено."])
-        self.assertIsNone(await self.state())
+        self.assertEqual(self.last_markup_texts(), ADMIN_ROOT_BUTTONS)
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
         self.record_cash_move.assert_not_awaited()
         self.send_flow.assert_not_awaited()
 
