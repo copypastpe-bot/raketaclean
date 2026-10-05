@@ -928,9 +928,12 @@ async def cleaning_balance_cmd(msg: Message, **kw) -> None:
     # Деньги компании на руках у Оли (реестр денег Оли, ТЗ 2026-10-05, задача 4):
     # клинеру — «у вас на руках», остальным — «Деньги Оли».
     olya_label = "У вас на руках" if role == "cleaner" else CASH_HOLDER_OLYA_LABEL
+    # `menu_kb` передаёт только кнопка «Баланс» меню админа (bot.py): с ответом
+    # админ получает своё главное меню. Команда и кнопка Оли — без клавиатуры, как раньше.
     await msg.answer(
         f"Касса клининга: {_money_str(balance)}₽\n"
-        f"{olya_label}: {_money_str(olya_balance)}₽"
+        f"{olya_label}: {_money_str(olya_balance)}₽",
+        reply_markup=kw.get("menu_kb"),
     )
 
 

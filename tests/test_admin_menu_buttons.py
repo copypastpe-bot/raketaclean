@@ -33,22 +33,24 @@ SALARY_PROMPT = "Выберите мастера для расчёта ЗП:"
 CLEANING_MAIN_BUTTONS = ["🧹 Провести уборку", "🔍 Клиент", "💰 Баланс", "➖ Добавить расход"]
 
 # Кнопка главного меню → (ответ её обработчика, состояние после него).
+# Меню с задачи 3 (`[Операции, Отчёты]`, `[Клиенты, Клининг]`); кнопки подменю —
+# `tests/test_admin_menu_submenus.py`.
 BUTTONS = {
+    "Операции": ("Операции: выбери действие.", bot.AdminMenuFSM.operations),
     "Отчёты": ("Отчёты: выбери раздел.", bot.ReportsFSM.waiting_root),
-    "Приход": ("Выберите способ оплаты:", bot.IncomeFSM.waiting_method),
-    "Расход": ("Введите сумму расхода:", bot.ExpenseFSM.waiting_amount),
-    "Изъятие": (
-        "Выберите мастера, у которого нужно изъять наличные:",
-        bot.WithdrawFSM.waiting_master,
-    ),
-    "Привязать": ("Что привязываем?", bot.WireLinkFSM.waiting_mode),
-    "Мастера": ("Мастера: выбери действие.", bot.AdminMenuFSM.masters),
     "Клиенты": (
         "Введите номер телефона клиента (8/ +7/ 9...):",
         bot.AdminClientsFSM.find_wait_phone,
     ),
-    "Рассчитать ЗП": (SALARY_PROMPT, bot.AdminPayrollFSM.waiting_master),
+    "Клининг": ("Клининг: выбери действие.", bot.AdminMenuFSM.cleaning),
 }
+
+# Тексты кнопок подменю «Операции» и «Клининг»: посреди чужого сценария и у
+# не-админов они ведут себя так же, как кнопки главного меню.
+SUBMENU_TEXTS = [
+    "Приход", "Расход", "Изъятие", "Привязать", "Рассчитать ЗП",
+    "Баланс", "Перемещение", "Выплата прибыли", "Назад",
+]
 
 _user_ids = itertools.count(940_001)
 _update_ids = itertools.count(1)
@@ -206,7 +208,7 @@ class AdminButtonsTests(_DispatchCase):
     async def test_button_inside_other_scenario_is_not_intercepted(self):
         # Посреди сценария текст кнопки обрабатывает сам сценарий, как раньше.
         # «Отчёты» без фильтра состояния ловится везде и раньше — его не берём.
-        for text in BUTTONS:
+        for text in list(BUTTONS) + SUBMENU_TEXTS:
             if text == "Отчёты":
                 continue
             with self.subTest(button=text):
@@ -252,9 +254,9 @@ class AdminCancelTests(_DispatchCase):
         self.assertEqual(replies, [UNRECOGNIZED])
         self.assertEqual(self.last_markup_texts(), _kb_texts(bot.admin_root_kb()))
         self.assertEqual(await self.state(), bot.AdminMenuFSM.root.state)
-        replies = await self.send("Приход")
-        self.assertEqual(replies, [BUTTONS["Приход"][0]])
-        self.assertEqual(await self.state(), bot.IncomeFSM.waiting_method.state)
+        replies = await self.send("Операции")
+        self.assertEqual(replies, [BUTTONS["Операции"][0]])
+        self.assertEqual(await self.state(), bot.AdminMenuFSM.operations.state)
 
 
 # ---------- не-админы: те же тексты — как раньше ----------
@@ -268,7 +270,7 @@ class MasterSameTextsTests(_DispatchCase):
         return perm in {"create_orders_clients", "view_own_salary", "view_own_income"}
 
     async def test_texts_go_where_they_went(self):
-        for text in BUTTONS:
+        for text in list(BUTTONS) + SUBMENU_TEXTS:
             with self.subTest(button=text):
                 await self.fsm.clear()
                 replies = await self.send(text)
