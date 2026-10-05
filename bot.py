@@ -13680,6 +13680,10 @@ async def unknown(msg: Message, state: FSMContext):
     if await has_permission(msg.from_user.id, "view_orders_reports"):
         kb = admin_root_kb()
         await state.set_state(AdminMenuFSM.root)
+        if msg.text == "Назад":
+            # Бот перезапустился, пока админ был в подменю: «Назад» и есть путь
+            # в главное меню, «не распознана» здесь лишнее (итоговое ревью 05.10).
+            return await msg.answer("Меню администратора:", reply_markup=kb)
     else:
         async with pool.acquire() as conn:
             role = await get_user_role(conn, msg.from_user.id)

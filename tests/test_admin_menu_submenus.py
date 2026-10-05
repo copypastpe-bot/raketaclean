@@ -363,6 +363,14 @@ class SubmenuEntryTests(_DispatchCase):
                 self.assertEqual(replies, [ADMIN_MENU])
                 await self.assert_admin_root()
 
+    async def test_back_after_restart_opens_main_menu(self):
+        # Бот перезапустился, пока админ был в подменю (состояние None): «Назад» —
+        # сразу главное меню, без «Команда не распознана» (итоговое ревью 05.10).
+        await self.set_state(None)
+        replies = await self.send("Назад")
+        self.assertEqual(replies, [ADMIN_MENU])
+        await self.assert_admin_root()
+
     async def test_operations_buttons_lead_to_their_scenarios(self):
         for text, (reply, state) in OPERATIONS_BUTTONS.items():
             with self.subTest(button=text):
