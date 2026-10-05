@@ -4,9 +4,14 @@
 cleaning_router — в aiogram обработчики самого диспетчера идут перед вложенными
 роутерами. Поэтому мост cleaner_button_bridge перечисляет кнопки клавиатуры
 cleaning_main_kb() вручную и вызывает нужную функцию клининга сам. В клавиатуре
-пять кнопок; было заведено три, две («🔍 Клиент», «💸 Выплата») не доходили —
-бригадир получал «Команда не распознана». Проверяем все пять и то, что
-пользователь без роли cleaner по-прежнему получает отказ.
+четыре кнопки; было заведено три, «🔍 Клиент» не доходила — бригадир получал
+«Команда не распознана». Проверяем все четыре и то, что пользователь без роли
+cleaner по-прежнему получает отказ.
+
+«💸 Выплата» убрана у клинера (решение владельца 2026-10-05): выплату прибыли
+проводят админы командой. Из моста она тоже ушла — нажатие на старую кнопку,
+оставшуюся на телефоне, попадает в общую заглушку, и та присылает новую
+клавиатуру уже без неё.
 """
 
 import unittest
@@ -79,10 +84,12 @@ class CleanerButtonBridgeTests(unittest.IsolatedAsyncioTestCase):
             msg, state = await self._call("🔍 Клиент", "cleaner")
         fn.assert_awaited_once_with(msg, state, pool=bot.pool)
 
-    async def test_vyplata_reaches_payout_button(self):
-        with mock.patch.object(bot, "start_cleaning_payout_button", mock.AsyncMock()) as fn:
-            msg, state = await self._call("💸 Выплата", "cleaner")
-        fn.assert_awaited_once_with(msg, state, pool=bot.pool)
+    def test_cleaner_keyboard_has_no_payout_button(self):
+        texts = [button.text for row in bot.cleaning_main_kb().keyboard for button in row]
+        self.assertNotIn("💸 Выплата", texts)
+        self.assertEqual(
+            sorted(texts),
+            sorted(["🧹 Провести уборку", "🔍 Клиент", "💰 Баланс", "➖ Добавить расход"]))
 
     async def test_non_cleaner_gets_unrecognized_command_for_every_button(self):
         buttons = (
@@ -90,14 +97,12 @@ class CleanerButtonBridgeTests(unittest.IsolatedAsyncioTestCase):
             "💰 Баланс",
             "➖ Добавить расход",
             "🔍 Клиент",
-            "💸 Выплата",
         )
         cleaning_fns = (
             "start_cleaning_order",
             "cleaning_balance_cmd",
             "foreman_expense_start",
             "cleaning_client_lookup_start",
-            "start_cleaning_payout_button",
         )
         with mock.patch.object(bot, "keyboard_for_user", mock.AsyncMock(return_value="KB")):
             patches = [mock.patch.object(bot, name, mock.AsyncMock()) for name in cleaning_fns]

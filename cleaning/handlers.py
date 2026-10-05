@@ -186,7 +186,6 @@ def cleaning_main_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🧹 Провести уборку")],
             [KeyboardButton(text="🔍 Клиент"), KeyboardButton(text="💰 Баланс")],
             [KeyboardButton(text="➖ Добавить расход")],
-            [KeyboardButton(text="💸 Выплата")],
         ],
         resize_keyboard=True,
     )
@@ -961,9 +960,9 @@ async def foreman_expense_confirm(msg: Message, state: FSMContext, **kw) -> None
 
 
 # ---------- выплата прибыли ----------
-# Клинер держит наличные и раздаёт их получателям поровну. У неё кнопка,
-# у администраторов та же операция командой: кнопок в их меню и так много,
-# а пользуются этим в основном в поле.
+# Деньги делятся между получателями поровну. С 2026-10-05 выплату проводят
+# только администраторы, командой (решение владельца): у клинера ни кнопки,
+# ни права. Обработчик текста «💸 Выплата» остался — право он проверяет сам.
 
 
 async def _start_dividend(msg: Message, state: FSMContext, pool: asyncpg.Pool) -> None:

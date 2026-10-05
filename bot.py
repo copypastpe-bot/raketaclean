@@ -207,7 +207,6 @@ from cleaning.handlers import (
     foreman_expense_start,
     router as cleaning_router,
     start_cleaning_order,
-    start_cleaning_payout_button,
 )
 from cleaning.format import format_order_provided_alert as _format_cleaning_order_provided_alert
 from cleaning.notify import send_cleaning_money_flow
@@ -4171,8 +4170,8 @@ ROLE_MATRIX = {
         "cleaning_view_balance",
         "cleaning_view_clients",
         "cleaning_record_expense",
-        # Деньги у неё в руках, она же их и раздаёт получателям.
-        "cleaning_pay_dividend",
+        # Выплату прибыли клинер больше не проводит — только админы
+        # (решение владельца 2026-10-05).
     ],
 }
 
@@ -7749,6 +7748,9 @@ async def set_commands():
         BotCommand(command="cleaning_cancel_order", description="Клининг: отменить заказ"),
         BotCommand(command="cleaning_dividend", description="Клининг: выплата прибыли"),
         BotCommand(command="cleaning_dividend_cancel", description="Клининг: отменить выплату"),
+        # Решение владельца 05.10: расход кассы клининга админам — командой,
+        # кнопки админского меню пересматриваются отдельно.
+        BotCommand(command="cleaning_cash_expense", description="Клининг: расход"),
     ]
     master_cmds = [
         *default_cmds,
@@ -14791,7 +14793,7 @@ async def master_rewash_order(msg: Message, state: FSMContext):
 
 # fallback
 
-@dp.message(F.text.in_({"🧹 Провести уборку", "💰 Баланс", "➖ Добавить расход", "🔍 Клиент", "💸 Выплата"}), StateFilter(None))
+@dp.message(F.text.in_({"🧹 Провести уборку", "💰 Баланс", "➖ Добавить расход", "🔍 Клиент"}), StateFilter(None))
 async def cleaner_button_bridge(msg: Message, state: FSMContext):
     async with pool.acquire() as conn:
         role = await get_user_role(conn, msg.from_user.id)
@@ -14808,8 +14810,6 @@ async def cleaner_button_bridge(msg: Message, state: FSMContext):
         return await foreman_expense_start(msg, state, pool=pool)
     if msg.text == "🔍 Клиент":
         return await cleaning_client_lookup_start(msg, state, pool=pool)
-    if msg.text == "💸 Выплата":
-        return await start_cleaning_payout_button(msg, state, pool=pool)
 
 
 @dp.message(F.text, ~F.text.startswith("/"), StateFilter(None))
