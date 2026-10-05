@@ -1303,10 +1303,16 @@ async def dividend_cancel_confirmed(msg: Message, state: FSMContext, **kw) -> No
     payout_id = int(data["cancel_payout_id"])
     async with pool.acquire() as conn:
         async with conn.transaction():
-            amount = await cancel_dividend(conn, payout_id=payout_id)
+            cancelled = await cancel_dividend(conn, payout_id=payout_id)
             balance_after = await get_cleaning_balance(conn)
+            # Решение 05.10, п.6: выплата из денег Оли — её остаток после отмены в чат.
+            olya_balance = (
+                await get_olya_balance(conn)
+                if cancelled is not None and cancelled["cash_holder"] == CASH_HOLDER_OLYA
+                else None
+            )
     await state.clear()
-    if amount is None:
+    if cancelled is None:
         await msg.answer(
             f"Выплата #{payout_id} не найдена или уже отменена.",
             reply_markup=ReplyKeyboardRemove(),
@@ -1315,7 +1321,10 @@ async def dividend_cancel_confirmed(msg: Message, state: FSMContext, **kw) -> No
     await send_cleaning_money_flow(
         bot,
         format_dividend_cancel_alert(
-            payout_id=payout_id, amount=Decimal(amount), balance_after=balance_after
+            payout_id=payout_id,
+            amount=Decimal(cancelled["amount"]),
+            balance_after=balance_after,
+            olya_balance=olya_balance,
         ),
     )
     await msg.answer(
@@ -1664,6 +1673,12 @@ async def cancel_order_confirmed(msg: Message, state: FSMContext, **kw) -> None:
         async with conn.transaction():
             result = await cancel_order(conn, order_id=order_id)
             balance_after = await get_cleaning_balance(conn) if result else None
+            # Решение 05.10, п.6: у уборки были строки денег Оли — её остаток после отмены.
+            olya_balance = (
+                await get_olya_balance(conn)
+                if result and result["olya_rows_deleted"]
+                else None
+            )
     if result is None:
         await msg.answer(
             f"Заказ #{order_id} не найден или уже отменён.",
@@ -1680,6 +1695,7 @@ async def cancel_order_confirmed(msg: Message, state: FSMContext, **kw) -> None:
                 bonuses_earned=result["bonuses_earned"],
                 cashbook_rows_deleted=result["cashbook_rows_deleted"],
                 balance_after=balance_after,
+                olya_balance=olya_balance,
             ),
         )
         await msg.answer(

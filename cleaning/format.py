@@ -110,13 +110,20 @@ def format_dividend_payout_confirm(
 
 
 def format_dividend_cancel_alert(
-    *, payout_id: int, amount: Decimal, balance_after: Decimal
+    *,
+    payout_id: int,
+    amount: Decimal,
+    balance_after: Decimal,
+    olya_balance: Decimal | None = None,  # остаток денег Оли; None — строки нет
 ) -> str:
-    return (
-        f"↩️ Отменена выплата прибыли #{payout_id}\n"
-        f"Сумма: {_money(amount)}₽\n"
-        f"Остаток в кассе: {_money(balance_after)}₽"
-    )
+    lines = [
+        f"↩️ Отменена выплата прибыли #{payout_id}",
+        f"Сумма: {_money(amount)}₽",
+        f"Остаток в кассе: {_money(balance_after)}₽",
+    ]
+    if olya_balance is not None:
+        lines.append(_olya_line(olya_balance))
+    return "\n".join(lines)
 
 
 def format_cash_op_alert(
@@ -189,6 +196,7 @@ def format_cancel_order_alert(
     bonuses_earned: int,
     cashbook_rows_deleted: int,
     balance_after: Decimal,
+    olya_balance: Decimal | None = None,  # остаток денег Оли; None — строки нет
 ) -> str:
     lines = [f"↩️ Отменён заказ уборки #{order_id}"]
     if address:
@@ -200,6 +208,8 @@ def format_cancel_order_alert(
         f"Снято начисленных бонусов: {bonuses_earned}",
         f"Касса клининга: {_money(balance_after)}₽",
     ]
+    if olya_balance is not None:
+        lines.append(_olya_line(olya_balance))
     return "\n".join(lines)
 
 

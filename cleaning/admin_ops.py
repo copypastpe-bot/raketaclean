@@ -16,6 +16,7 @@ from .constants import (
     CASHBOOK_KIND_DIVIDEND,
     CASHBOOK_KIND_EXPENSE,
     CASHBOOK_KIND_WITHDRAWAL,
+    CASH_HOLDER_OLYA,
     CLEANING_DIVIDEND_METHOD,
 )
 
@@ -95,7 +96,8 @@ async def cancel_order(
     Soft-delete заказа, всех строк cleaning_cashbook по order_id, плюс
     обратный пересчёт бонусов клиента в общей таблице. Возвращает dict
     с фактами для построения алерта, или None если заказа нет / уже
-    отменён.
+    отменён. `olya_rows_deleted` — сколько из откатанных строк кассы были
+    деньгами Оли: больше нуля — в сообщение об отмене идёт её остаток.
     """
     order = await conn.fetchrow(
         """
@@ -119,18 +121,21 @@ async def cancel_order(
     )
 
     # 2. Soft-delete всех cashbook-строк по этому заказу
-    cb_affected = await conn.fetchval(
+    cb_affected = await conn.fetchrow(
         """
         WITH upd AS (
             UPDATE cleaning_cashbook
             SET deleted_at = $1
             WHERE order_id = $2 AND deleted_at IS NULL
-            RETURNING 1
+            RETURNING cash_holder
         )
-        SELECT count(*) FROM upd
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE cash_holder = $3) AS olya
+        FROM upd
         """,
         now_utc,
         order_id,
+        CASH_HOLDER_OLYA,
     )
 
     # 3. Откат бонусов (зеркальные транзакции, чтобы история была полной)
@@ -177,7 +182,8 @@ async def cancel_order(
         "total_amount": Decimal(order["total_amount"]),
         "bonuses_used": used,
         "bonuses_earned": earned,
-        "cashbook_rows_deleted": int(cb_affected or 0),
+        "cashbook_rows_deleted": int(cb_affected["total"] or 0),
+        "olya_rows_deleted": int(cb_affected["olya"] or 0),
     }
 
 
@@ -198,18 +204,23 @@ async def list_recent_dividends(
     )
 
 
-async def cancel_dividend(conn: asyncpg.Connection, *, payout_id: int) -> Decimal | None:
+async def cancel_dividend(
+    conn: asyncpg.Connection, *, payout_id: int
+) -> asyncpg.Record | None:
     """Мягко удаляет строку выплаты. None, если её нет или уже отменена.
+
+    Возвращает `amount` и `cash_holder` отменённой строки: по метке
+    обработчик решает, нужна ли в сообщении строка «Деньги Оли».
 
     Отменяем только выплаты: перепутать id с расходом или заказом нельзя,
     иначе одна опечатка администратора тихо развернёт чужую операцию.
     """
-    return await conn.fetchval(
+    return await conn.fetchrow(
         """
         UPDATE cleaning_cashbook
         SET deleted_at = $1
         WHERE id = $2 AND kind = $3 AND deleted_at IS NULL
-        RETURNING amount
+        RETURNING amount, cash_holder
         """,
         datetime.now(timezone.utc),
         payout_id,

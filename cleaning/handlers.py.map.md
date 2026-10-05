@@ -1,6 +1,6 @@
 # Карта функций `cleaning/handlers.py`
 
-1734 строки. Роутер aiogram со всеми диалогами клининга: проведение уборки,
+1750 строк. Роутер aiogram со всеми диалогами клининга: проведение уборки,
 касса, выплата прибыли, отмена. Подключается в `bot.py` через
 `dp.include_router(cleaning_router)`.
 
@@ -115,35 +115,35 @@
 | 1190 | `div_cash_holder` | шаг «Оля / Дима», затем подтверждение с долями и источником |
 | 1211 | `div_provesti` | проведение выплаты (`cash_holder` — выбор «Оля / Дима»; при «Оля» в чате строка «Деньги Оли») |
 | 1265 | `start_dividend_cancel` | `/cleaning_dividend_cancel N` |
-| 1299 | `dividend_cancel_confirmed` | отмена выплаты |
+| 1299 | `dividend_cancel_confirmed` | отмена выплаты; выплата была из денег Оли (`cash_holder='olya'`) — в чате строка «Деньги Оли: N₽», остаток после отмены |
 
 ## Касса вручную
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1331 | `start_cash_add` | `/cleaning_cash_add` — приход (право `cleaning_manage_cash`) |
-| 1351 | `cash_add_method` | способ |
-| 1361 | `cash_add_amount` | сумма; дальше шаг «Куда вносим?» |
-| 1372 | `cash_add_cash_holder` | шаг «Оля / Дима» |
-| 1383 | `cash_add_comment` | комментарий |
-| 1399 | `cash_add_provesti` | проведение прихода (`cash_holder` — выбор; при «Оля» строка «Деньги Оли») |
-| 1439 | `start_cash_expense` | `/cleaning_cash_expense` — расход |
-| 1453 | `cash_exp_category` | категория |
-| 1466 | `cash_exp_amount` | сумма; дальше шаг «Оля / Дима» |
-| 1477 | `cash_exp_cash_holder` | шаг «Оля / Дима» |
-| 1488 | `cash_exp_comment` | комментарий |
-| 1504 | `cash_exp_provesti` | проведение расхода (`cash_holder` — выбор; при «Оля» строка «Деньги Оли») |
-| 1544 | `start_cash_withdrawal` | `/cleaning_cash_withdrawal` — изъятие |
-| 1558 | `cash_wd_amount` | сумма; дальше шаг «Оля / Дима» |
-| 1569 | `cash_wd_cash_holder` | шаг «Оля / Дима» |
-| 1580 | `cash_wd_comment` | комментарий |
-| 1596 | `cash_wd_provesti` | проведение изъятия (`cash_holder` — выбор; при «Оля» строка «Деньги Оли») |
+| 1340 | `start_cash_add` | `/cleaning_cash_add` — приход (право `cleaning_manage_cash`) |
+| 1360 | `cash_add_method` | способ |
+| 1370 | `cash_add_amount` | сумма; дальше шаг «Куда вносим?» |
+| 1381 | `cash_add_cash_holder` | шаг «Оля / Дима» |
+| 1392 | `cash_add_comment` | комментарий |
+| 1408 | `cash_add_provesti` | проведение прихода (`cash_holder` — выбор; при «Оля» строка «Деньги Оли») |
+| 1448 | `start_cash_expense` | `/cleaning_cash_expense` — расход |
+| 1462 | `cash_exp_category` | категория |
+| 1475 | `cash_exp_amount` | сумма; дальше шаг «Оля / Дима» |
+| 1486 | `cash_exp_cash_holder` | шаг «Оля / Дима» |
+| 1497 | `cash_exp_comment` | комментарий |
+| 1513 | `cash_exp_provesti` | проведение расхода (`cash_holder` — выбор; при «Оля» строка «Деньги Оли») |
+| 1553 | `start_cash_withdrawal` | `/cleaning_cash_withdrawal` — изъятие |
+| 1567 | `cash_wd_amount` | сумма; дальше шаг «Оля / Дима» |
+| 1578 | `cash_wd_cash_holder` | шаг «Оля / Дима» |
+| 1589 | `cash_wd_comment` | комментарий |
+| 1605 | `cash_wd_provesti` | проведение изъятия (`cash_holder` — выбор; при «Оля» строка «Деньги Оли») |
 
 ## Отмена уборки и отчёты
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1634 | `start_cancel_order` | `/cleaning_cancel_order N` — спросить подтверждение |
-| 1658 | `cancel_order_confirmed` | откат уборки: `deleted_at` у заказа, мягкое удаление кассовых строк, возврат бонусов (`admin_ops.cancel_order`) |
-| 1696 | `cleaning_cash_report` | `/cleaning_cash day\|month\|year` |
-| 1720 | `cleaning_orders_list` | `/cleaning_orders day\|month` |
+| 1643 | `start_cancel_order` | `/cleaning_cancel_order N` — спросить подтверждение |
+| 1667 | `cancel_order_confirmed` | откат уборки: `deleted_at` у заказа, мягкое удаление кассовых строк, возврат бонусов (`admin_ops.cancel_order`); среди откатанных строк были деньги Оли — в чате строка «Деньги Оли: N₽», остаток после отмены |
+| 1712 | `cleaning_cash_report` | `/cleaning_cash day\|month\|year` |
+| 1736 | `cleaning_orders_list` | `/cleaning_orders day\|month` |
