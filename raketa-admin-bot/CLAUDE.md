@@ -43,7 +43,7 @@ Files longer than 500 lines and their function maps:
 
 - `adminbot/main.py` (1466 lines) -> `adminbot/main.py.map.md`
 - `adminbot/db.py` (1772 lines) -> `adminbot/db.py.map.md`
-- `adminbot/gcal/engine.py` (1163 lines) -> `adminbot/gcal/engine.py.map.md`
+- `adminbot/gcal/engine.py` (1187 lines) -> `adminbot/gcal/engine.py.map.md`
 - `adminbot/sync/engine.py` (771 lines) -> `adminbot/sync/engine.py.map.md`
 - `adminbot/tg/bot.py` (701 lines) -> `adminbot/tg/bot.py.map.md`
 - `adminbot/tg/cards.py` (619 lines) -> `adminbot/tg/cards.py.map.md`

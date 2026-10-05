@@ -20,6 +20,7 @@ from adminbot.amo import ids
 from adminbot.amo.fields import enum_field
 from adminbot.gcal.engine import (
     CANCEL_TASK_RESULT, CHILD_LEAD_EDIT_FAILED_NOTE, NO_REALIZATION_REASON,
+    UNKNOWN_DELETED_REASON,
     PRIMARY_LEAD_EDIT_FAILED_NOTE, SERVICE_UNKNOWN_REASON, CalendarEngine,
 )
 from adminbot.gcal.event import EventKind, ParsedEvent
@@ -503,6 +504,62 @@ async def test_deal_closed_by_owner_before_the_answer(amo):
 
     assert link.status == "cancelled"
     assert amo.calls_of("move_lead") == []
+
+
+# --- эхо удалений: Google повторяет удаление через ~30 дней (решение 2026-10-05) ---
+
+
+async def test_deletion_of_an_unknown_record_is_remembered_silently(amo):
+    """Удалили запись, которой робот не знал, — в CRM искать нечего, владельцу молчим.
+
+    Запись всё же запоминаем отменённой: через месяц Google пришлёт её
+    удаление ещё раз, и это эхо робот должен узнать.
+    """
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+
+    result = await engine.process(ParsedEvent(event_id="evt-x", kind=EventKind.CANCELLED))
+
+    assert result is None                              # наблюдателю сказать нечего
+    link = await store.get("evt-x")
+    assert link.status == "cancelled"
+    assert link.skip_reason == UNKNOWN_DELETED_REASON
+    assert amo.calls == []
+
+
+async def test_repeated_deletion_of_a_handled_record_is_ignored(amo):
+    """Живой случай 2026-10-05: удаление от 05.09 пришло снова через 30 дней.
+
+    Робот второй раз написал владельцу «сделки реализации нет». Отработанное
+    удаление — тишина: ни амо, ни сообщения, запись не меняется.
+    """
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="cancelled", phone10=None)
+    await store.update("evt-1", status="cancelled", skip_reason=NO_REALIZATION_REASON)
+
+    result = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert result is None
+    assert (await store.get("evt-1")).skip_reason == NO_REALIZATION_REASON
+    assert amo.calls == []
+
+
+async def test_repeated_deletion_does_not_ask_to_close_a_closed_deal_again(amo):
+    """Живой случай 28.09: запись от 29.08 удалили, сделку закрыли по
+    подтверждению, а через 30 дней робот спросил «закрыть сделку?» снова
+    (сделки к тому времени в CRM уже не было) — и вопрос повис."""
+    store = MemoryCalendarStore(now=lambda: NOW)
+    engine = build(amo, store=store)
+    await store.create("evt-1", kind="order", phone10="9867633262")
+    await store.update("evt-1", status="cancelled", real_lead_id=31575911,
+                       skip_reason="сделка закрыта по вашему подтверждению")
+
+    result = await engine.process(ParsedEvent(event_id="evt-1", kind=EventKind.CANCELLED))
+
+    assert result is None
+    assert (await store.get("evt-1")).status == "cancelled"
+    assert amo.calls == []
 
 
 # --- задача 4 ТЗ 2026-09-22: удаление закрывает только дочку воронки 2 ---

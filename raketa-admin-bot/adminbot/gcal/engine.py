@@ -92,6 +92,9 @@ CANCEL_TASK_RESULT = "🤖 Заказ отменён: запись удален�
 # ТЗ 2026-09-22): закрывать нечего, а лид воронки 1 робот не закрывает никогда —
 # это решение владельца 5, а не выбор робота. Owner получает короткий отчёт.
 NO_REALIZATION_REASON = "сделки реализации нет, в CRM ничего не трогал"
+# Удалили запись, которой робот не знал (решение владельца 2026-10-05): искать
+# в CRM нечего, владельцу не пишем. Запись запоминаем, чтобы узнать эхо.
+UNKNOWN_DELETED_REASON = "удалена запись, которой робот не знал, в CRM ничего не трогал"
 
 # Запись без услуги в работу не передаём (решение владельца 28.09): без услуги
 # сейлзбот не создаёт автосделку, и заказ застревает молча. Под выключателем
@@ -226,9 +229,27 @@ class CalendarEngine:
 
     # --- основной ход ---
 
-    async def process(self, event: ParsedEvent) -> CalendarLink:
-        """Продвинуть запись календаря настолько, насколько возможно сейчас."""
+    async def process(self, event: ParsedEvent) -> Optional[CalendarLink]:
+        """Продвинуть запись календаря настолько, насколько возможно сейчас.
+
+        None — сказать наблюдателю нечего: удаление отработано раньше или
+        удалена запись, которой робот не знал (см. ниже).
+        """
         link = await self.store.get(event.event_id)
+
+        # Эхо удалений (решение владельца 2026-10-05): Google сообщает об
+        # удалении записи ещё раз примерно через 30 дней — видимо, когда
+        # стирает её из корзины. Отработанное удаление и удаление записи,
+        # которой робот не знал, — тишина: ни амо, ни сообщений владельцу.
+        if event.kind is EventKind.CANCELLED:
+            if link is None:
+                await self.store.create(event.event_id, kind=event.kind.value, phone10=None)
+                await self.store.update(event.event_id, status="cancelled",
+                                        skip_reason=UNKNOWN_DELETED_REASON)
+                return None
+            if link.status == "cancelled":
+                return None
+
         if link is None:
             link = await self.store.create(
                 event.event_id, kind=event.kind.value, phone10=event.phone10)
