@@ -64,6 +64,7 @@ class CleaningCashMoveFSM(StatesGroup):
     comment = State()
     confirm = State()
 
+
 class CleaningCancelOrderFSM(StatesGroup):
     confirm = State()
 
