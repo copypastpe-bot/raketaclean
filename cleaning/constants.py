@@ -15,6 +15,10 @@ CASHBOOK_KIND_EXPENSE = "expense"
 CASHBOOK_KIND_DIVIDEND = "dividend"
 CASHBOOK_KIND_WITHDRAWAL = "withdrawal"
 CASHBOOK_KIND_DEPOSIT = "deposit"
+# Перемещение между кучками «Деньги Ольга» ↔ «Касса (Дима)»: cash_holder строки —
+# кучка-источник. Всю кассу не меняет, поэтому нет ни в одном наборе ниже
+# (ТЗ docs/plans/2026-10-05-olya-money-move.md, задача 2).
+CASHBOOK_KIND_MOVE = "move"
 
 CASHBOOK_KINDS_INCREASE_BALANCE = {CASHBOOK_KIND_INCOME, CASHBOOK_KIND_DEPOSIT}
 CASHBOOK_KINDS_DECREASE_BALANCE = {

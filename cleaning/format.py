@@ -6,11 +6,14 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from .constants import (
+    CASH_HOLDER_DIMA_LABEL,
+    CASH_HOLDER_OLYA,
     CASH_HOLDER_OLYA_LABEL,
     CASHBOOK_KIND_DEPOSIT,
     CASHBOOK_KIND_DIVIDEND,
     CASHBOOK_KIND_EXPENSE,
     CASHBOOK_KIND_INCOME,
+    CASHBOOK_KIND_MOVE,
     CASHBOOK_KIND_WITHDRAWAL,
     CASHBOOK_KINDS_DECREASE_BALANCE,
     CASHBOOK_KINDS_INCREASE_BALANCE,
@@ -231,6 +234,8 @@ def format_olya_register(*, balance: Decimal, entries: list) -> str:
     остатке (`get_olya_balance`): приход и внесение плюс, расход, выплата и
     изъятие минус. Способ оплаты или категорию пишем после вида; у выплаты и
     изъятия там служебное «Касса клининга» — его не показываем.
+    Перемещение — знак по кучке-источнику (cash_holder): от Оли
+    `-N₽ | Перемещение → Касса (Дима)`, к Оле `+N₽ | Перемещение ← Касса (Дима)`.
     """
     lines = [_olya_line(balance)]
     if not entries:
@@ -241,17 +246,23 @@ def format_olya_register(*, balance: Decimal, entries: list) -> str:
     for row in entries:
         dt = row["happened_at"].astimezone(MOSCOW_TZ).strftime("%d.%m %H:%M")
         kind = row["kind"]
-        if kind in CASHBOOK_KINDS_INCREASE_BALANCE:
-            sign = "+"
-        elif kind in CASHBOOK_KINDS_DECREASE_BALANCE:
-            sign = "-"
-        else:
-            sign = ""
         amount = _money(Decimal(row["amount"] or 0))
-        what = _OLYA_KIND_LABELS.get(kind, kind)
-        method = (row["method"] or "").strip()
-        if method and method != CLEANING_DIVIDEND_METHOD:
-            what = f"{what}/{method}"
+        if kind == CASHBOOK_KIND_MOVE:
+            from_olya = row["cash_holder"] == CASH_HOLDER_OLYA
+            sign = "-" if from_olya else "+"
+            arrow = "→" if from_olya else "←"
+            what = f"Перемещение {arrow} {CASH_HOLDER_DIMA_LABEL}"
+        else:
+            if kind in CASHBOOK_KINDS_INCREASE_BALANCE:
+                sign = "+"
+            elif kind in CASHBOOK_KINDS_DECREASE_BALANCE:
+                sign = "-"
+            else:
+                sign = ""
+            what = _OLYA_KIND_LABELS.get(kind, kind)
+            method = (row["method"] or "").strip()
+            if method and method != CLEANING_DIVIDEND_METHOD:
+                what = f"{what}/{method}"
         comment = (row["comment"] or "").strip() or "—"
         lines.append(f"{dt} | {sign}{amount}₽ | {what} | {comment}")
     return "\n".join(lines)

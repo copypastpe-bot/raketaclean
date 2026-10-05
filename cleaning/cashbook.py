@@ -12,7 +12,9 @@ from .constants import (
     CASHBOOK_KIND_DIVIDEND,
     CASHBOOK_KIND_EXPENSE,
     CASHBOOK_KIND_INCOME,
+    CASHBOOK_KIND_MOVE,
     CASHBOOK_KIND_WITHDRAWAL,
+    CASH_HOLDER_DIMA,
     CASH_HOLDER_OLYA,
     CLEANING_DIVIDEND_METHOD,
     ZERO,
@@ -221,6 +223,8 @@ async def get_olya_balance(conn: asyncpg.Connection) -> Decimal:
 
     Строки до запуска реестра (cash_holder IS NULL) не входят — старт с нуля
     (решение владельца 05.10). Отмены уборок и выплат выпадают по deleted_at.
+    Перемещение (kind = 'move', cash_holder — источник): от Оли — минус,
+    к Оле (cash_holder = 'dima') — плюс.
     """
     value = await conn.fetchval(
         """
@@ -228,12 +232,14 @@ async def get_olya_balance(conn: asyncpg.Connection) -> Decimal:
           CASE
             WHEN kind IN ($1, $2) THEN amount
             WHEN kind IN ($3, $4, $5) THEN -amount
+            WHEN kind = $7 AND cash_holder = $6 THEN -amount
+            WHEN kind = $7 THEN amount
             ELSE 0
           END
         ), 0)::numeric(12,2)
         FROM cleaning_cashbook
         WHERE deleted_at IS NULL
-          AND cash_holder = $6
+          AND (cash_holder = $6 OR (kind = $7 AND cash_holder = $8))
         """,
         CASHBOOK_KIND_INCOME,
         CASHBOOK_KIND_DEPOSIT,
@@ -241,25 +247,51 @@ async def get_olya_balance(conn: asyncpg.Connection) -> Decimal:
         CASHBOOK_KIND_DIVIDEND,
         CASHBOOK_KIND_WITHDRAWAL,
         CASH_HOLDER_OLYA,
+        CASHBOOK_KIND_MOVE,
+        CASH_HOLDER_DIMA,
     )
     return Decimal(value) if value is not None else ZERO
+
+
+async def get_dima_balance(conn: asyncpg.Connection) -> Decimal:
+    """«Касса (Дима)» = вся касса − «Деньги Ольга» (решение владельца 05.10, п.3).
+
+    Две кучки в сумме всегда дают всю кассу; строки до запуска реестра
+    (cash_holder IS NULL) — здесь.
+    """
+    return await get_cleaning_balance(conn) - await get_olya_balance(conn)
+
+
+async def get_holder_balance(conn: asyncpg.Connection, holder: str) -> Decimal:
+    """Остаток кучки по cash_holder: 'olya' — «Деньги Ольга», 'dima' — «Касса (Дима)»."""
+    if holder == CASH_HOLDER_OLYA:
+        return await get_olya_balance(conn)
+    if holder == CASH_HOLDER_DIMA:
+        return await get_dima_balance(conn)
+    raise ValueError(f"неизвестная кучка: {holder!r}")
 
 
 async def list_olya_entries(
     conn: asyncpg.Connection, limit: int = 10
 ) -> list[asyncpg.Record]:
-    """Последние операции по деньгам Оли, новые сверху; отменённые не показываем."""
+    """Последние операции по деньгам Оли, новые сверху; отменённые не показываем.
+
+    Перемещения — в обе стороны: от Оли (cash_holder = 'olya') и к Оле
+    (kind = 'move', cash_holder = 'dima'). Направление — по cash_holder.
+    """
     return await conn.fetch(
         """
-        SELECT id, happened_at, kind, method, amount, comment, order_id
+        SELECT id, happened_at, kind, method, amount, comment, order_id, cash_holder
         FROM cleaning_cashbook
         WHERE deleted_at IS NULL
-          AND cash_holder = $1
+          AND (cash_holder = $1 OR (kind = $3 AND cash_holder = $4))
         ORDER BY happened_at DESC, id DESC
         LIMIT $2
         """,
         CASH_HOLDER_OLYA,
         limit,
+        CASHBOOK_KIND_MOVE,
+        CASH_HOLDER_DIMA,
     )
 
 
