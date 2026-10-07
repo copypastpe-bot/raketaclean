@@ -81,6 +81,9 @@ WA_CONTACT_FOOTER = (
     f"MAX: {WA_CONTACT_MAX_LINK}\n"
     f"Telegram: {WA_CONTACT_TG_LINK}"
 )
+# Две пустые строки перед подписью, чтобы она не сливалась с текстом
+# (решение владельца 2026-10-07).
+CONTACT_FOOTER_GAP = "\n\n\n"
 DAILY_SEND_LIMIT = int(os.getenv("DAILY_SEND_LIMIT", "60") or "60")
 DAILY_SEND_LIMIT_ALERT_JOB = "send_daily_limit_alert"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -94,7 +97,8 @@ SERVICE_FOOTER_KEYS = {
     "cleaning_order_completed_summary",
     "order_rating_reminder",
     "cleaning_order_rating_reminder",
-    "order_rating_response_high_client",
+    # Ответа на пятёрку здесь нет: в нём одна ссылка — на форму отзыва
+    # (решение владельца 2026-10-07).
     "order_rating_response_mid_client",
     "order_rating_response_low_client",
 }
@@ -674,8 +678,8 @@ def _with_contact_footer(text: str, channel: ChannelKind, event_key: str | None)
     if event_key not in SERVICE_FOOTER_KEYS:
         return text
     if WA_TG_FALLBACK_TEXT:
-        return f"{text}\n\n{WA_TG_FALLBACK_TEXT}"
-    return f"{text}\n\n{WA_CONTACT_FOOTER}"
+        return f"{text}{CONTACT_FOOTER_GAP}{WA_TG_FALLBACK_TEXT}"
+    return f"{text}{CONTACT_FOOTER_GAP}{WA_CONTACT_FOOTER}"
 
 
 async def _fetch_client_channel_rows(
