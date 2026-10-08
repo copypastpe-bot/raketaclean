@@ -24,6 +24,10 @@ cd "$PROJECT_DIR"
 
 set -a
 source "$PROJECT_DIR/.env"
+# С 21.09.2026 выключатели (OFFSITE_*) живут в switches.env; без него копия молча не уходила.
+if [[ -r "$PROJECT_DIR/switches.env" ]]; then
+  source "$PROJECT_DIR/switches.env"
+fi
 set +a
 
 if [[ -z "${DB_DSN:-}" ]]; then
