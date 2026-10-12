@@ -588,6 +588,7 @@ async def test_concurrent_ticks_send_one_report():
     reports = []
 
     async def on_report(summary):
+        await asyncio.sleep(0)                  # отправка в Telegram отдаёт управление
         reports.append(summary)
 
     watcher = make_watcher(mailbox, engine, on_report=on_report)

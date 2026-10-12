@@ -570,6 +570,11 @@ def carpet_letter_text(summary: Any, *, dry_run: bool = False) -> str:
     return mark_rehearsal("\n".join(lines), dry_run)
 
 
+# Сколько символов ошибки показать владельцу: амо кладёт в текст ошибки страницу
+# ответа целиком, а Telegram не примет сообщение длиннее 4096 символов.
+CARPET_ERROR_LIMIT = 300
+
+
 def carpet_manual_text(row: Any, link: Any, *, hours: int, base_url: Optional[str] = None,
                        dry_run: bool = False) -> str:
     """Заказ отдан владельцу: робот не смог его провести и больше не трогает."""
@@ -577,7 +582,7 @@ def carpet_manual_text(row: Any, link: Any, *, hours: int, base_url: Optional[st
         f"⚠️ Ковры: не смог провести заказ партнёра №{row.partner_id} за {hours} часа — "
         "сделайте руками.",
         " · ".join(_carpet_details(row)),
-        f"Причина: {link.last_error or 'не записана'}.",
+        f"Причина: {(link.last_error or 'не записана')[:CARPET_ERROR_LIMIT]}.",
     ]
     url = _deal_url(base_url, link.lead_id or link.primary_lead_id)
     if url:

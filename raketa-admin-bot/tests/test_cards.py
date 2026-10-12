@@ -653,6 +653,19 @@ def test_carpet_manual_text_without_deal_and_error():
     assert "Сделка:" not in text
 
 
+def test_carpet_manual_text_cuts_a_long_error():
+    """Длинная страница ошибки амо не должна съесть сообщение владельцу."""
+    from adminbot.models import CarpetLink
+    from adminbot.tg.cards import carpet_manual_text
+
+    link = CarpetLink(partner_id=44426, phone10="9601945325", status="manual",
+                      last_error="x" * 5000)
+    text = carpet_manual_text(carpet_row(), link, hours=3)
+
+    assert "Причина: " + "x" * 300 + "." in text
+    assert len(text) < 1000
+
+
 def test_order_done_message_for_the_week_of_watching():
     """О каждом проведённом заказе — сообщение со ссылкой (решение 2026-08-27)."""
     from adminbot.tg.cards import order_done_text
