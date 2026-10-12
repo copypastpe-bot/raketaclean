@@ -579,6 +579,80 @@ def test_carpet_held_text_explains_why_and_what_to_do():
     assert "robot_amo" in text
 
 
+def test_carpet_letter_text_when_all_is_done():
+    """Итог письма, когда делать ничего не надо (решение владельца 12.10)."""
+    from adminbot.carpets.watcher import CarpetLetterSummary
+    from adminbot.tg.cards import carpet_letter_text
+
+    text = carpet_letter_text(CarpetLetterSummary(
+        uid="1", subject="отчёт с 05.10 по 11.10", delivered=2, refused=1))
+
+    assert text == ("🧶 Отчёт партнёра «отчёт с 05.10 по 11.10» проведён.\n"
+                    "\n"
+                    "✅ Доставлено: 2\n"
+                    "✖️ Отказ: 1 (закрыл как нереализованную)\n"
+                    "\n"
+                    "Делать ничего не надо.")
+
+
+def test_carpet_letter_text_when_owner_has_work():
+    from adminbot.carpets.watcher import CarpetLetterSummary
+    from adminbot.tg.cards import carpet_letter_text
+
+    text = carpet_letter_text(CarpetLetterSummary(
+        uid="1", subject="отчёт с 05.10 по 11.10", delivered=1, waiting_owner=1, manual=1))
+
+    assert text == ("🧶 Отчёт партнёра «отчёт с 05.10 по 11.10» разобран.\n"
+                    "\n"
+                    "✅ Доставлено: 1\n"
+                    "❓ Ждут вашего ответа: 1 (карточка выше)\n"
+                    "⚠️ Сделать руками: 1 (сообщение выше)")
+
+
+def test_carpet_letter_text_without_subject():
+    from adminbot.carpets.watcher import CarpetLetterSummary
+    from adminbot.tg.cards import carpet_letter_text
+
+    text = carpet_letter_text(CarpetLetterSummary(uid="1", subject=None, delivered=1))
+
+    assert text.startswith("🧶 Отчёт партнёра «без темы» проведён.")
+
+
+def test_carpet_manual_text_tells_what_and_why():
+    """«Сделайте руками»: что за заказ, почему, где сделка (решение владельца 12.10)."""
+    from decimal import Decimal
+    from adminbot.models import CarpetLink
+    from adminbot.phone import for_owner
+    from adminbot.tg.cards import carpet_manual_text, money
+
+    link = CarpetLink(partner_id=44426, phone10="9601945325", status="manual",
+                      lead_id=31723663, last_error="AmoError: amoCRM 500: сбой")
+    text = carpet_manual_text(carpet_row(), link, hours=3,
+                              base_url="https://raketa.amocrm.ru")
+
+    lines = text.split("\n")
+    assert lines[0] == ("⚠️ Ковры: не смог провести заказ партнёра №44426 за 3 часа — "
+                        "сделайте руками.")
+    # Полный номер — правило владельца; шапка — та же, что у карточки-вопроса.
+    assert lines[1] == (f"Толстая Светлана · {for_owner('9601945325')} · "
+                        f"{money(Decimal('3995'))} ₽ · Советский · "
+                        "заказ у партнёра 12.08.2026 · сдано 23.08.2026")
+    assert lines[2] == "Причина: AmoError: amoCRM 500: сбой."
+    assert lines[3] == "Сделка: https://raketa.amocrm.ru/leads/detail/31723663"
+    assert lines[4] == "Этот заказ робот больше не трогает."
+
+
+def test_carpet_manual_text_without_deal_and_error():
+    from adminbot.models import CarpetLink
+    from adminbot.tg.cards import carpet_manual_text
+
+    link = CarpetLink(partner_id=44426, phone10="9601945325", status="manual")
+    text = carpet_manual_text(carpet_row(), link, hours=3, base_url="https://raketa.amocrm.ru")
+
+    assert "Причина: не записана." in text
+    assert "Сделка:" not in text
+
+
 def test_order_done_message_for_the_week_of_watching():
     """О каждом проведённом заказе — сообщение со ссылкой (решение 2026-08-27)."""
     from adminbot.tg.cards import order_done_text
@@ -663,6 +737,18 @@ def test_carpet_cards_mark_rehearsal():
 
     held = carpet_held_text("тема", "порог превышен", 5, 1, "uid-1", dry_run=True)
     assert held.startswith("🎭 РЕПЕТИЦИЯ")
+
+    from adminbot.carpets.watcher import CarpetLetterSummary
+    from adminbot.models import CarpetLink
+    from adminbot.tg.cards import carpet_letter_text, carpet_manual_text
+
+    letter = carpet_letter_text(CarpetLetterSummary(uid="1", subject="тема"), dry_run=True)
+    assert letter.startswith("🎭 РЕПЕТИЦИЯ")
+
+    manual = carpet_manual_text(carpet_row(), CarpetLink(partner_id=1, phone10="1",
+                                                         status="manual"),
+                                hours=3, dry_run=True)
+    assert manual.startswith("🎭 РЕПЕТИЦИЯ")
 
     # По умолчанию (боевой режим) пометки нет ни у одной карточки.
     live_question, _ = carpet_question_card(carpet_row(), None)

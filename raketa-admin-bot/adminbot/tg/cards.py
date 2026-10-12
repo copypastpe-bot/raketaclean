@@ -467,26 +467,32 @@ CARPET_REASONS = {
 CARPET_DEFAULT_REASON = "Не смог решить сам, что делать с этим заказом партнёра."
 
 
+def _carpet_details(row: Any) -> list[str]:
+    """Клиент, деньги, даты — общая часть ковровых сообщений владельцу."""
+    details = []
+    if getattr(row, "client_name", None):
+        details.append(row.client_name)
+    details.append(for_owner(row.phone10))
+    if row.is_refusal:
+        details.append("ОТКАЗ")
+    else:
+        details.append(f"{money(row.amount)} ₽")
+    if getattr(row, "district", None):
+        details.append(row.district)
+    if row.added_date:
+        details.append(f"заказ у партнёра {row.added_date:%d.%m.%Y}")
+    if row.return_date:
+        details.append(f"сдано {row.return_date:%d.%m.%Y}")
+    return details
+
+
 def carpet_question_card(row: Any, question: Optional[dict], *, dry_run: bool = False,
                          base_url: Optional[str] = None):
     """Вопрос по строке отчёта партнёра."""
     reason = (question or {}).get("reason", "")
     options = (question or {}).get("options") or []
 
-    head = [f"🧶 Ковры · заказ партнёра №{row.partner_id}"]
-    if getattr(row, "client_name", None):
-        head.append(row.client_name)
-    head.append(for_owner(row.phone10))
-    if row.is_refusal:
-        head.append("ОТКАЗ")
-    else:
-        head.append(f"{money(row.amount)} ₽")
-    if getattr(row, "district", None):
-        head.append(row.district)
-    if row.added_date:
-        head.append(f"заказ у партнёра {row.added_date:%d.%m.%Y}")
-    if row.return_date:
-        head.append(f"сдано {row.return_date:%d.%m.%Y}")
+    head = [f"🧶 Ковры · заказ партнёра №{row.partner_id}", *_carpet_details(row)]
 
     lines = [" · ".join(head), ""]
     if row.is_refusal and row.refusal_reason:
@@ -524,7 +530,10 @@ def parse_carpet_choice(data: Optional[str]) -> Optional[tuple[int, str, Optiona
 
 
 def carpet_report_text(subject: Optional[str], report: Any, *, dry_run: bool = False) -> str:
-    """Итог разбора одного письма партнёра."""
+    """Итог разбора одного письма партнёра.
+
+    Снимок одного прохода — для команды /carpets.
+    """
     counts = dict(getattr(report, "by_status", {}) or {})
     lines = [f"🧶 Разобрал отчёт партнёра: {subject or 'без темы'}", ""]
     lines.append(f"✅ Проведено: {counts.get('done', 0)} из {report.processed}")
@@ -542,6 +551,38 @@ def carpet_report_text(subject: Optional[str], report: Any, *, dry_run: bool = F
 
     if not (waiting or in_flight or counts.get("error") or getattr(report, "failures", ())):
         lines += ["", "Всё разобрано — разбираться не с чем."]
+    return mark_rehearsal("\n".join(lines), dry_run)
+
+
+def carpet_letter_text(summary: Any, *, dry_run: bool = False) -> str:
+    """Итог письма партнёра — один раз, когда у каждой строки есть судьба (ТЗ 2026-10-12)."""
+    verb = "проведён" if summary.clean else "разобран"
+    lines = [f"🧶 Отчёт партнёра «{summary.subject or 'без темы'}» {verb}.", ""]
+    lines.append(f"✅ Доставлено: {summary.delivered}")
+    if summary.refused:
+        lines.append(f"✖️ Отказ: {summary.refused} (закрыл как нереализованную)")
+    if summary.waiting_owner:
+        lines.append(f"❓ Ждут вашего ответа: {summary.waiting_owner} (карточка выше)")
+    if summary.manual:
+        lines.append(f"⚠️ Сделать руками: {summary.manual} (сообщение выше)")
+    if summary.clean:
+        lines += ["", "Делать ничего не надо."]
+    return mark_rehearsal("\n".join(lines), dry_run)
+
+
+def carpet_manual_text(row: Any, link: Any, *, hours: int, base_url: Optional[str] = None,
+                       dry_run: bool = False) -> str:
+    """Заказ отдан владельцу: робот не смог его провести и больше не трогает."""
+    lines = [
+        f"⚠️ Ковры: не смог провести заказ партнёра №{row.partner_id} за {hours} часа — "
+        "сделайте руками.",
+        " · ".join(_carpet_details(row)),
+        f"Причина: {link.last_error or 'не записана'}.",
+    ]
+    url = _deal_url(base_url, link.lead_id or link.primary_lead_id)
+    if url:
+        lines.append(f"Сделка: {url}")
+    lines.append("Этот заказ робот больше не трогает.")
     return mark_rehearsal("\n".join(lines), dry_run)
 
 

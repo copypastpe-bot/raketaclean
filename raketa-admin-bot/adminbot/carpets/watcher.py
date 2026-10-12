@@ -46,6 +46,28 @@ ACTIVE_STATUSES: tuple[str, ...] = (
     "new", "in_progress", "waiting_salesbot", "error", "waiting_owner",
 )
 
+# Сколько строка может стоять без пройденного шага (ошибка CRM, сбой разбора), прежде
+# чем робот отдаст заказ владельцу «сделать руками». Решение владельца 2026-10-12:
+# двухчасовой обрыв связи с амо (24.09) робот переживает молча.
+MANUAL_AFTER_SEC = 3 * 3600
+
+
+@dataclass(frozen=True)
+class CarpetLetterSummary:
+    """Итог одного письма партнёра: что стало с каждой его строкой."""
+
+    uid: str
+    subject: Optional[str]
+    delivered: int = 0          # доведены (вместе с проведёнными раньше — решение 4)
+    refused: int = 0            # отказы партнёра
+    waiting_owner: int = 0      # ждут ответа на карточку
+    manual: int = 0             # отданы владельцу «сделать руками»
+
+    @property
+    def clean(self) -> bool:
+        """Владельцу делать нечего."""
+        return not (self.waiting_owner or self.manual)
+
 
 class CarpetStateStore(Protocol):
     """Что наблюдателю нужно от хранилища сверх того, что нужно движку."""
