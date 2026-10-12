@@ -483,6 +483,24 @@ async def test_passed_step_restarts_the_clock():
     assert engine.store.links[44426].status == "error"     # с перезапуска прошло два часа
 
 
+async def test_choosing_a_deal_counts_as_a_step():
+    """Выбор сделки — тоже пройденный шаг: отсчёт заново (решение 5)."""
+    clock = Clock()
+    engine = FakeEngine({44426: CarpetLink(partner_id=44426, phone10="1", status="error")})
+    watcher = make_watcher(FakeMailBox([letter()]), engine, now=clock)
+    await watcher.tick()
+
+    clock.advance(hours=2, minutes=50)
+    engine.next_run[44426] = {"lead_id": 31723663}       # сделка выбрана, следующий шаг упал
+    engine.store.pending = [(row(), engine.store.links[44426])]
+    await watcher.tick()
+    assert engine.store.links[44426].stuck_since == clock.moment
+
+    clock.advance(minutes=10)
+    await watcher.tick()
+    assert engine.store.links[44426].status == "error"   # с выбора сделки прошло 10 минут
+
+
 async def test_recovered_row_forgets_the_clock():
     clock = Clock()
     engine = FakeEngine({44426: CarpetLink(partner_id=44426, phone10="1", status="error")})
@@ -525,6 +543,28 @@ async def test_crashing_row_is_handed_over_and_the_letter_completes():
     assert mailbox.seen == ["1"]                           # письмо больше не держит
     assert reports == [CarpetLetterSummary(uid="1", subject="отчёт с 17.08 по 23.08",
                                            manual=1)]
+
+
+async def test_row_with_a_fate_is_not_touched_by_a_crash():
+    """Сбой прохода по строке с судьбой: ни второго «сделайте руками», ни новой ошибки."""
+    clock = Clock()
+    engine = FakeEngine()
+    engine.store.links[44426] = CarpetLink(partner_id=44426, phone10="1", status="manual",
+                                           stuck_since=clock.moment - timedelta(hours=5))
+    engine.store.links[44427] = CarpetLink(partner_id=44427, phone10="2", status="done")
+    engine.raise_on = {44426, 44427}
+    manual = []
+
+    async def on_manual(row_, link):
+        manual.append(row_.partner_id)
+
+    watcher = make_watcher(FakeMailBox([letter()]), engine, on_manual=on_manual, now=clock,
+                           rows=[row(44426), row(44427)])
+    await watcher.tick()
+
+    assert manual == [] and engine.store.logged == []
+    assert engine.store.links[44427].stuck_since is None
+    assert engine.store.links[44427].last_error is None
 
 
 async def test_rehearsal_reports_once_and_leaves_the_letter_unread():

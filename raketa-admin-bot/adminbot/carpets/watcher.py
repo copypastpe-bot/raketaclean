@@ -391,12 +391,14 @@ class CarpetWatcher:
                             link: Optional[CarpetLink], error: Optional[str] = None
                             ) -> Optional[CarpetLink]:
         """Строка не сдвинулась: завести или продолжить отсчёт; три часа — владельцу."""
-        if link is None:
-            return None                     # строки нет: сбой случился до её заведения
+        if link is None or link.status in SETTLED_STATUSES:
+            return link             # строки нет или у неё уже есть судьба — отсчёт не нужен
         moment = self.now()
         fields: dict[str, Any] = {"last_error": error} if error else {}
-        progressed = (before is not None
-                      and len(link.checklist or {}) > len(before.checklist or {}))
+        progressed = before is not None and (
+            len(link.checklist or {}) > len(before.checklist or {})
+            or (link.lead_id, link.primary_lead_id, link.path)
+            != (before.lead_id, before.primary_lead_id, before.path))
         if link.stuck_since is None or progressed:
             return await self.store.update(row.partner_id, stuck_since=moment, **fields) or link
         if (moment - link.stuck_since).total_seconds() < self.manual_after_sec:
