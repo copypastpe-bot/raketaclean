@@ -935,9 +935,11 @@ def _make_carpet_manual_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool
 
 ### Задача 4 (только по «да» владельца): выбор сделки после сбоя амо
 
+Выполнено: 0a092be
+
 **Файлы:** `raketa-admin-bot/adminbot/carpets/engine.py` (`process_row`), `tests/test_carpet_engine.py`.
 
-- [ ] **Шаг 1: падающий тест** — рядом с `test_interrupted_chain_continues_from_where_it_stopped`:
+- [x] **Шаг 1: падающий тест** — рядом с `test_interrupted_chain_continues_from_where_it_stopped`:
 
 ```python
 async def test_crm_failure_while_choosing_a_deal_retries_the_choice():
@@ -957,8 +959,8 @@ async def test_crm_failure_while_choosing_a_deal_retries_the_choice():
     assert [lead for lead, _ in amo.calls_of("update_lead")] == [lead_id]
 ```
 
-- [ ] **Шаг 2: прогнать — падает** (`update_lead` зовётся с `None`).
-- [ ] **Шаг 3: правка** — условие выбора пути в `process_row`:
+- [x] **Шаг 2: прогнать — падает** (`update_lead` зовётся с `None`).
+- [x] **Шаг 3: правка** — условие выбора пути в `process_row`:
 
 ```python
             # Решение ещё не принято — принимаем. `error` без пути и сделок — сбой амо
@@ -971,8 +973,8 @@ async def test_crm_failure_while_choosing_a_deal_retries_the_choice():
                 link = await self._decide(row, link)
 ```
 
-- [ ] **Шаг 4: прогнать** `tests/test_carpet_engine.py` целиком — зелёный.
-- [ ] **Шаг 5: полный прогон и коммит** — `engine.py`, `tests/test_carpet_engine.py`.
+- [x] **Шаг 4: прогнать** `tests/test_carpet_engine.py` целиком — зелёный.
+- [x] **Шаг 5: полный прогон и коммит** — `engine.py`, `tests/test_carpet_engine.py`.
   Сообщение: `Ковры: сбой амо при выборе сделки — повтор выбирает заново (ТЗ 2026-10-12, задача 4)`.
 
 ---
