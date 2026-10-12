@@ -87,6 +87,8 @@
 
 ### Задача 1: память робота — миграция, хранилища, движок не трогает `manual`
 
+Выполнено: bd43f57
+
 **Файлы:**
 - Создать: `raketa-admin-bot/migrations/021_carpet_letter_report.sql`
 - Изменить: `raketa-admin-bot/adminbot/models.py` (`CarpetLink`)
@@ -108,7 +110,7 @@
 - `db`: `track_carpet_letter`, `carpet_letters_to_report`, `mark_carpet_letter_reported`,
   `fetch_carpet_links_by_ids`; `stuck_since` — в `_UPDATABLE_CARPET_FIELDS`.
 
-- [ ] **Шаг 1: падающие тесты базы** — в конец ковровых тестов `tests/test_db_schema.py`
+- [x] **Шаг 1: падающие тесты базы** — в конец ковровых тестов `tests/test_db_schema.py`
   (импорты `datetime, timezone` там уже есть):
 
 ```python
@@ -159,7 +161,7 @@ async def test_carpet_links_by_ids_and_stuck_since(pool):
     assert await db.fetch_carpet_links_by_ids(pool, []) == []
 ```
 
-- [ ] **Шаг 2: падающие тесты хранилища в памяти** — создать `tests/test_carpet_letter_store.py`:
+- [x] **Шаг 2: падающие тесты хранилища в памяти** — создать `tests/test_carpet_letter_store.py`:
 
 ```python
 """Хранилище ковров в памяти: заказы письма для итога (ТЗ 2026-10-12)."""
@@ -190,7 +192,7 @@ async def test_memory_store_links_by_ids():
     assert [link.partner_id for link in links] == [11]
 ```
 
-- [ ] **Шаг 3: падающий тест движка** — в `tests/test_carpet_engine.py`, после
+- [x] **Шаг 3: падающий тест движка** — в `tests/test_carpet_engine.py`, после
   `test_second_run_of_the_same_row_does_nothing`:
 
 ```python
@@ -207,12 +209,12 @@ async def test_row_handed_to_owner_is_left_alone():
     assert amo.calls == []
 ```
 
-- [ ] **Шаг 4: прогнать — должны упасть**
+- [x] **Шаг 4: прогнать — должны упасть**
 
   `TEST_DB_DSN=… rtk proxy .venv/bin/python -m pytest -q tests/test_db_schema.py tests/test_carpet_letter_store.py tests/test_carpet_engine.py 2>&1 | tail -15`
   Ожидание: новые тесты падают (нет функций/колонок/метода, движок трогает `manual`).
 
-- [ ] **Шаг 5: миграция** `migrations/021_carpet_letter_report.sql`:
+- [x] **Шаг 5: миграция** `migrations/021_carpet_letter_report.sql`:
 
 ```sql
 -- Ковры: итог письма — когда строки доведены; «сделайте руками» после трёх часов.
@@ -241,7 +243,7 @@ ALTER TABLE adminbot.carpet_links
     ADD COLUMN IF NOT EXISTS stuck_since timestamptz;  -- с какого момента строка не сдвигается
 ```
 
-- [ ] **Шаг 6: модель** — `adminbot/models.py`, `CarpetLink`: в комментарии к `status`
+- [x] **Шаг 6: модель** — `adminbot/models.py`, `CarpetLink`: в комментарии к `status`
   дописать `|manual`; после `source_file` добавить:
 
 ```python
@@ -254,7 +256,7 @@ ALTER TABLE adminbot.carpet_links
   по репозиторию админ-бота); если такие есть — порядок полей после `source_file`
   им важен, проверь каждое.
 
-- [ ] **Шаг 7: база** — `adminbot/db.py`:
+- [x] **Шаг 7: база** — `adminbot/db.py`:
   - `_UPDATABLE_CARPET_FIELDS`: добавить `"stuck_since"`;
   - `_carpet_from_row`: `stuck_since=row["stuck_since"],` (перед `created_at`);
   - `remember_letter`: в `ON CONFLICT (uid) DO UPDATE SET` дописать
@@ -319,7 +321,7 @@ async def fetch_carpet_links_by_ids(own_pool: asyncpg.Pool,
     return [_carpet_from_row(row) for row in rows]
 ```
 
-- [ ] **Шаг 8: хранилища** — `adminbot/carpets/store.py`.
+- [x] **Шаг 8: хранилища** — `adminbot/carpets/store.py`.
   `MemoryCarpetStore.__init__`: `self.reports: dict[str, dict] = {}   # итог письма: uid → заказы и отметка`.
   В раздел «что нужно наблюдателю почты» обоих классов:
 
@@ -359,16 +361,16 @@ async def fetch_carpet_links_by_ids(own_pool: asyncpg.Pool,
         return await db.fetch_carpet_links_by_ids(self._pool, partner_ids)
 ```
 
-- [ ] **Шаг 9: движок** — `adminbot/carpets/engine.py`, `process_row`:
+- [x] **Шаг 9: движок** — `adminbot/carpets/engine.py`, `process_row`:
 
 ```python
         if link.status in ("done", "waiting_owner", "manual"):
             return link                    # разобрано, ждём ответа или отдано владельцу
 ```
 
-- [ ] **Шаг 10: прогнать точечно** — тесты шага 4 зелёные.
-- [ ] **Шаг 11: карта** `adminbot/db.py.map.md` — четыре новые функции, сдвиг номеров.
-- [ ] **Шаг 12: полный прогон и коммит** — полный прогон админ-бота зелёный; коммит:
+- [x] **Шаг 10: прогнать точечно** — тесты шага 4 зелёные.
+- [x] **Шаг 11: карта** `adminbot/db.py.map.md` — четыре новые функции, сдвиг номеров.
+- [x] **Шаг 12: полный прогон и коммит** — полный прогон админ-бота зелёный; коммит:
   миграция, `models.py`, `db.py`, `db.py.map.md`, `store.py`, `engine.py`, три файла тестов.
   Сообщение: `Ковры: письмо помнит свои заказы для итога, строка — когда застряла (ТЗ 2026-10-12, задача 1)`.
 
