@@ -742,7 +742,7 @@ CARPET_REMEMBERED_PATH = "remembered"
 # Колонки adminbot.carpet_links, которые разрешено менять.
 _UPDATABLE_CARPET_FIELDS = frozenset(
     {"phone10", "status", "path", "lead_id", "primary_lead_id", "question",
-     "question_msg_id", "last_error", "source_file"}
+     "question_msg_id", "last_error", "source_file", "stuck_since"}
 )
 
 
@@ -767,6 +767,7 @@ def _carpet_from_row(row: Optional[asyncpg.Record]) -> Optional[CarpetLink]:
         question_msg_id=row["question_msg_id"],
         last_error=row["last_error"],
         source_file=row["source_file"],
+        stuck_since=row["stuck_since"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -989,6 +990,8 @@ async def remember_letter(own_pool: asyncpg.Pool, uid: str, subject: Optional[st
 
     Письмо было отложено и владелец снял отложение — отметки об этом снимаются:
     письмо проведено, и вспоминать, что когда-то оно ждало решения, незачем.
+    Строку письма первым заводит `track_carpet_letter` (ТЗ 2026-10-12) — поэтому
+    тема, файлы и число строк здесь дописываются и в уже существующую строку.
     """
     async with own_pool.acquire() as conn:
         await conn.execute(
@@ -996,6 +999,7 @@ async def remember_letter(own_pool: asyncpg.Pool, uid: str, subject: Optional[st
             INSERT INTO adminbot.carpet_letters (uid, subject, files, rows_total)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (uid) DO UPDATE SET processed_at = now(),
+                subject = EXCLUDED.subject, files = EXCLUDED.files, rows_total = EXCLUDED.rows_total,
                 held_reason = NULL, held_at = NULL, released_at = NULL
             """,
             uid, subject, list(files), rows_total,
@@ -1061,6 +1065,61 @@ async def held_letters(own_pool: asyncpg.Pool) -> list[dict]:
             ORDER BY held_at
             """)
     return [dict(row) for row in rows]
+
+
+async def track_carpet_letter(own_pool: asyncpg.Pool, uid: str, subject: Optional[str],
+                              partner_ids: Sequence[int], refused_ids: Sequence[int]) -> None:
+    """Запомнить заказы письма для итога владельцу (ТЗ 2026-10-12).
+
+    Зовётся до `remember_letter`: сбой между ними оставит письмо неразобранным,
+    и следующий проход повторит оба шага, а не потеряет итог. Повторный вызов
+    список не меняет.
+    """
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO adminbot.carpet_letters (uid, subject, partner_ids, refused_ids)
+            VALUES ($1, $2, $3::bigint[], $4::bigint[])
+            ON CONFLICT (uid) DO UPDATE
+                SET partner_ids = EXCLUDED.partner_ids, refused_ids = EXCLUDED.refused_ids
+                WHERE adminbot.carpet_letters.partner_ids IS NULL
+            """,
+            uid, subject, list(partner_ids), list(refused_ids),
+        )
+
+
+async def carpet_letters_to_report(own_pool: asyncpg.Pool) -> list[dict]:
+    """Письма, итог по которым ещё не ушёл, — старые первыми."""
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT uid, subject, partner_ids, refused_ids FROM adminbot.carpet_letters
+            WHERE partner_ids IS NOT NULL AND reported_at IS NULL
+            ORDER BY processed_at, uid
+            """)
+    return [{"uid": row["uid"], "subject": row["subject"],
+             "partner_ids": list(row["partner_ids"]),
+             "refused_ids": list(row["refused_ids"] or [])} for row in rows]
+
+
+async def mark_carpet_letter_reported(own_pool: asyncpg.Pool, uid: str) -> None:
+    async with own_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE adminbot.carpet_letters SET reported_at = now() WHERE uid = $1", uid)
+
+
+async def fetch_carpet_links_by_ids(own_pool: asyncpg.Pool,
+                                    partner_ids: Sequence[int]) -> list[CarpetLink]:
+    """Заказы партнёра по номерам — для итога письма."""
+    if not partner_ids:
+        return []
+    async with own_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM adminbot.carpet_links WHERE partner_id = ANY($1::bigint[]) "
+            "ORDER BY partner_id",
+            list(partner_ids),
+        )
+    return [_carpet_from_row(row) for row in rows]
 
 
 async def get_setting(own_pool: asyncpg.Pool, key: str) -> Optional[str]:

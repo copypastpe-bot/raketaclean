@@ -1,6 +1,14 @@
 # Карта функций: adminbot/db.py
 
-Обновлено 2026-09-23 (задача 10 ТЗ `2026-09-22-order-chain.md`: заказ с
+Обновлено 2026-10-12 (задача 1 ТЗ `2026-10-12-carpets-letter-report.md`: итог
+письма после доведения строк и «сделайте руками» — добавлены `track_carpet_letter`,
+`carpet_letters_to_report`, `mark_carpet_letter_reported`,
+`fetch_carpet_links_by_ids`; `CarpetLink` получил `stuck_since`
+(`_carpet_from_row` читает, `_UPDATABLE_CARPET_FIELDS` разрешает);
+`remember_letter` дописывает тему, файлы и число строк и в уже заведённую строку
+письма; номера от ковров и ниже пересчитаны по факту `grep -nE '^(async )?def '`
+— часть их отставала и до этой правки).
+Раньше — 2026-09-23 (задача 10 ТЗ `2026-09-22-order-chain.md`: заказ с
 известной сделкой — `_SELECT_ORDERS` читает `o.calendar_event_id`,
 `o.deal_lead_id` (мастер выбрал запись календаря в сценарии рабочего бота,
 задача 9), `_order_from_row` кладёт их в `Order`; `get_calendar_link`/
@@ -30,7 +38,7 @@
 кандидатов `lead_ids` вместо `phone10`; круг правок по ревью — `fetch_carpet_taken_leads`
 теперь смотрит обе колонки, `lead_id` и `primary_lead_id`, как и «зеркальные»
 функции заказов и календаря).
-Строк в файле: 1815.
+Строк в файле: 1874.
 
 Правило файла: в схему `public` (таблицы рабочего бота) не пишем никогда —
 для неё здесь только SELECT. Всё собственное состояние живёт в схеме `adminbot`.
@@ -46,8 +54,8 @@
 |---|---|---|
 | 134 | `_init_connection` | jsonb ↔ dict без ручного json.dumps на каждом вызове |
 | 141 | `create_pool` | пул соединений с нашим кодеком jsonb |
-| 1083 | `apply_migration` | применить SQL-файл миграции (тесты и развёртывание) |
-| 1023 | `get_setting` / 1029 `set_setting` | настройки владельца (пауза) |
+| 1142 | `apply_migration` | применить SQL-файл миграции (тесты и развёртывание) |
+| 1125 | `get_setting` / 1131 `set_setting` | настройки владельца (пауза) |
 
 ## Заказы химчистки и уборки
 
@@ -143,20 +151,24 @@ Python, а не в SQL (базы бота и админ-бота не обяза
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 749 | `_carpet_from_row` | строка → `CarpetLink` |
-| 775 | `create_carpet_link` | взять строку отчёта в работу |
-| 797 | `remember_carpet_link` | заказ из архива партнёра сразу как сделанный (`done`/`remembered`), одной записью; существующую не трогает |
-| 822 | `fetch_pending_carpet_rows` | незавершённые заказы партнёра со строками отчёта |
-| 799–838 | `get_/update_/mark_carpet_step/log_carpet_action` | то же, что у заказов |
-| 897 | `update_carpet_link_and_log` | задача 8: то же самое, что `update_link_and_log`, но для ковровой связки |
-| 930 | `fetch_carpet_taken_leads` | из переданных `lead_ids` — ковровые сделки, занятые другими заказами (задача 6 ТЗ 2026-09-22 — по номеру сделки, не по телефону); круг правок по ревью — смотрит обе колонки, `lead_id` и `primary_lead_id` (путь `use_primary`), как и «зеркальные» `fetch_taken_lead_ids`/`fetch_calendar_taken_leads` |
-| 965 | `fetch_carpet_links_by_status` | незаконченные заказы партнёра |
-| 979 | `count_carpet_links_by_status` | очередь ковров |
-| 986 | `remember_letter` | письмо разобрано: страховка от повторного разбора; снимает отметки об отложении |
-| 1005 | `letter_state` | что робот помнит о письме: `processed` / `held` / `released` / ничего |
-| 1023 | `hold_letter` | отложить письмо: робот его не проводит и ждёт владельца |
-| 1040 | `release_letter` | владелец разрешил провести отложенное письмо |
-| 1053 | `held_letters` | что сейчас отложено — для `--carpets-held` |
+| 749 | `_carpet_from_row` | строка → `CarpetLink`; с ТЗ 2026-10-12 — и `stuck_since` (с какого момента строка не сдвигается) |
+| 776 | `create_carpet_link` | взять строку отчёта в работу |
+| 798 | `remember_carpet_link` | заказ из архива партнёра сразу как сделанный (`done`/`remembered`), одной записью; существующую не трогает |
+| 823 | `fetch_pending_carpet_rows` | незавершённые заказы партнёра со строками отчёта |
+| 843–882 | `get_/update_/mark_carpet_step/log_carpet_action` | то же, что у заказов |
+| 898 | `update_carpet_link_and_log` | задача 8: то же самое, что `update_link_and_log`, но для ковровой связки |
+| 931 | `fetch_carpet_taken_leads` | из переданных `lead_ids` — ковровые сделки, занятые другими заказами (задача 6 ТЗ 2026-09-22 — по номеру сделки, не по телефону); круг правок по ревью — смотрит обе колонки, `lead_id` и `primary_lead_id` (путь `use_primary`), как и «зеркальные» `fetch_taken_lead_ids`/`fetch_calendar_taken_leads` |
+| 966 | `fetch_carpet_links_by_status` | незаконченные заказы партнёра |
+| 980 | `count_carpet_links_by_status` | очередь ковров |
+| 987 | `remember_letter` | письмо разобрано: страховка от повторного разбора; снимает отметки об отложении; с ТЗ 2026-10-12 дописывает тему, файлы и число строк и в строку, заведённую `track_carpet_letter` |
+| 1009 | `letter_state` | что робот помнит о письме: `processed` / `held` / `released` / ничего |
+| 1027 | `hold_letter` | отложить письмо: робот его не проводит и ждёт владельца |
+| 1044 | `release_letter` | владелец разрешил провести отложенное письмо |
+| 1057 | `held_letters` | что сейчас отложено — для `--carpets-held` |
+| 1070 | `track_carpet_letter` | ТЗ 2026-10-12: запомнить заказы письма и отказы среди них для итога владельцу; зовётся до `remember_letter`; повторный вызов список не меняет |
+| 1091 | `carpet_letters_to_report` | письма со списком заказов, итог по которым ещё не ушёл, — старые первыми; письма до миграции 021 (без списка) не попадают |
+| 1105 | `mark_carpet_letter_reported` | отметить, что итог по письму ушёл владельцу |
+| 1111 | `fetch_carpet_links_by_ids` | заказы партнёра по номерам — для итога письма |
 
 Ковры, календарь и автозвонок работают по своим сделкам (`carpet_links`,
 `gcal_events`, `autocall_leads`), не по `public.orders`/`public.cleaning_orders`
@@ -174,41 +186,41 @@ Python, а не в SQL (базы бота и админ-бота не обяза
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1061 | `_as_dict` / 1161 `_gcal_value` | jsonb и text[] в виде, который принимает asyncpg |
-| 1111 | `_calendar_from_row` | строка → `CalendarLink`; с задачи 5 (ТЗ 2026-09-22) читает и четыре поля сверки контакта |
-| 1106–1181 | `get_/create_/update_calendar_link`, `mark_calendar_step`, `log_calendar_action` | ход работы по записи; `get_/update_calendar_link` — с задачи 10 их зовёт ещё и `sync/store.py` (движок и наблюдатель заказов) |
-| 1240 | `update_calendar_link_and_log` | задача 8: то же самое, что `update_link_and_log`, но для записи календаря |
-| 1273 | `count_calendar_created` | задача 2 (ТЗ 2026-09-21): сколько событий получили `create_lead` в журнале за окно суток — источник «Завёл из календаря» |
-| 1290 | `count_calendar_owner_handled` | задача 8: то же самое, что `count_owner_handled`, но по журналу календаря — подмешивается снаружи в «Передано администратору», как и `count_calendar_created` в «Завёл из календаря» |
-| 1306 | `fetch_calendar_taken_leads` | из переданных `lead_ids` — сделки, занятые ДРУГИМИ записями (задача 6 ТЗ 2026-09-22 — по номеру сделки, не по телефону записи) |
-| 1337 | `fetch_pending_calendar_links` | записи, работа по которым не закончена |
-| 1351 | `fetch_calendar_links_without_report` | сделано, а владельцу не отчитались |
-| 1374 | `fetch_calendar_links_needing_contact_reminder` | задача 5 (ТЗ 2026-09-22): записи с расхождением «номер + имя», которым пора напомнить владельцу — по образцу `fetch_links_needing_address_reminder`; самоостановка не флагом, а снятым `contact_mismatch` |
-| 1403 | `count_calendar_links_by_status` | очередь календаря |
-| 1367 | `get_calendar_cursor` / 1396 `save_calendar_cursor` | закладка обмена, своя у каждого календаря |
-| 1456 | `find_calendar_link_by_question_msg` | запись по номеру карточки в Telegram |
-| 1472 | `delete_calendar_link` | забыть запись (ручной разбор последствий) |
-| 1478 | `fetch_calendar_actions` | что робот делал по записи |
+| 1163 | `_as_dict` / 1263 `_gcal_value` | jsonb и text[] в виде, который принимает asyncpg |
+| 1170 | `_calendar_from_row` | строка → `CalendarLink`; с задачи 5 (ТЗ 2026-09-22) читает и четыре поля сверки контакта |
+| 1208–1283 | `get_/create_/update_calendar_link`, `mark_calendar_step`, `log_calendar_action` | ход работы по записи; `get_/update_calendar_link` — с задачи 10 их зовёт ещё и `sync/store.py` (движок и наблюдатель заказов) |
+| 1299 | `update_calendar_link_and_log` | задача 8: то же самое, что `update_link_and_log`, но для записи календаря |
+| 1332 | `count_calendar_created` | задача 2 (ТЗ 2026-09-21): сколько событий получили `create_lead` в журнале за окно суток — источник «Завёл из календаря» |
+| 1349 | `count_calendar_owner_handled` | задача 8: то же самое, что `count_owner_handled`, но по журналу календаря — подмешивается снаружи в «Передано администратору», как и `count_calendar_created` в «Завёл из календаря» |
+| 1365 | `fetch_calendar_taken_leads` | из переданных `lead_ids` — сделки, занятые ДРУГИМИ записями (задача 6 ТЗ 2026-09-22 — по номеру сделки, не по телефону записи) |
+| 1396 | `fetch_pending_calendar_links` | записи, работа по которым не закончена |
+| 1410 | `fetch_calendar_links_without_report` | сделано, а владельцу не отчитались |
+| 1433 | `fetch_calendar_links_needing_contact_reminder` | задача 5 (ТЗ 2026-09-22): записи с расхождением «номер + имя», которым пора напомнить владельцу — по образцу `fetch_links_needing_address_reminder`; самоостановка не флагом, а снятым `contact_mismatch` |
+| 1462 | `count_calendar_links_by_status` | очередь календаря |
+| 1469 | `get_calendar_cursor` / 1498 `save_calendar_cursor` | закладка обмена, своя у каждого календаря |
+| 1515 | `find_calendar_link_by_question_msg` | запись по номеру карточки в Telegram |
+| 1531 | `delete_calendar_link` | забыть запись (ручной разбор последствий) |
+| 1537 | `fetch_calendar_actions` | что робот делал по записи |
 
 ## Автозвонок (`autocall_leads`, курсор опроса)
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1502 | `_autocall_from_row` | строка → `AutocallLead` |
-| 1478–1509 | `get_/create_/update_autocall_lead` | цепочка попыток дозвона |
-| 1571 | `fetch_due_autocall_leads` | созревшие цепочки, просроченные первыми |
-| 1549 | `log_autocall_action` / 1561 `fetch_autocall_actions` | журнал по заявке |
-| 1690 | `get_autocall_cursor` / 1698 `save_autocall_cursor` | с какого `created_at` читать амо |
+| 1561 | `_autocall_from_row` | строка → `AutocallLead` |
+| 1580–1611 | `get_/create_/update_autocall_lead` | цепочка попыток дозвона |
+| 1630 | `fetch_due_autocall_leads` | созревшие цепочки, просроченные первыми |
+| 1651 | `log_autocall_action` / 1663 `fetch_autocall_actions` | журнал по заявке |
+| 1792 | `get_autocall_cursor` / 1800 `save_autocall_cursor` | с какого `created_at` читать амо |
 
 ## Почта владельца (`owner_outbox`)
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1619 | `add_owner_letter` | положить недоставленное сообщение в долг |
-| 1639 | `fetch_due_owner_letters` | созревшие долги, старые первыми |
-| 1661 | `fetch_owner_letters_for` | незаконченные долги по одной записи |
-| 1639 | `mark_owner_letter_sent` / 1652 `postpone_owner_letter` / 1666 `drop_owner_letter` | исход попытки |
-| 1723 | `count_owner_letters_waiting` | строка «жду отправки» для /status |
+| 1678 | `add_owner_letter` | положить недоставленное сообщение в долг |
+| 1698 | `fetch_due_owner_letters` | созревшие долги, старые первыми |
+| 1720 | `fetch_owner_letters_for` | незаконченные долги по одной записи |
+| 1741 | `mark_owner_letter_sent` / 1754 `postpone_owner_letter` / 1768 `drop_owner_letter` | исход попытки |
+| 1782 | `count_owner_letters_waiting` | строка «жду отправки» для /status |
 
 ## Удаления заказов и уборок (задача 4 ТЗ 2026-09-17 «удаление заказа освобождает сделку»)
 
@@ -221,5 +233,5 @@ Python, а не в SQL (базы бота и админ-бота не обяза
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1767 | `fetch_pending_order_deletions` | удалённые заказы химчистки (`public.deleted_orders`) без отметки |
-| 1793 | `fetch_pending_cleaning_deletions` | уборки с `deleted_at` без отметки |
+| 1826 | `fetch_pending_order_deletions` | удалённые заказы химчистки (`public.deleted_orders`) без отметки |
+| 1852 | `fetch_pending_cleaning_deletions` | уборки с `deleted_at` без отметки |

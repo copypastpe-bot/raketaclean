@@ -54,6 +54,7 @@ class MemoryCarpetStore:
         self.held: dict[str, tuple] = {}           # отложенные письма: uid → (тема, файлы, строк, причина)
         self.released: set[str] = set()            # отложение снято владельцем
         self.rows: dict[int, dict] = {}
+        self.reports: dict[str, dict] = {}   # итог письма: uid → заказы и отметка
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     async def get(self, partner_id: int) -> Optional[CarpetLink]:
@@ -162,6 +163,23 @@ class MemoryCarpetStore:
                 for partner_id, link in self.links.items()
                 if link.status in ACTIVE_STATUSES and partner_id in self.rows]
 
+    async def track_letter(self, uid: str, subject: Optional[str],
+                           partner_ids, refused_ids) -> None:
+        self.reports.setdefault(uid, {"uid": uid, "subject": subject,
+                                      "partner_ids": list(partner_ids),
+                                      "refused_ids": list(refused_ids), "reported": False})
+
+    async def letters_to_report(self) -> list[dict]:
+        return [{key: value for key, value in item.items() if key != "reported"}
+                for item in self.reports.values() if not item["reported"]]
+
+    async def mark_letter_reported(self, uid: str) -> None:
+        if uid in self.reports:
+            self.reports[uid]["reported"] = True
+
+    async def links_by_ids(self, partner_ids) -> list[CarpetLink]:
+        return [self.links[pid] for pid in partner_ids if pid in self.links]
+
 
 class PgCarpetStore:
     """Боевое хранилище ковровых привязок: схема `adminbot`."""
@@ -201,6 +219,19 @@ class PgCarpetStore:
 
         raw = await db.fetch_pending_carpet_rows(self._pool, ACTIVE_STATUSES)
         return [(CarpetRow.from_dict(data), link) for data, link in raw]
+
+    async def track_letter(self, uid: str, subject: Optional[str],
+                           partner_ids, refused_ids) -> None:
+        await db.track_carpet_letter(self._pool, uid, subject, partner_ids, refused_ids)
+
+    async def letters_to_report(self) -> list[dict]:
+        return await db.carpet_letters_to_report(self._pool)
+
+    async def mark_letter_reported(self, uid: str) -> None:
+        await db.mark_carpet_letter_reported(self._pool, uid)
+
+    async def links_by_ids(self, partner_ids) -> list[CarpetLink]:
+        return await db.fetch_carpet_links_by_ids(self._pool, partner_ids)
 
     async def update(self, partner_id: int, **fields: Any) -> Optional[CarpetLink]:
         return await db.update_carpet_link(self._pool, partner_id, **fields)

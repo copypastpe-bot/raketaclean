@@ -111,8 +111,8 @@ class CarpetEngine:
             link = await self.store.create(row.partner_id, row.phone10, source_file,
                                            row.to_dict())
 
-        if link.status in ("done", "waiting_owner"):
-            return link                            # уже разобрано или ждём ответа
+        if link.status in ("done", "waiting_owner", "manual"):
+            return link                    # разобрано, ждём ответа или отдано владельцу
 
         if not row.phone10:
             return await self._ask_owner(row, "в строке отчёта не разобрал телефон")

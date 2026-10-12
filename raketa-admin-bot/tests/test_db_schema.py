@@ -846,6 +846,53 @@ async def test_release_of_an_unknown_letter_changes_nothing(pool):
     assert await db.letter_state(pool, "нет такого") is None
 
 
+async def test_letter_report_tracking(pool):
+    """Итог письма: заказы запоминаются один раз, итог отмечается (ТЗ 2026-10-12)."""
+    await db.track_carpet_letter(pool, "51", "отчёт с 05.10 по 11.10",
+                                 [45199, 45257], [45257])
+    await db.remember_letter(pool, "51", "отчёт с 05.10 по 11.10",
+                             ["Договоры.xlsx"], rows_total=2)
+    await db.track_carpet_letter(pool, "51", "другая тема", [1], [])   # повтор не меняет
+
+    assert await db.letter_state(pool, "51") == "processed"
+    assert await db.carpet_letters_to_report(pool) == [
+        {"uid": "51", "subject": "отчёт с 05.10 по 11.10",
+         "partner_ids": [45199, 45257], "refused_ids": [45257]}]
+
+    await db.mark_carpet_letter_reported(pool, "51")
+    assert await db.carpet_letters_to_report(pool) == []
+
+
+async def test_remember_after_track_keeps_letter_details(pool):
+    """`track_letter` идёт первым — `remember_letter` дописывает файлы и число строк."""
+    await db.track_carpet_letter(pool, "52", "отчёт", [1], [])
+    await db.remember_letter(pool, "52", "отчёт", ["Договоры.xlsx"], rows_total=1)
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT files, rows_total FROM adminbot.carpet_letters WHERE uid = '52'")
+    assert list(row["files"]) == ["Договоры.xlsx"] and row["rows_total"] == 1
+
+
+async def test_letters_without_partner_ids_get_no_report(pool):
+    """Письма до миграции 021 (без списка заказов) итога не получают."""
+    await db.remember_letter(pool, "17", "отчёт с 17.08 по 23.08",
+                             ["Договоры (11).xlsx"], rows_total=4)
+    assert await db.carpet_letters_to_report(pool) == []
+
+
+async def test_carpet_links_by_ids_and_stuck_since(pool):
+    await db.create_carpet_link(pool, 1, "9601945325")
+    await db.create_carpet_link(pool, 2, "9601945325")
+    moment = datetime(2026, 10, 12, 9, 0, tzinfo=timezone.utc)
+    await db.update_carpet_link(pool, 2, status="manual", stuck_since=moment)
+
+    links = await db.fetch_carpet_links_by_ids(pool, [2, 3])
+    assert [(link.partner_id, link.status, link.stuck_since) for link in links] == [
+        (2, "manual", moment)]
+    assert await db.fetch_carpet_links_by_ids(pool, []) == []
+
+
 # --- календарь (этап 2) ---
 
 

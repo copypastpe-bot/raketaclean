@@ -196,6 +196,19 @@ async def test_second_run_of_the_same_row_does_nothing():
     assert len(amo.calls) == calls_after_first
 
 
+async def test_row_handed_to_owner_is_left_alone():
+    """«Сделай руками»: заказ отдан владельцу, робот его больше не трогает (ТЗ 2026-10-12)."""
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    open_carpet_lead(amo)
+    await store.create(44426, "9601945325")
+    await store.update(44426, status="manual")
+
+    link = await make_engine(amo, store).process_row(row())
+
+    assert link.status == "manual"
+    assert amo.calls == []
+
+
 # --- вопросы владельцу ---
 
 async def test_two_open_deals_wait_for_the_owner():

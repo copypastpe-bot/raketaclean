@@ -87,7 +87,7 @@ class CarpetLink:
 
     partner_id: int
     phone10: str
-    status: str                       # new|in_progress|waiting_owner|waiting_salesbot|done|error
+    status: str                       # new|in_progress|waiting_owner|waiting_salesbot|done|error|manual
     # Как ведём заказ: сделка уже есть (None), через лид первичной («primary»)
     # или цепочкой с нуля («scratch»).
     path: Optional[str] = None
@@ -98,6 +98,9 @@ class CarpetLink:
     question_msg_id: Optional[int] = None
     last_error: Optional[str] = None
     source_file: Optional[str] = None       # из какого вложения пришла строка
+    # С какого момента строка не может сдвинуться (ошибка CRM, сбой разбора). Три часа
+    # подряд — робот отдаёт заказ владельцу, статус `manual` (ТЗ 2026-10-12).
+    stuck_since: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
