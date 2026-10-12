@@ -494,6 +494,23 @@ async def test_interrupted_chain_continues_from_where_it_stopped():
     assert len(amo.calls_of("create_lead")) == leads_created
 
 
+async def test_crm_failure_while_choosing_a_deal_retries_the_choice():
+    """Сбой амо на поиске сделок: повтор снова выбирает сделку, а не пишет в пустоту
+    (найдено 12.10.2026 при подготовке ТЗ итогов)."""
+    amo, store = FakeAmo(), MemoryCarpetStore()
+    lead_id = open_carpet_lead(amo)
+    engine = make_engine(amo, store)
+
+    amo.fail_on = "find_leads_by_phone"
+    assert (await engine.process_row(row())).status == "error"
+
+    amo.fail_on = None
+    link = await engine.process_row(row())
+
+    assert link.status == "done" and link.lead_id == lead_id
+    assert [lead for lead, _ in amo.calls_of("update_lead")] == [lead_id]
+
+
 # --- поля, добавленные по итогам первой боевой сверки (2026-08-26) ---
 
 async def test_order_datetime_is_the_pickup_day():

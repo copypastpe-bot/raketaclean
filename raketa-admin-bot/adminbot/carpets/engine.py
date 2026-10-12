@@ -118,7 +118,13 @@ class CarpetEngine:
             return await self._ask_owner(row, "в строке отчёта не разобрал телефон")
 
         try:
-            if not link.checklist and link.lead_id is None and link.status == "new":
+            # Решение ещё не принято — принимаем. `error` без пути и сделок — сбой амо
+            # случился на самом выборе (поиск по телефону): без этой ветки повтор
+            # шёл заполнять несуществующую сделку (найдено 12.10.2026).
+            undecided = (link.lead_id is None and link.primary_lead_id is None
+                         and link.path is None)
+            if not link.checklist and link.lead_id is None and (
+                    link.status == "new" or (link.status == "error" and undecided)):
                 link = await self._decide(row, link)
                 if link.status in ("waiting_owner", "done"):
                     return link
