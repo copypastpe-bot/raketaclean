@@ -378,6 +378,8 @@ async def fetch_carpet_links_by_ids(own_pool: asyncpg.Pool,
 
 ### Задача 2: тексты итога и «сделайте руками»
 
+Выполнено: 3c84f9b
+
 **Файлы:**
 - Изменить: `raketa-admin-bot/adminbot/carpets/watcher.py` (константа и класс итога, без логики)
 - Изменить: `raketa-admin-bot/adminbot/tg/cards.py` (+ `cards.py.map.md`)
@@ -391,7 +393,7 @@ async def fetch_carpet_links_by_ids(own_pool: asyncpg.Pool,
 - `carpet_report_text` остаётся как есть — им пользуется `/carpets` (снимок прохода);
   в докстринг: «Снимок одного прохода — для команды /carpets».
 
-- [ ] **Шаг 1: падающие тесты** — в `tests/test_cards.py` рядом с ковровыми:
+- [x] **Шаг 1: падающие тесты** — в `tests/test_cards.py` рядом с ковровыми:
 
 ```python
 def test_carpet_letter_text_when_all_is_done():
@@ -472,9 +474,9 @@ def test_carpet_manual_text_without_deal_and_error():
   и `carpet_manual_text(carpet_row(), CarpetLink(partner_id=1, phone10="1", status="manual"), hours=3, dry_run=True)`
   начинаются с `"🎭 РЕПЕТИЦИЯ"`.
 
-- [ ] **Шаг 2: прогнать — должны упасть** (`ImportError`).
+- [x] **Шаг 2: прогнать — должны упасть** (`ImportError`).
 
-- [ ] **Шаг 3: константа и класс итога** — `adminbot/carpets/watcher.py`, после `ACTIVE_STATUSES`:
+- [x] **Шаг 3: константа и класс итога** — `adminbot/carpets/watcher.py`, после `ACTIVE_STATUSES`:
 
 ```python
 # Сколько строка может стоять без пройденного шага (ошибка CRM, сбой разбора), прежде
@@ -500,7 +502,7 @@ class CarpetLetterSummary:
         return not (self.waiting_owner or self.manual)
 ```
 
-- [ ] **Шаг 4: тексты** — `adminbot/tg/cards.py`. Вынести общую часть шапки
+- [x] **Шаг 4: тексты** — `adminbot/tg/cards.py`. Вынести общую часть шапки
   карточки-вопроса в помощник и использовать его в `carpet_question_card`
   (поведение карточки не меняется — её тесты это сторожат):
 
@@ -560,9 +562,9 @@ def carpet_manual_text(row: Any, link: Any, *, hours: int, base_url: Optional[st
     return mark_rehearsal("\n".join(lines), dry_run)
 ```
 
-- [ ] **Шаг 5: прогнать точечно** — `tests/test_cards.py` зелёный целиком.
-- [ ] **Шаг 6: карта** `adminbot/tg/cards.py.map.md`.
-- [ ] **Шаг 7: полный прогон и коммит** — `watcher.py`, `cards.py`, `cards.py.map.md`,
+- [x] **Шаг 5: прогнать точечно** — `tests/test_cards.py` зелёный целиком.
+- [x] **Шаг 6: карта** `adminbot/tg/cards.py.map.md`.
+- [x] **Шаг 7: полный прогон и коммит** — `watcher.py`, `cards.py`, `cards.py.map.md`,
   `tests/test_cards.py`. Сообщение: `Ковры: тексты итога письма и «сделайте руками» (ТЗ 2026-10-12, задача 2)`.
 
 ---
