@@ -571,6 +571,8 @@ def carpet_manual_text(row: Any, link: Any, *, hours: int, base_url: Optional[st
 
 ### Задача 3: наблюдатель — итог после доведения, отсчёт трёх часов, подключение
 
+Выполнено: 27204b0
+
 **Файлы:**
 - Изменить: `raketa-admin-bot/adminbot/carpets/watcher.py`
 - Изменить: `raketa-admin-bot/adminbot/main.py` (+ `main.py.map.md`)
@@ -616,7 +618,7 @@ def carpet_manual_text(row: Any, link: Any, *, hours: int, base_url: Optional[st
 4. `tick()` под `asyncio.Lock`: `/carpets` и фоновый цикл не идут одновременно, итог и
    «сделайте руками» не уходят дважды.
 
-- [ ] **Шаг 1: двойники** — в `tests/test_carpet_watcher.py`:
+- [x] **Шаг 1: двойники** — в `tests/test_carpet_watcher.py`:
   - `FakeStore`: методы `get`, `update_and_log` (пишет в `self.logged` кортеж
     `(partner_id, action, payload)` и зовёт `update`), `track_letter`, `letters_to_report`,
     `mark_letter_reported`, `links_by_ids` — с той же логикой, что у `MemoryCarpetStore`
@@ -649,7 +651,7 @@ class Clock:
         self.moment += timedelta(**delta)
 ```
 
-- [ ] **Шаг 2: падающие тесты** — тест `test_report_counts_outcomes` удалить (контракт
+- [x] **Шаг 2: падающие тесты** — тест `test_report_counts_outcomes` удалить (контракт
   `on_report` поменялся) и добавить:
 
 ```python
@@ -831,9 +833,9 @@ async def test_concurrent_ticks_send_one_report():
   Строка-отказ `row(43986, is_refusal=True)` проходит `rows_to_process`: `is_ours`
   по умолчанию `True` (`adminbot/carpets/report.py`).
 
-- [ ] **Шаг 3: прогнать — должны упасть.**
+- [x] **Шаг 3: прогнать — должны упасть.**
 
-- [ ] **Шаг 4: наблюдатель** — `adminbot/carpets/watcher.py` по разделу «Поведение».
+- [x] **Шаг 4: наблюдатель** — `adminbot/carpets/watcher.py` по разделу «Поведение».
   Опорный код (подогнать к файлу; имена — как здесь, их ждут тесты):
 
 ```python
@@ -893,7 +895,7 @@ def summarize_letter(letter: dict, links: list[CarpetLink]) -> Optional[CarpetLe
   В ветке исключения `link` для `_note_trouble` — из `await self.store.get(partner_id)`
   в своём `try/except` (база недоступна — записать в журнал и вернуть `None`).
 
-- [ ] **Шаг 5: подключение** — `adminbot/main.py`:
+- [x] **Шаг 5: подключение** — `adminbot/main.py`:
   - `MAIL_CARPET_MANUAL = "carpet_manual"` рядом с `MAIL_CARPET_*`;
   - импорт `carpet_letter_text`, `carpet_manual_text` из `adminbot.tg.cards` и
     `MANUAL_AFTER_SEC` из `adminbot.carpets.watcher`;
@@ -921,12 +923,12 @@ def _make_carpet_manual_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool
 
   - `_build_carpets`: `on_manual=_make_carpet_manual_sender(mail, settings.amo_base_url, dry_run=settings.carpets_dry_run)`.
 
-- [ ] **Шаг 6: прогнать точечно** — `tests/test_carpet_watcher.py` целиком зелёный
+- [x] **Шаг 6: прогнать точечно** — `tests/test_carpet_watcher.py` целиком зелёный
   (старые тесты наблюдателя тоже).
-- [ ] **Шаг 7: докстринг модуля** `watcher.py` — правило 3 дополнить: итог письма уходит,
+- [x] **Шаг 7: докстринг модуля** `watcher.py` — правило 3 дополнить: итог письма уходит,
   когда у всех его строк есть судьба; строка без продвижения три часа уходит владельцу.
-- [ ] **Шаг 8: карта** `adminbot/main.py.map.md` (новый отправитель, сдвиг номеров).
-- [ ] **Шаг 9: полный прогон и коммит** — `watcher.py`, `main.py`, `main.py.map.md`,
+- [x] **Шаг 8: карта** `adminbot/main.py.map.md` (новый отправитель, сдвиг номеров).
+- [x] **Шаг 9: полный прогон и коммит** — `watcher.py`, `main.py`, `main.py.map.md`,
   `tests/test_carpet_watcher.py`. Сообщение: `Ковры: итог письма после доведения, «сделайте руками» через 3 часа (ТЗ 2026-10-12, задача 3)`.
 
 ---
