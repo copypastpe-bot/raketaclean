@@ -46,7 +46,7 @@ from adminbot.gcal.engine import CalendarEngine
 from adminbot.gcal.store import MemoryCalendarStore, PgCalendarStore
 from adminbot.gcal.watcher import CalendarWatcher
 from adminbot.carpets.store import MemoryCarpetStore, PgCarpetStore
-from adminbot.carpets.watcher import CarpetWatcher
+from adminbot.carpets.watcher import MANUAL_AFTER_SEC, CarpetWatcher
 from adminbot.control import PgControlPanel, sync_allowed
 from adminbot.feedback.store import PgFeedbackSource, PgFeedbackStore
 from adminbot.feedback.sync import FeedbackSync
@@ -75,9 +75,9 @@ from adminbot.tg.calendar_cards import (
     done_text, no_realization_text, rehearsal_text, updated_text)
 from adminbot.tg.cards import (
     ADDR_PREFIX, CLEANING_ADDR_PREFIX, CLEANING_CHOICE_PREFIX, address_missing_card,
-    carpet_held_text, carpet_question_card, carpet_report_text, mark_rehearsal,
-    order_done_text, question_card, summary_text, wire_payment_synced_text,
-    wire_payment_unlinked_text)
+    carpet_held_text, carpet_letter_text, carpet_manual_text, carpet_question_card,
+    mark_rehearsal, order_done_text, question_card, summary_text,
+    wire_payment_synced_text, wire_payment_unlinked_text)
 from adminbot.tg.feedback_cards import (
     failure_text as feedback_failure_text, rehearsal_text as feedback_rehearsal_text)
 from adminbot.tg.promo_cards import (
@@ -107,6 +107,7 @@ MAIL_GCAL_NO_DEAL = "gcal_no_deal"
 MAIL_CARPET_QUESTION = "carpet_question"
 MAIL_CARPET_REPORT = "carpet_report"
 MAIL_CARPET_HELD = "carpet_held"
+MAIL_CARPET_MANUAL = "carpet_manual"
 MAIL_ADDRESS_REMINDER = "address_reminder"
 MAIL_CLEANING_ADDRESS_REMINDER = "cleaning_address_reminder"
 MAIL_GCAL_CONTACT_MISMATCH = "gcal_contact_mismatch"
@@ -801,6 +802,8 @@ def _build_carpets(settings: Settings, own_pool: Any, mail: OwnerMail,
                                                  dry_run=settings.carpets_dry_run),
         on_report=_make_carpet_report_sender(mail, dry_run=settings.carpets_dry_run),
         on_held=_make_carpet_hold_sender(mail, dry_run=settings.carpets_dry_run),
+        on_manual=_make_carpet_manual_sender(mail, settings.amo_base_url,
+                                             dry_run=settings.carpets_dry_run),
         dry_run=settings.carpets_dry_run,
     )
     log.info("Ковры: включены, режим %s, почта %s/%s",
@@ -1309,9 +1312,19 @@ def _make_carpet_question_sender(mail: OwnerMail, amo_base_url: str, dry_run: bo
 
 
 def _make_carpet_report_sender(mail: OwnerMail, dry_run: bool = False):
-    async def send(letter, report) -> None:
-        await mail.send(carpet_report_text(letter.subject, report, dry_run=dry_run),
-                        kind=MAIL_CARPET_REPORT)
+    """Итог письма партнёра — один раз, когда у каждой строки есть судьба."""
+    async def send(summary) -> None:
+        await mail.send(carpet_letter_text(summary, dry_run=dry_run), kind=MAIL_CARPET_REPORT)
+
+    return send
+
+
+def _make_carpet_manual_sender(mail: OwnerMail, amo_base_url: str, dry_run: bool = False):
+    """Заказ отдан владельцу «сделать руками»: робот три часа не мог его сдвинуть."""
+    async def send(row, link) -> None:
+        await mail.send(carpet_manual_text(row, link, hours=MANUAL_AFTER_SEC // 3600,
+                                           base_url=amo_base_url, dry_run=dry_run),
+                        kind=MAIL_CARPET_MANUAL, ref=row.partner_id)
 
     return send
 

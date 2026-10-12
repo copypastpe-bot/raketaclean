@@ -6,11 +6,12 @@
 """
 
 import asyncio
-from datetime import date
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from adminbot.carpets.report import CarpetRow
-from adminbot.carpets.watcher import CarpetWatcher
+from adminbot.carpets.watcher import ACTIVE_STATUSES, CarpetLetterSummary, CarpetWatcher
 from adminbot.mail import Letter
 from adminbot.models import CarpetLink
 
@@ -45,6 +46,9 @@ class FakeEngine:
         self.results = results or {}
         self.processed: list[int] = []
         self.raise_on: set[int] = set()
+        # Поля, которые строка получит на ближайшем process_row: так двойник «проходит
+        # шаг» или «доводит строку» во время прохода, а не до него.
+        self.next_run: dict[int, dict] = {}
         self.store = FakeStore()
 
     async def process_row(self, row, source_file=None):
@@ -55,6 +59,9 @@ class FakeEngine:
         # у неё, например, записан id отправленной карточки.
         known = self.store.links.get(row.partner_id)
         if known is not None:
+            if row.partner_id in self.next_run:
+                known = replace(known, **self.next_run.pop(row.partner_id))
+                self.store.links[row.partner_id] = known
             return known
         link = self.results.get(row.partner_id) or CarpetLink(
             partner_id=row.partner_id, phone10=row.phone10 or "", status="done")
@@ -69,11 +76,20 @@ class FakeStore:
         self.held: dict[str, tuple] = {}
         self.released: list[str] = []
         self.pending: list[tuple[CarpetRow, CarpetLink]] = []
+        self.logged: list[tuple] = []
+        self.reports: dict[str, dict] = {}    # итог письма: uid → заказы и отметка
+
+    async def get(self, partner_id):
+        return self.links.get(partner_id)
 
     async def update(self, partner_id, **fields):
         from dataclasses import replace
         self.links[partner_id] = replace(self.links[partner_id], **fields)
         return self.links[partner_id]
+
+    async def update_and_log(self, partner_id, *, action, dry_run, payload=None, **fields):
+        self.logged.append((partner_id, action, payload))
+        return await self.update(partner_id, **fields)
 
     async def letter_state(self, uid):
         # Порядок проверок — как в MemoryCarpetStore.letter_state (задача 4, 16.09):
@@ -100,7 +116,42 @@ class FakeStore:
         self.released.append(uid)
 
     async def pending_rows(self):
-        return list(self.pending)
+        # Как боевое хранилище: строка — в её нынешнем виде и только незавершённая.
+        rows = []
+        for row_, link in self.pending:
+            current = self.links.get(row_.partner_id, link)
+            if current.status in ACTIVE_STATUSES:
+                rows.append((row_, current))
+        return rows
+
+    # Итог письма — та же логика, что у MemoryCarpetStore (задача 1).
+
+    async def track_letter(self, uid, subject, partner_ids, refused_ids) -> None:
+        self.reports.setdefault(uid, {"uid": uid, "subject": subject,
+                                      "partner_ids": list(partner_ids),
+                                      "refused_ids": list(refused_ids), "reported": False})
+
+    async def letters_to_report(self):
+        return [{key: value for key, value in item.items() if key != "reported"}
+                for item in self.reports.values() if not item["reported"]]
+
+    async def mark_letter_reported(self, uid) -> None:
+        if uid in self.reports:
+            self.reports[uid]["reported"] = True
+
+    async def links_by_ids(self, partner_ids):
+        return [self.links[pid] for pid in partner_ids if pid in self.links]
+
+
+class Clock:
+    def __init__(self):
+        self.moment = datetime(2026, 10, 12, 9, 0, tzinfo=timezone.utc)
+
+    def __call__(self):
+        return self.moment
+
+    def advance(self, **delta):
+        self.moment += timedelta(**delta)
 
 
 def letter(uid="1", subject="отчёт с 17.08 по 23.08") -> Letter:
@@ -332,25 +383,177 @@ async def test_question_is_asked_once():
 
 # --- отчёт владельцу ---
 
-async def test_report_counts_outcomes():
+async def test_report_waits_until_every_row_is_settled():
+    """Итог не уходит, пока сейлзбот не завёл сделку (письмо 11.10: «0 из 2»)."""
+    mailbox = FakeMailBox([letter(subject="отчёт с 05.10 по 11.10")])
+    engine = FakeEngine({
+        45199: CarpetLink(partner_id=45199, phone10="1", status="done"),
+        45257: CarpetLink(partner_id=45257, phone10="2", status="waiting_salesbot"),
+    })
+    reports = []
+
+    async def on_report(summary):
+        reports.append(summary)
+
+    watcher = make_watcher(mailbox, engine, on_report=on_report,
+                           rows=[row(45199), row(45257)])
+    await watcher.tick()
+    assert reports == []                                   # сейлзбот ещё думает
+
+    engine.next_run[45257] = {"status": "done"}           # сейлзбот завёл, робот довёл
+    engine.store.pending = [(row(45257), engine.store.links[45257])]
+    await watcher.tick()
+    await watcher.tick()                                   # и второй раз не повторяет
+
+    assert reports == [CarpetLetterSummary(uid="1", subject="отчёт с 05.10 по 11.10",
+                                           delivered=2)]
+
+
+async def test_report_does_not_wait_for_owner_answers():
+    """Карточка без ответа — не повод держать итог (решение 2), отказ — своей строкой."""
     mailbox = FakeMailBox([letter()])
     engine = FakeEngine({
         44426: CarpetLink(partner_id=44426, phone10="1", status="done"),
         44535: CarpetLink(partner_id=44535, phone10="2", status="waiting_owner"),
-        44345: CarpetLink(partner_id=44345, phone10="3", status="waiting_salesbot"),
+        43986: CarpetLink(partner_id=43986, phone10="3", status="done"),
     })
     reports = []
 
-    async def on_report(letter_, report):
-        reports.append((letter_.subject, report))
+    async def on_report(summary):
+        reports.append(summary)
 
-    watcher = make_watcher(mailbox, engine, on_report=on_report,
-                           rows=[row(44426), row(44535), row(44345)])
+    rows = [row(44426), row(44535), row(43986, is_refusal=True)]
+    await make_watcher(mailbox, engine, on_report=on_report, rows=rows).tick()
+
+    assert reports == [CarpetLetterSummary(uid="1", subject="отчёт с 17.08 по 23.08",
+                                           delivered=1, refused=1, waiting_owner=1)]
+
+
+async def test_stuck_row_is_handed_to_owner_after_three_hours():
+    clock = Clock()
+    mailbox = FakeMailBox([letter()])
+    engine = FakeEngine({44426: CarpetLink(partner_id=44426, phone10="9601945325",
+                                           status="error", last_error="AmoError: 500")})
+    reports, manual = [], []
+
+    async def on_report(summary):
+        reports.append(summary)
+
+    async def on_manual(row_, link):
+        manual.append((row_.partner_id, link.status))
+
+    watcher = make_watcher(mailbox, engine, on_report=on_report, on_manual=on_manual,
+                           now=clock)
+    await watcher.tick()
+    assert engine.store.links[44426].stuck_since == clock.moment
+
+    engine.store.pending = [(row(), engine.store.links[44426])]
+    clock.advance(hours=2, minutes=59)
+    await watcher.tick()
+    assert manual == [] and reports == []
+
+    clock.advance(minutes=1)
+    await watcher.tick()
+    await watcher.tick()                                   # повторно не пишет
+
+    assert manual == [(44426, "manual")]
+    assert engine.store.links[44426].status == "manual"
+    assert engine.store.logged[0][:2] == (44426, "manual_handoff")
+    assert reports == [CarpetLetterSummary(uid="1", subject="отчёт с 17.08 по 23.08",
+                                           manual=1)]
+
+
+async def test_passed_step_restarts_the_clock():
+    """Любой пройденный шаг — отсчёт заново (решение 5)."""
+    clock = Clock()
+    engine = FakeEngine({44426: CarpetLink(partner_id=44426, phone10="1", status="error",
+                                           checklist={"fill_carpet_lead": "t"})})
+    watcher = make_watcher(FakeMailBox([letter()]), engine, now=clock)
     await watcher.tick()
 
-    subject, report = reports[0]
-    assert subject == "отчёт с 17.08 по 23.08"
-    assert report.by_status == {"done": 1, "waiting_owner": 1, "waiting_salesbot": 1}
+    clock.advance(hours=2)
+    engine.next_run[44426] = {"checklist": {"fill_carpet_lead": "t",
+                                            "move_carpet_delivered": "t"}}
+    engine.store.pending = [(row(), engine.store.links[44426])]
+    await watcher.tick()
+    assert engine.store.links[44426].stuck_since == clock.moment
+
+    clock.advance(hours=2)
+    await watcher.tick()
+    assert engine.store.links[44426].status == "error"     # с перезапуска прошло два часа
+
+
+async def test_recovered_row_forgets_the_clock():
+    clock = Clock()
+    engine = FakeEngine({44426: CarpetLink(partner_id=44426, phone10="1", status="error")})
+    watcher = make_watcher(FakeMailBox([letter()]), engine, now=clock)
+    await watcher.tick()
+
+    engine.next_run[44426] = {"status": "done"}           # амо ожила, строка доведена
+    engine.store.pending = [(row(), engine.store.links[44426])]
+    await watcher.tick()
+
+    assert engine.store.links[44426].stuck_since is None
+
+
+async def test_crashing_row_is_handed_over_and_the_letter_completes():
+    """Исключение не-амо: раньше письмо крутилось молча вечно, теперь — три часа."""
+    clock = Clock()
+    mailbox = FakeMailBox([letter()])
+    engine = FakeEngine()
+    engine.store.links[44426] = CarpetLink(partner_id=44426, phone10="1",
+                                           status="in_progress")
+    engine.raise_on = {44426}
+    reports, manual = [], []
+
+    async def on_report(summary):
+        reports.append(summary)
+
+    async def on_manual(row_, link):
+        manual.append(row_.partner_id)
+
+    watcher = make_watcher(mailbox, engine, on_report=on_report, on_manual=on_manual,
+                           now=clock)
+    first = await watcher.tick()
+    assert first.failures and mailbox.seen == []
+    assert engine.store.links[44426].last_error == "RuntimeError: амо не отвечает"
+
+    clock.advance(hours=3)
+    await watcher.tick()
+
+    assert manual == [44426]
+    assert mailbox.seen == ["1"]                           # письмо больше не держит
+    assert reports == [CarpetLetterSummary(uid="1", subject="отчёт с 17.08 по 23.08",
+                                           manual=1)]
+
+
+async def test_rehearsal_reports_once_and_leaves_the_letter_unread():
+    mailbox, engine = FakeMailBox([letter()]), FakeEngine()
+    reports = []
+
+    async def on_report(summary):
+        reports.append(summary)
+
+    watcher = make_watcher(mailbox, engine, on_report=on_report, dry_run=True)
+    await watcher.tick()
+    await watcher.tick()
+
+    assert len(reports) == 1
+    assert mailbox.seen == [] and engine.store.remembered == []
+
+
+async def test_concurrent_ticks_send_one_report():
+    """/carpets во время фонового прохода не удваивает итог."""
+    mailbox, engine = FakeMailBox([letter()]), FakeEngine()
+    reports = []
+
+    async def on_report(summary):
+        reports.append(summary)
+
+    watcher = make_watcher(mailbox, engine, on_report=on_report)
+    await asyncio.gather(watcher.tick(), watcher.tick())
+
+    assert len(reports) == 1
 
 
 # --- цикл ---
