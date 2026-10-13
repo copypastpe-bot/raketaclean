@@ -790,6 +790,71 @@ class RescheduleWatchTests(_RescheduleDbCase):
         self.assertEqual((await self._row_of(late_lead))["order_at"], passed)
         self.assertEqual(len(await self._journal()), 1, "второй раз переставлять нечего")
 
+    async def test_first_pass_is_repeated_until_it_goes_clean(self):
+        """Правка 2 ревью 13.10: первый проход «на 30 дней» засчитывается, только
+        если прошёл чисто. Сбой CRM (429 клиент amo не повторяет) на заказе
+        с прошедшей сохранённой датой — и раньше этот заказ не проверился бы
+        больше никогда (живой случай 31703481, сохранена 11.10)."""
+        self.old_at = self.now - timedelta(days=20)
+        await self._pending(status="owner_notified", sent=True, letter_status="sent")
+        self.amo[DEAL_ID] = AmoCRMAPIError(429, "слишком часто")
+        self.amo[LEAD_ID] = _lead()
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertFalse(bot._reschedule_watch_first_pass_done)
+        self.assertEqual((await self._row())["order_at"], self.old_at)
+
+        # CRM ожила — второй проход снова смотрит на 30 дней и подхватывает заказ.
+        self._crm(_deal(order_at=self.new_at))
+        self.amo_calls.clear()
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertIn(DEAL_ID, self.amo_calls)
+        row = await self._row()
+        self.assertEqual(row["order_at"], self.new_at)
+        self.assertEqual(row["status"], "planned")
+        self.assertTrue(bot._reschedule_watch_first_pass_done)
+
+        # Прошёл чисто — дальше обычная глубина: давний заказ не смотрим.
+        (old_lead, old_deal) = EXTRA[0]
+        await self._other(old_lead, old_deal, order_at=self.now - timedelta(days=20),
+                          status="owner_notified", sent=True)
+        self.amo[old_deal] = _deal_for(old_deal, order_at=self.new_at)
+        self.amo_calls.clear()
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertNotIn(old_deal, self.amo_calls)
+
+    async def test_first_pass_that_hit_the_limit_is_repeated(self):
+        """Выборка упёрлась в лимит — дальние заказы не сверены, проход не чистый."""
+        for lead_id, deal_id in EXTRA[:2]:
+            await self._other(lead_id, deal_id, order_at=self.now + timedelta(days=3))
+            self.amo[deal_id] = _deal_for(deal_id, order_at=self.now + timedelta(days=3))
+
+        with mock.patch.object(bot, "RESCHEDULE_WATCH_LIMIT", 2):
+            await bot.run_confirmation_reschedule_watch()
+        self.assertFalse(bot._reschedule_watch_first_pass_done)
+
+        with mock.patch.object(bot, "RESCHEDULE_WATCH_LIMIT", 3):
+            await bot.run_confirmation_reschedule_watch()
+        self.assertTrue(bot._reschedule_watch_first_pass_done)
+
+    async def test_first_pass_with_a_busy_letter_is_repeated(self):
+        """Письмо в отправке — пересчёт отложен (`busy`), обход обещал повторить.
+        Засчитай первый проход — заказ с прошедшей датой больше не сверялся бы."""
+        old_id = await self._pending()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE notification_outbox SET status='sending' WHERE id=$1", old_id)
+        self._crm(_deal(order_at=self.new_at))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertFalse(bot._reschedule_watch_first_pass_done)
+
     async def test_rehearsal_only_logs(self):
         """Репетиция: строка в логе, в базу и очередь — ничего."""
         old_id = await self._pending()

@@ -2445,6 +2445,11 @@ RESCHEDULE_FIRST_PASS_DEPTH = timedelta(days=30)
 # на раннюю дату прошёл бы мимо. Поэтому лимит — потолок с запасом над всеми
 # заказами впереди, а упёрлись в него — предупреждение в лог.
 RESCHEDULE_WATCH_LIMIT = 200
+# Чем кончаются заказы, которые проход не досмотрел: CRM не ответила, разбор
+# упал, письмо было в отправке. Такой первый проход не засчитывается — иначе
+# заказ с прошедшей сохранённой датой не проверился бы больше никогда
+# (ревью 13.10, правка 2: 429 от amo клиент не повторяет).
+RESCHEDULE_UNFINISHED = frozenset({"crm_silent", "error", "busy"})
 _reschedule_watch_first_pass_done = False
 
 
@@ -2549,7 +2554,8 @@ async def run_confirmation_reschedule_watch() -> None:
             datetime.now(timezone.utc) - depth,
             RESCHEDULE_WATCH_LIMIT,
         )
-    if len(rows) >= RESCHEDULE_WATCH_LIMIT:
+    hit_limit = len(rows) >= RESCHEDULE_WATCH_LIMIT
+    if hit_limit:
         logger.warning("Перенос заказа: выборка упёрлась в лимит %s — "
                        "дальние заказы в этот проход не сверены",
                        RESCHEDULE_WATCH_LIMIT)
@@ -2565,7 +2571,10 @@ async def run_confirmation_reschedule_watch() -> None:
                                      row["deal_id"], exc)
                     outcome = "error"
                 counters[outcome] = counters.get(outcome, 0) + 1
-    _reschedule_watch_first_pass_done = True
+    # Первый проход засчитывается, только если прошёл чисто; иначе следующий
+    # снова смотрит на всю первую глубину.
+    if not hit_limit and not RESCHEDULE_UNFINISHED.intersection(counters):
+        _reschedule_watch_first_pass_done = True
 
     if any(key not in ("none", "skip") for key in counters):
         logger.info("Перенос заказа: %s", counters)
