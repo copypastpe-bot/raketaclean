@@ -1924,7 +1924,9 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
     правило `decide_on_reschedule` — здесь, под блокировкой строки ожидания:
     проверка перед отправкой и обход могут прийти к одному заказу одновременно,
     и второй не должен поставить второе письмо. Возвращает сделанное: `none`,
-    `replan`, `reask`, `update_time` или `busy` (ничего не сделано, повторить).
+    `replan`, `reask`, `update_time`, `drop` (новая дата уже прошла — вопрос,
+    ждавший очереди, снят, ожидание закрыто) или `busy` (ничего не сделано,
+    повторить).
 
     Всё одной транзакцией: старое письмо отменено, новое поставлено, строка
     переписана, след в журнале — либо всё, либо ничего.
@@ -1978,9 +1980,15 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
             return "busy"
         action = decide_on_reschedule(
             saved_order_at=row["order_at"], deal_order_at=order.order_at,
-            asked_sent_at=row["asked_sent_at"], now=now, tz=MOSCOW_TZ)
+            asked_sent_at=row["asked_sent_at"], status=row["status"],
+            now=now, tz=MOSCOW_TZ)
         if action == "none":
             return action
+        in_hand = bool(old_outbox_id) and int(old_outbox_id) == in_hand_outbox_id
+        if action == "drop" and not in_hand and letter_status not in ("pending", "sending"):
+            # Новая дата уже прошла, а вопроса в очереди нет (не было, отменён,
+            # сгорел): снимать нечего, строку не трогаем (правка 5).
+            return "none"
 
         new_at = order.order_at
         asked_at = row["asked_at"]
@@ -1998,12 +2006,12 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
                 new_at,
             )
         else:
-            if old_outbox_id and int(old_outbox_id) != in_hand_outbox_id:
+            if old_outbox_id and not in_hand:
                 if letter_status == "sending":
                     return "busy"
                 cancelled = await cancel_pending_outbox(
                     conn, int(old_outbox_id), _confirmation_moved_to(new_at))
-                if not cancelled:
+                if not cancelled and action == "replan":
                     action = "reask"
             plan = plan_confirmation(order_at=new_at, now=now)
             asked_at = plan.ask_at
@@ -2088,7 +2096,9 @@ async def _confirmation_check_moved(entry: NotificationOutboxEntry,
     Зовётся, когда все прочие проверки уже сказали «можно». Дата в сделке
     другая — письмо в руках у работника очереди спрашивает не о том дне: вопрос
     пересчитывается на новую дату, а это письмо отменяется (решение владельца
-    13.10, п.1). Владельцу не пишем, след — только в журнале (п.3).
+    13.10, п.1). Новая дата уже прошла — письмо тоже отменяется, ожидание
+    закрывается (ревью 13.10, правка 5). Владельцу не пишем, след — только
+    в журнале (п.3).
 
     Пересчитать не вышло (база моргнула) — письмо откладываем, а не шлём:
     вопрос про старую дату и есть та беда, ради которой проверка заведена.
@@ -2097,8 +2107,9 @@ async def _confirmation_check_moved(entry: NotificationOutboxEntry,
     now = datetime.now(timezone.utc)
     action = decide_on_reschedule(
         saved_order_at=pending["order_at"], deal_order_at=deal_order.order_at,
-        asked_sent_at=pending["asked_sent_at"], now=now, tz=MOSCOW_TZ)
-    if action != "replan":
+        asked_sent_at=pending["asked_sent_at"], status=pending["status"],
+        now=now, tz=MOSCOW_TZ)
+    if action not in ("replan", "drop"):
         return PRE_SEND_OK
 
     deal_id = int(pending["deal_id"])
@@ -2160,7 +2171,7 @@ async def _confirmation_before_send(entry: NotificationOutboxEntry) -> PreSendVe
     async with pool.acquire() as conn:
         pending = await conn.fetchrow(
             """
-            SELECT lead_id, deal_id, order_at, asked_sent_at, rescheduled_at
+            SELECT lead_id, deal_id, order_at, asked_sent_at, rescheduled_at, status
             FROM order_confirmations
             WHERE outbox_id = $1
             """,
@@ -2510,7 +2521,8 @@ async def _confirmation_watch_deal(client: AmoCRMAPIClient,
     now = datetime.now(timezone.utc)
     action = decide_on_reschedule(
         saved_order_at=row["order_at"], deal_order_at=deal_order.order_at,
-        asked_sent_at=row["asked_sent_at"], now=now, tz=MOSCOW_TZ)
+        asked_sent_at=row["asked_sent_at"], status=row["status"],
+        now=now, tz=MOSCOW_TZ)
     if action == "none":
         return action
 
@@ -2522,9 +2534,10 @@ async def _confirmation_watch_deal(client: AmoCRMAPIClient,
         return "rehearsal"
 
     order = deal_order
-    if not deal_order.address:
+    if not deal_order.address and action != "drop":
         # Адрес — как при планировании: из сделки, недостающее — из лида.
         # Лид читаем только тогда: заказов за проход много, переносов единицы.
+        # Снятому вопросу (`drop`) нового письма нет — и адрес не нужен.
         try:
             lead: Mapping[str, Any] | None = await client.fetch_lead(int(row["lead_id"]))
         except AmoCRMAPIError as exc:
@@ -2541,8 +2554,11 @@ async def _confirmation_watch_deal(client: AmoCRMAPIClient,
     async with pool.acquire() as conn:
         done = await _confirmation_reschedule(conn, int(row["lead_id"]),
                                               order=order, now=now)
-    logger.info("Разговор с клиентом: перенос: сделка %s, %s → %s, %s",
-                deal_id, was, became, done)
+    if done != "none":
+        # `none` здесь — снимать было нечего (вопрос в очереди не ждал): такая
+        # строка придёт и в следующий проход, лог через каждые 10 минут не нужен.
+        logger.info("Разговор с клиентом: перенос: сделка %s, %s → %s, %s",
+                    deal_id, was, became, done)
     return done
 
 
@@ -2571,7 +2587,7 @@ async def run_confirmation_reschedule_watch() -> None:
         # перенос на следующую неделю вернёт вопрос. Прочие `dropped` — нет.
         rows = await conn.fetch(
             """
-            SELECT lead_id, deal_id, order_at, asked_sent_at
+            SELECT lead_id, deal_id, order_at, asked_sent_at, status
             FROM order_confirmations
             WHERE (status IN ('planned', 'confirmed', 'refused', 'owner_notified')
                    OR (status = 'dropped' AND reschedule_dropped_at IS NOT NULL))

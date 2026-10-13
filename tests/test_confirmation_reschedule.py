@@ -407,6 +407,29 @@ class ReschedulePreSendTests(_RescheduleDbCase):
         new = (await self._letters())[-1]
         self.assertEqual(json.loads(new["payload"])["address"], "ул. Лидовая, 7")
 
+    async def test_new_date_already_passed_cancels_the_question(self):
+        """Правка 5 ревью 13.10: дату в сделке передвинули на уже прошедшее
+        время, а вопрос по старой дате дождался своего часа. Он не уходит:
+        письмо отменено, ожидание закрыто пересчётом, след в журнале."""
+        old_id = await self._pending()
+        past = self.now - timedelta(hours=3)
+        self._crm(_deal(order_at=past))
+
+        await self._run_worker()
+
+        old = await self._letter(old_id)
+        self.assertEqual(old["status"], "cancelled")
+        self.assertEqual(old["last_error"], f"заказ перенесён на {past:%d.%m.%Y %H:%M}")
+        self.assertEqual(len(await self._letters()), 1, "нового письма быть не должно")
+        row = await self._row()
+        self.assertEqual(row["status"], "dropped")
+        self.assertEqual(row["order_at"], past)
+        self.assertIsNone(row["outbox_id"])
+        self.assertIsNone(row["asked_at"])
+        self.assertIsNone(row["rescheduled_at"])
+        self.assertIsNotNone(row["reschedule_dropped_at"])
+        self.assertEqual([r["action"] for r in await self._journal()], ["drop"])
+
     async def test_orphan_question_is_cancelled(self):
         """Правка 1 ревью 13.10: письмо-вопрос, на которое не ссылается ни одно
         ожидание, ни к какому заказу больше не относится — оно не уходит.
@@ -963,6 +986,71 @@ class RescheduleWatchTests(_RescheduleDbCase):
         self.assertEqual(row["outbox_id"], new["id"])
         self.assertEqual(new["status"], "pending")
         self.assertEqual(new["scheduled_at"], self.new_at - ASK_BEFORE)
+
+    async def test_new_date_already_passed_drops_the_waiting_question(self):
+        """Правка 5 ревью 13.10: вопрос ждёт очереди, а дату в сделке передвинули
+        на уже прошедшее время. Обход снимает вопрос заранее: иначе он ушёл бы
+        про старую дату, пока сделка на этапе «Заказ оформлен»."""
+        self.old_at = self.now + timedelta(days=3)
+        old_id = await self._pending()
+        past = self.now - timedelta(hours=3)
+        self._crm(_deal(order_at=past))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertEqual((await self._letter(old_id))["status"], "cancelled")
+        self.assertEqual(len(await self._letters()), 1)
+        row = await self._row()
+        self.assertEqual(row["status"], "dropped")
+        self.assertEqual(row["order_at"], past)
+        self.assertIsNone(row["outbox_id"])
+        self.assertIsNotNone(row["reschedule_dropped_at"])
+        self.assertEqual([r["action"] for r in await self._journal()], ["drop"])
+
+        # Следующий проход: дата та же — ничего; передвинули вперёд — вопрос вернулся.
+        await bot.run_confirmation_reschedule_watch()
+        self.assertEqual(len(await self._journal()), 1)
+
+        self._crm(_deal(order_at=self.new_at))
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual([r["action"] for r in await self._journal()], ["drop", "replan"])
+        self.assertEqual(row["status"], "planned")
+        self.assertEqual(row["asked_at"], self.new_at - ASK_BEFORE)
+
+    async def test_past_new_date_leaves_rows_without_a_waiting_question(self):
+        """Строки без ждущего письма не трогаем: владельца уже позвали
+        (`owner_notified` без вопроса), письма не было вовсе (меньше суток при
+        оформлении) или оно уже отменено."""
+        past = self.now - timedelta(hours=3)
+        self.old_at = self.now + timedelta(days=3)
+        cases = (("owner_notified", "failed"), ("planned", "cancelled"))
+        for status, letter_status in cases:
+            with self.subTest(status=status, letter=letter_status):
+                async with self.pool.acquire() as conn:
+                    await conn.execute("DELETE FROM order_confirmations")
+                await self._pending(status=status, letter_status=letter_status)
+                before = await self._row()
+                self._crm(_deal(order_at=past))
+
+                await bot.run_confirmation_reschedule_watch()
+
+                row = await self._row()
+                for column in ("status", "order_at", "outbox_id",
+                               "reschedule_dropped_at"):
+                    self.assertEqual(row[column], before[column], column)
+        no_letter_lead, no_letter_deal = EXTRA[0]
+        await self._other(no_letter_lead, no_letter_deal, order_at=self.old_at)
+        self.amo[no_letter_deal] = _deal_for(no_letter_deal, order_at=past)
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertIn(no_letter_deal, self.amo_calls)
+        row = await self._row_of(no_letter_lead)
+        self.assertEqual(row["status"], "planned")
+        self.assertEqual(row["order_at"], self.old_at)
+        self.assertEqual(await self._journal(), [])
 
     async def test_dropped_for_other_reasons_is_not_read_even_after_reask(self):
         """Ожидание переносили (`rescheduled_at` стоит), а потом закрыли по

@@ -365,6 +365,7 @@ def may_ask_question(deal: Optional[Mapping[str, Any]], *,
 def decide_on_reschedule(*, saved_order_at: Optional[datetime],
                          deal_order_at: Optional[datetime],
                          asked_sent_at: Optional[datetime],
+                         status: str,
                          now: datetime, tz: tzinfo) -> str:
     """Заказ перенесли? И что тогда делать с вопросом «подтверждаете заказ?».
 
@@ -374,11 +375,15 @@ def decide_on_reschedule(*, saved_order_at: Optional[datetime],
     перенесли на 31.10 (сделка 31703481). Решения владельца 13.10.
 
     `saved_order_at` — дата работы в ожидании, `deal_order_at` — в сделке сейчас,
-    `asked_sent_at` — когда вопрос ушёл клиенту (пусто — ещё не уходил).
-    Ответ — одно из четырёх:
+    `asked_sent_at` — когда вопрос ушёл клиенту (пусто — ещё не уходил),
+    `status` — статус ожидания. Ответ — одно из пяти:
 
-    * `none` — ничего не делать: в сделке нет даты; новая работа уже прошла
-      (спрашивать не о чем); ничего не поменялось;
+    * `none` — ничего не делать: в сделке нет даты; ничего не поменялось;
+      новая работа уже прошла (спрашивать не о чем), а вопрос не ждёт очереди;
+    * `drop` — новая работа уже прошла, а вопрос по старой дате ещё ждёт
+      очереди (`planned`, не уходил): снять его, иначе он уйдёт про старую
+      дату (ревью 13.10, правка 5). Есть ли письмо в очереди на самом деле,
+      проверяет тот, кто снимает;
     * `replan` — вопрос не уходил, а дата или время другие: старый вопрос
       отменить, новый поставить за сутки до новой даты. Время сравниваем тоже —
       в письме стоят и дата, и время;
@@ -390,9 +395,13 @@ def decide_on_reschedule(*, saved_order_at: Optional[datetime],
     День считается по `tz` (Москва): заказ на 23:30 и на 00:30 следующего
     числа — разные дни, хотя в UTC это одна дата.
     """
-    if deal_order_at is None or deal_order_at <= now:
+    if deal_order_at is None:
         return "none"
     if saved_order_at is not None and saved_order_at == deal_order_at:
+        return "none"
+    if deal_order_at <= now:
+        if asked_sent_at is None and status == "planned":
+            return "drop"
         return "none"
     if asked_sent_at is None:
         return "replan"

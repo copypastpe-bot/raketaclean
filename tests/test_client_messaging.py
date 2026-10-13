@@ -819,9 +819,10 @@ class RescheduleRuleTests(unittest.TestCase):
     NOW = datetime(2026, 10, 8, 15, 35, tzinfo=MSK)
     SENT = datetime(2026, 10, 7, 10, 0, tzinfo=MSK)
 
-    def _decide(self, *, saved, deal, sent):
+    def _decide(self, *, saved, deal, sent, status="planned"):
         return decide_on_reschedule(saved_order_at=saved, deal_order_at=deal,
-                                    asked_sent_at=sent, now=self.NOW, tz=MSK)
+                                    asked_sent_at=sent, status=status,
+                                    now=self.NOW, tz=MSK)
 
     def test_table_of_cases(self):
         at = lambda d, h, m=0: datetime(2026, 10, d, h, m, tzinfo=MSK)  # noqa: E731
@@ -836,9 +837,12 @@ class RescheduleRuleTests(unittest.TestCase):
             ("вопрос ушёл, перенос вперёд", at(11, 10), at(31, 10), self.SENT, "reask"),
             ("вопрос ушёл, перенос назад", at(31, 10), at(11, 10), self.SENT, "reask"),
             ("вопрос ушёл, только время", at(11, 10), at(11, 14), self.SENT, "update_time"),
-            ("новая дата в прошлом, вопрос не ушёл", at(11, 10), at(8, 12), None, "none"),
+            # Новая дата в прошлом, вопрос ещё ждёт очереди — снять его
+            # (ревью 13.10, правка 5): иначе он уйдёт про старую дату.
+            ("новая дата в прошлом, вопрос не ушёл", at(11, 10), at(8, 12), None, "drop"),
             ("новая дата в прошлом, вопрос ушёл", at(11, 10), at(8, 12), self.SENT, "none"),
-            ("новое время ровно сейчас", at(11, 10), self.NOW, None, "none"),
+            ("новое время ровно сейчас", at(11, 10), self.NOW, None, "drop"),
+            ("новое время ровно сейчас, вопрос ушёл", at(11, 10), self.NOW, self.SENT, "none"),
             ("в сделке нет даты, вопрос не ушёл", at(11, 10), None, None, "none"),
             ("в сделке нет даты, вопрос ушёл", at(11, 10), None, self.SENT, "none"),
             # Граница суток по Москве: 23:30 → 00:30 следующего дня — это другой
@@ -854,6 +858,31 @@ class RescheduleRuleTests(unittest.TestCase):
             with self.subTest(title):
                 self.assertEqual(self._decide(saved=saved, deal=deal, sent=sent),
                                  expected)
+
+    def test_past_new_date_drops_only_a_waiting_question(self):
+        """Правка 5 ревью 13.10: новая дата уже прошла — снимаем только вопрос,
+        который ещё ждёт отправки (`planned`). Строки без ждущего вопроса —
+        владельца уже позвали, ожидание закрыто — не трогаем."""
+        saved = datetime(2026, 10, 11, 10, 0, tzinfo=MSK)
+        past = datetime(2026, 10, 8, 9, 0, tzinfo=MSK)
+        for status, expected in (("planned", "drop"), ("owner_notified", "none"),
+                                 ("dropped", "none"), ("confirmed", "none")):
+            with self.subTest(status):
+                self.assertEqual(
+                    self._decide(saved=saved, deal=past, sent=None, status=status),
+                    expected)
+        self.assertEqual(self._decide(saved=past, deal=past, sent=None), "none",
+                         "дата не менялась — нечего снимать")
+
+    def test_status_does_not_change_future_moves(self):
+        """Для новой даты впереди статус ожидания решения не меняет."""
+        saved = datetime(2026, 10, 11, 10, 0, tzinfo=MSK)
+        deal = datetime(2026, 10, 31, 10, 0, tzinfo=MSK)
+        for status in ("planned", "owner_notified", "dropped"):
+            with self.subTest(status):
+                self.assertEqual(
+                    self._decide(saved=saved, deal=deal, sent=None, status=status),
+                    "replan")
 
     def test_unknown_saved_date_is_a_change(self):
         """Ожидание без даты (поле правили руками) — любая дата в сделке новая."""
