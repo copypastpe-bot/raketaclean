@@ -290,7 +290,7 @@ class ReschedulePreSendTests(_RescheduleDbCase):
         self.assertEqual(row["outbox_id"], new["id"])
         self.assertEqual(row["status"], "planned")
         self.assertIsNone(row["asked_sent_at"])
-        self.assertIsNotNone(row["rescheduled_at"])
+        self.assertIsNone(row["rescheduled_at"])  # replan: вопроса не было — отметка не ставится (правка 3)
 
         journal = await self._journal()
         self.assertEqual(len(journal), 1)
@@ -336,7 +336,7 @@ class ReschedulePreSendTests(_RescheduleDbCase):
         self.assertEqual(row["order_at"], soon)
         self.assertIsNone(row["asked_at"])
         self.assertIsNone(row["outbox_id"])
-        self.assertIsNotNone(row["rescheduled_at"])
+        self.assertIsNone(row["rescheduled_at"])  # replan: вопроса не было — отметка не ставится (правка 3)
 
     async def test_unchanged_order_lets_the_question_go(self):
         """Дата не менялась — проверка как раньше: слать, ничего не трогать."""
@@ -660,7 +660,7 @@ class RescheduleWatchTests(_RescheduleDbCase):
         self.assertEqual(row["asked_at"], earlier - ASK_BEFORE)
         self.assertEqual(row["outbox_id"], new["id"])
         self.assertEqual(row["status"], "planned")
-        self.assertIsNotNone(row["rescheduled_at"])
+        self.assertIsNone(row["rescheduled_at"])  # replan: вопроса не было — отметка не ставится (правка 3)
         self.assertEqual([r["action"] for r in await self._journal()], ["replan"])
 
     async def test_letter_being_sent_is_left_until_it_is_back(self):
@@ -730,6 +730,60 @@ class RescheduleWatchTests(_RescheduleDbCase):
         with mock.patch.object(bot, "_confirmation_notify_owner", notify):
             await bot.run_confirmation_silence_watch()
         notify.assert_not_called()
+
+    async def test_replan_does_not_open_the_confirmed_stage(self):
+        """Правка 3 ревью 13.10: отметка «переносился» — только при повторном
+        вопросе. Решение владельца 4 — про сделку, которую робот сам перевёл в
+        «Заказ подтвержден» по «да». При `replan` вопроса ещё не было, и сделка
+        в «Заказ подтвержден» значит, что её перевёл человек: вопрос по прежнему
+        правилу не нужен."""
+        await self._pending()
+        self._crm(_deal(order_at=self.new_at, status_id=AMO_STAGE_CONFIRMED))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual([r["action"] for r in await self._journal()], ["replan"])
+        self.assertIsNone(row["rescheduled_at"])
+        new_id = row["outbox_id"]
+
+        verdict = await bot._confirmation_before_send(_entry(new_id, self.client_id))
+
+        self.assertEqual(verdict.action, "cancel")
+        self.assertEqual(verdict.reason, "сделка ушла с этапа «Заказ оформлен»")
+        self.assertEqual((await self._row())["status"], "dropped")
+
+    async def test_reask_after_yes_lets_the_new_question_go(self):
+        """Повторный вопрос после «да» по старой дате: сделка в «Заказ
+        подтвержден» (её перевёл робот), новый вопрос уходит (решение 4)."""
+        await self._pending(status="confirmed", sent=True, answer="Да",
+                            letter_status="sent")
+        self._crm(_deal(order_at=self.new_at, status_id=AMO_STAGE_CONFIRMED))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual([r["action"] for r in await self._journal()], ["reask"])
+        self.assertIsNotNone(row["rescheduled_at"])
+
+        verdict = await bot._confirmation_before_send(
+            _entry(row["outbox_id"], self.client_id))
+
+        self.assertEqual(verdict, PRE_SEND_OK)
+        self.assertEqual((await self._row())["status"], "planned")
+
+    async def test_replan_keeps_an_earlier_reask_mark(self):
+        """Заказ уже переносили после ответа, а потом передвинули ещё раз, пока
+        новый вопрос ждал очереди: отметка остаётся — вопрос по-прежнему повторный."""
+        await self._pending(rescheduled=True)
+        before = (await self._row())["rescheduled_at"]
+        self._crm(_deal(order_at=self.new_at, status_id=AMO_STAGE_CONFIRMED))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual([r["action"] for r in await self._journal()], ["replan"])
+        self.assertEqual(row["rescheduled_at"], before)
 
     async def test_same_day_new_time_only_updates_time(self):
         """Вопрос задан, день тот же, другое только время — заново не спрашиваем."""

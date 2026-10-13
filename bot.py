@@ -1034,9 +1034,10 @@ async def ensure_client_messaging_schema(conn: asyncpg.Connection) -> None:
         ADD COLUMN IF NOT EXISTS cancel_notified_at timestamptz;
         """
     )
-    # Отметка «заказ переносили, вопрос пересчитан». По ней повторный вопрос
-    # проходит и в «Заказ подтвержден»: клиент сказал «да» про старую дату,
-    # сделка там и осталась (решение владельца 13.10, п.4).
+    # Отметка «заказ переносили после заданного вопроса, спрашиваем заново»
+    # (ставит только `reask`). По ней повторный вопрос проходит и в «Заказ
+    # подтвержден»: клиент сказал «да» про старую дату, сделка там и осталась
+    # (решение владельца 13.10, п.4).
     await conn.execute(
         """
         ALTER TABLE order_confirmations
@@ -2007,6 +2008,12 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
             # относились к старой дате (решение 2). До работы меньше суток —
             # вопроса нет, и ожидание закрыто как `dropped`: сторож незаданных
             # вопросов такие не трогает.
+            #
+            # Отметка «переносился» — только у повторного вопроса (`reask`):
+            # по ней вопрос проходит и в «Заказ подтвержден», куда сделку по «да»
+            # перевёл сам робот (решение 4). При `replan` вопроса не было, и
+            # сделка в «Заказ подтвержден» — дело рук человека: там вопрос не
+            # нужен. Прежняя отметка (переносили уже после ответа) остаётся.
             await conn.execute(
                 """
                 UPDATE order_confirmations
@@ -2018,7 +2025,7 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
                     answered_at = NULL,
                     answer_text = NULL,
                     notified_at = NULL,
-                    rescheduled_at = NOW(),
+                    rescheduled_at = CASE WHEN $6 THEN NOW() ELSE rescheduled_at END,
                     updated_at = NOW()
                 WHERE lead_id = $1
                 """,
@@ -2027,6 +2034,7 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
                 plan.ask_at,
                 outbox_id,
                 "planned" if plan.ask_at is not None else "dropped",
+                action == "reask",
             )
 
         stamp = datetime.now(timezone.utc)
