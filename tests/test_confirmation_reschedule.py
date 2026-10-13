@@ -337,6 +337,7 @@ class ReschedulePreSendTests(_RescheduleDbCase):
         self.assertIsNone(row["asked_at"])
         self.assertIsNone(row["outbox_id"])
         self.assertIsNone(row["rescheduled_at"])  # replan: вопроса не было — отметка не ставится (правка 3)
+        self.assertIsNotNone(row["reschedule_dropped_at"], "закрыто пересчётом (правка 4)")
 
     async def test_unchanged_order_lets_the_question_go(self):
         """Дата не менялась — проверка как раньше: слать, ничего не трогать."""
@@ -804,11 +805,11 @@ class RescheduleWatchTests(_RescheduleDbCase):
         self.assertEqual(len(await self._letters()), 1)
         self.assertEqual([r["action"] for r in await self._journal()], ["update_time"])
 
-    async def test_first_pass_looks_back_30_days_then_only_ahead(self):
+    async def test_first_pass_looks_back_30_days_then_7(self):
         """Живой случай 31703481: вопрос про 11.10 ушёл, клиент промолчал,
         владельца позвали, а заказ ещё 08.10 перенесли на 31.10. Первый проход
         после старта бота смотрит на 30 дней назад по сохранённой дате и
-        подхватывает такие заказы; дальше — только заказы с датой впереди."""
+        подхватывает такие заказы; дальше — на 7 дней назад (правка 4 ревью 13.10)."""
         self.old_at = self.now - timedelta(days=3)
         await self._pending(status="owner_notified", sent=True, letter_status="sent")
         self._crm(_deal(order_at=self.new_at))
@@ -830,8 +831,9 @@ class RescheduleWatchTests(_RescheduleDbCase):
         self.assertNotIn(old_deal, self.amo_calls, "старше 30 дней — не смотрим")
         self.assertEqual((await self._row_of(old_lead))["order_at"], too_old)
 
-        # Второй проход: заказ, чья сохранённая дата уже прошла, не смотрим.
-        passed = self.now - timedelta(days=2)
+        # Второй проход: заказ, чья сохранённая дата прошла больше недели назад,
+        # не смотрим.
+        passed = self.now - timedelta(days=8)
         await self._other(late_lead, late_deal, order_at=passed,
                           status="owner_notified", sent=True)
         self.amo[late_deal] = _deal_for(late_deal, order_at=self.new_at)
@@ -908,6 +910,74 @@ class RescheduleWatchTests(_RescheduleDbCase):
         await bot.run_confirmation_reschedule_watch()
 
         self.assertFalse(bot._reschedule_watch_first_pass_done)
+
+    async def test_moved_after_the_old_date_passed_is_asked_again(self):
+        """Правка 4 ревью 13.10, случай (а): старая дата уже прошла, работа не
+        состоялась, заказ передвинули на следующую неделю. Раньше обычный
+        проход смотрел только заказы впереди — вопроса за сутки до новой даты
+        не было бы."""
+        bot._reschedule_watch_first_pass_done = True
+        self.old_at = self.now - timedelta(days=2)
+        await self._pending(status="confirmed", sent=True, answer="Да",
+                            letter_status="sent")
+        self._crm(_deal(order_at=self.new_at, status_id=AMO_STAGE_CONFIRMED))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual([r["action"] for r in await self._journal()], ["reask"])
+        self.assertEqual(row["status"], "planned")
+        self.assertEqual(row["order_at"], self.new_at)
+        new = (await self._letters())[-1]
+        self.assertEqual(row["outbox_id"], new["id"])
+        self.assertEqual(new["scheduled_at"], self.new_at - ASK_BEFORE)
+
+    async def test_second_move_after_less_than_a_day_is_caught(self):
+        """Правка 4 ревью 13.10, случай (б): первый перенос дал «меньше суток» —
+        ожидание закрыто (`dropped`); второй перенос на следующую неделю
+        возвращает вопрос. Закрытие пересчётом после `replan` отметки
+        «переносился» не ставит (правка 3) — у него своя отметка."""
+        old_id = await self._pending()
+        soon = self.now + timedelta(hours=5)
+        self._crm(_deal(order_at=soon))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertEqual((await self._letter(old_id))["status"], "cancelled")
+        row = await self._row()
+        self.assertEqual(row["status"], "dropped")
+        self.assertIsNone(row["rescheduled_at"])
+        self.assertIsNotNone(row["reschedule_dropped_at"])
+
+        self._crm(_deal(order_at=self.new_at))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual([r["action"] for r in await self._journal()],
+                         ["replan", "replan"])
+        self.assertEqual(row["status"], "planned")
+        self.assertEqual(row["order_at"], self.new_at)
+        self.assertIsNone(row["reschedule_dropped_at"])
+        new = (await self._letters())[-1]
+        self.assertEqual(row["outbox_id"], new["id"])
+        self.assertEqual(new["status"], "pending")
+        self.assertEqual(new["scheduled_at"], self.new_at - ASK_BEFORE)
+
+    async def test_dropped_for_other_reasons_is_not_read_even_after_reask(self):
+        """Ожидание переносили (`rescheduled_at` стоит), а потом закрыли по
+        другой причине — сделка закрыта, владелец ведёт сам. Такое обход не
+        читает: закрытое пересчётом отличает своя отметка, не `rescheduled_at`."""
+        start = self.now + timedelta(days=3)
+        await self._other(EXTRA[0][0], EXTRA[0][1], order_at=start, status="dropped")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE order_confirmations SET rescheduled_at = NOW() WHERE lead_id = $1",
+                EXTRA[0][0])
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertEqual([call for call in self.amo_calls if call != "client"], [])
 
     async def test_rehearsal_only_logs(self):
         """Репетиция: строка в логе, в базу и очередь — ничего."""

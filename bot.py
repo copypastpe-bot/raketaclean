@@ -1044,6 +1044,17 @@ async def ensure_client_messaging_schema(conn: asyncpg.Connection) -> None:
         ADD COLUMN IF NOT EXISTS rescheduled_at timestamptz;
         """
     )
+    # Отметка «ожидание закрыл пересчёт после переноса»: до новой даты меньше
+    # суток или она уже прошла. Такие `dropped` обход переносов смотрит и
+    # дальше — заказ могут передвинуть ещё раз; прочие `dropped` (сделка
+    # закрыта, владелец ведёт сам) — нет. `rescheduled_at` для этого не
+    # годится: его ставит только повторный вопрос (ревью 13.10, правки 3 и 4).
+    await conn.execute(
+        """
+        ALTER TABLE order_confirmations
+        ADD COLUMN IF NOT EXISTS reschedule_dropped_at timestamptz;
+        """
+    )
     await conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_order_confirmations_phone
@@ -2014,6 +2025,9 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
             # перевёл сам робот (решение 4). При `replan` вопроса не было, и
             # сделка в «Заказ подтвержден» — дело рук человека: там вопрос не
             # нужен. Прежняя отметка (переносили уже после ответа) остаётся.
+            #
+            # Закрыто пересчётом — своя отметка: обход переносов смотрит такие
+            # ожидания и дальше, второй перенос вернёт вопрос (правка 4).
             await conn.execute(
                 """
                 UPDATE order_confirmations
@@ -2026,6 +2040,7 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
                     answer_text = NULL,
                     notified_at = NULL,
                     rescheduled_at = CASE WHEN $6 THEN NOW() ELSE rescheduled_at END,
+                    reschedule_dropped_at = CASE WHEN $7 THEN NOW() END,
                     updated_at = NOW()
                 WHERE lead_id = $1
                 """,
@@ -2035,6 +2050,7 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
                 outbox_id,
                 "planned" if plan.ask_at is not None else "dropped",
                 action == "reask",
+                plan.ask_at is None,
             )
 
         stamp = datetime.now(timezone.utc)
@@ -2445,8 +2461,11 @@ async def run_confirmation_silence_watch() -> None:
 # Обход переносов (ТЗ 2026-10-13, задача 2). Первый проход после старта бота
 # смотрит на 30 дней назад по сохранённой дате: так подхватываются заказы,
 # перенесённые до этой правки или пока бот стоял (сделка 31703481: вопрос про
-# 11.10 ушёл, а работа уже стояла на 31.10). Дальше — только заказы впереди.
+# 11.10 ушёл, а работа уже стояла на 31.10). Дальше — на 7 дней назад: заказ
+# переносят и тогда, когда старая дата уже прошла (работа не состоялась,
+# заказ передвинули на следующую неделю; ревью 13.10, правка 4).
 RESCHEDULE_FIRST_PASS_DEPTH = timedelta(days=30)
+RESCHEDULE_DEPTH = timedelta(days=7)
 # Лимит больше, чем у сторожей (50): те закрывают разобранное, и выборка
 # у них тает, а здесь заказ остаётся в выборке до дня работы. Упрись обход
 # в лимит — дальние заказы не проверялись бы вовсе, и перенос такого заказа
@@ -2545,14 +2564,17 @@ async def run_confirmation_reschedule_watch() -> None:
     if not CLIENT_MESSAGING_ENABLED or pool is None or not _amocrm_api_enabled():
         return
 
-    depth = (timedelta(0) if _reschedule_watch_first_pass_done
+    depth = (RESCHEDULE_DEPTH if _reschedule_watch_first_pass_done
              else RESCHEDULE_FIRST_PASS_DEPTH)
     async with pool.acquire() as conn:
+        # Закрытые пересчётом (до новой даты было меньше суток) — тоже: второй
+        # перенос на следующую неделю вернёт вопрос. Прочие `dropped` — нет.
         rows = await conn.fetch(
             """
             SELECT lead_id, deal_id, order_at, asked_sent_at
             FROM order_confirmations
-            WHERE status IN ('planned', 'confirmed', 'refused', 'owner_notified')
+            WHERE (status IN ('planned', 'confirmed', 'refused', 'owner_notified')
+                   OR (status = 'dropped' AND reschedule_dropped_at IS NOT NULL))
               AND deal_id IS NOT NULL
               AND deal_id <> 0
               AND order_at > $1
