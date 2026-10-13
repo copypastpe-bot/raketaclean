@@ -15,15 +15,25 @@ from .outbox import (
     NotificationOutboxEntry,
     PreSendVerdict,
     cancel_outbox_entry,
+    defer_outbox_entry,
     extract_provider_message_id,
     mark_outbox_failure,
     mark_outbox_sent,
     pick_ready_batch,
     render_template,
 )
+from .quiet_hours import quiet_until
 from .rules import NotificationRules
 
 logger = logging.getLogger(__name__)
+
+# Кому ночью по своей инициативе не пишем: клиентам и лидам. Мастерам
+# и владельцу — как раньше.
+QUIET_RECIPIENTS = frozenset({"client", "lead"})
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class NotificationWorker:
@@ -43,6 +53,7 @@ class NotificationWorker:
         after_send: Callable[[asyncpg.Connection, NotificationOutboxEntry],
                              Awaitable[None]] | None = None,
         precheck_retry_minutes: int = 15,
+        client_quiet_hours: bool = False,
     ) -> None:
         """Работник очереди — курьер: он умеет доставлять письма и больше ничего.
 
@@ -54,6 +65,11 @@ class NotificationWorker:
           не уходит по заказу, которого в CRM уже нет.
         * `after_send` получает ту же связь с базой, что и отметка «отправлено»,
           и пишет в неё факт отправки одной транзакцией с ней.
+
+        `client_quiet_hours` — ночная тишина: с 20:00 до 10:00 по Москве письмо
+        клиенту или лиду не уходит, а ждёт 10:00. Ответы на сообщение клиента
+        (`"reply": true` в правилах) идут сразу. По умолчанию выключено:
+        включает `bot.py` своим выключателем.
         """
         self.pool = pool
         self.rules = rules
@@ -66,6 +82,7 @@ class NotificationWorker:
         self.before_send = before_send
         self.after_send = after_send
         self.precheck_retry_minutes = precheck_retry_minutes
+        self.client_quiet_hours = client_quiet_hours
         self._task: asyncio.Task | None = None
         self._stopping = False
 
@@ -128,6 +145,18 @@ class NotificationWorker:
         if not entry.client_phone:
             async with self.pool.acquire() as conn:
                 await cancel_outbox_entry(conn, entry, "client phone missing")
+            return
+
+        # Ночная тишина. Проверка — здесь, в момент отправки, а не при
+        # постановке письма: так её соблюдают и повторы после сбоя, и письма,
+        # переставленные после переноса заказа. До `before_send`: ночью незачем
+        # ходить в CRM, проверка перед отправкой должна быть свежей — утром.
+        wait_until = self._quiet_until(entry)
+        if wait_until is not None:
+            logger.info("Письмо %s отложено до %s: ночная тишина",
+                        entry.id, wait_until.isoformat())
+            async with self.pool.acquire() as conn:
+                await defer_outbox_entry(conn, entry.id, wait_until)
             return
 
         # Последнее слово перед отправкой — за тем, кто знает смысл письма.
@@ -238,6 +267,25 @@ class NotificationWorker:
                 )
                 if self.after_send is not None:
                     await self.after_send(conn, entry)
+
+    def _quiet_until(self, entry: NotificationOutboxEntry) -> datetime | None:
+        """До какого часа ждать этому письму: `None` — слать сейчас."""
+        if not self.client_quiet_hours:
+            return None
+        if entry.recipient_kind not in QUIET_RECIPIENTS:
+            return None
+        if self._is_reply(entry):
+            return None
+        return quiet_until(_now())
+
+    def _is_reply(self, entry: NotificationOutboxEntry) -> bool:
+        """Ответ на сообщение клиента? Событие, которого нет в правилах, — не ответ."""
+        if self.rules is None:
+            return False
+        try:
+            return self.rules.get_event(entry.event_key).reply
+        except KeyError:
+            return False
 
     def _build_message_text(self, entry: NotificationOutboxEntry) -> str:
         template = entry.template

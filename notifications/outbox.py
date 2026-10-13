@@ -459,6 +459,37 @@ async def _cancel_outbox_row(conn: asyncpg.Connection, outbox_id: int, reason: s
     return cancelled is not None
 
 
+async def defer_outbox_entry(conn: asyncpg.Connection, outbox_id: int,
+                             until: datetime) -> bool:
+    """Отложить письмо до `until`, не тратя на него попытку. Отвечает, удалось ли.
+
+    Ночная тишина: письмо не ушло не по своей вине, поэтому возвращается
+    в очередь (`pending`) к новому сроку. Работник держит его в руках уже
+    со статусом `sending` и засчитанной попыткой — её `pick_ready_batch`
+    прибавляет, когда берёт письмо, — и эта попытка снимается. Письмо,
+    которое ещё лежит в очереди, просто переезжает.
+
+    Ушедшее, отменённое и сгоревшее письмо не трогается: вернуть его
+    в очередь — значит отправить второй раз или воскресить отменённое.
+    """
+    deferred = await conn.fetchval(
+        """
+        UPDATE notification_outbox
+        SET status='pending',
+            scheduled_at=$2,
+            attempts = CASE WHEN status='sending' THEN GREATEST(attempts - 1, 0)
+                            ELSE attempts END,
+            updated_at=NOW()
+        WHERE id=$1
+          AND status IN ('pending', 'sending')
+        RETURNING id
+        """,
+        outbox_id,
+        until,
+    )
+    return deferred is not None
+
+
 _MESSAGE_ID_KEYS: tuple[str, ...] = (
     "message_id",
     "messageid",
@@ -765,6 +796,7 @@ __all__ = [
     "mark_outbox_sent",
     "mark_outbox_failure",
     "cancel_outbox_entry",
+    "defer_outbox_entry",
     "render_template",
     "extract_provider_message_id",
     "apply_provider_status_update",

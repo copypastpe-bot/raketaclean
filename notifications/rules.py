@@ -23,6 +23,8 @@ class NotificationEvent:
     template: str
     variables: tuple[str, ...]
     delay_minutes: int = 0
+    # Reply to the client's own message: night quiet hours do not apply to it.
+    reply: bool = False
 
 
 class NotificationRules:
@@ -61,6 +63,7 @@ def _parse_event(entry: Mapping[str, Any]) -> NotificationEvent:
         template=str(entry.get("template") or ""),
         variables=variables,
         delay_minutes=delay_minutes,
+        reply=entry.get("reply") is True,
     )
 
 

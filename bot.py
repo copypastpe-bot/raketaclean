@@ -277,6 +277,10 @@ AMOCRM_EXCHANGE_INTERVAL_SEC = max(60, _env_int("AMOCRM_EXCHANGE_INTERVAL_SEC", 
 CLIENT_MESSAGING_ENABLED = _env_int("CLIENT_MESSAGING_ENABLED", 0) == 1
 CLIENT_MESSAGING_DRY_RUN = _env_int("CLIENT_MESSAGING_DRY_RUN", 1) == 1
 CLIENT_MESSAGING_INTERVAL_SEC = max(60, _env_int("CLIENT_MESSAGING_INTERVAL_SEC", 600))
+# Ночная тишина (решение владельца 13.10): с 20:00 до 10:00 МСК письмо клиенту
+# из очереди ждёт 10:00. Ответы на сообщение клиента идут сразу. Включено
+# по умолчанию; часы — константы в `notifications/quiet_hours.py`.
+CLIENT_QUIET_HOURS_ENABLED = _env_int("CLIENT_QUIET_HOURS_ENABLED", 1) == 1
 SHEETS_CREDENTIALS_PATH = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "docs/Sheets.json")
 TEXTS_SHEET_ID = os.getenv("TEXTS_SHEET_ID")
 TEXTS_PROMO_RANGE = os.getenv("TEXTS_PROMO_RANGE", "promo!A:C")
@@ -14201,6 +14205,7 @@ async def main():
             logs_chat_id=LOGS_CHAT_ID,
             before_send=_confirmation_before_send,
             after_send=_confirmation_after_send,
+            client_quiet_hours=CLIENT_QUIET_HOURS_ENABLED,
         )
         notification_worker.start()
     if WAHELP_WEBHOOK_PORT > 0:

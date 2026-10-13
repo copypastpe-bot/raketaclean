@@ -59,6 +59,7 @@
       "key": "order_confirmed_thanks",
       "name": "Ответ клиенту на подтверждение заказа",
       "recipient": "client",
+      "reply": true,
       "condition": null,
       "timing": {
         "delay_minutes": 0
@@ -269,6 +270,7 @@
       "key": "order_rating_response_high_client",
       "name": "Ответ клиенту на оценку 5",
       "recipient": "client",
+      "reply": true,
       "timing": {
         "delay_minutes": 0
       },
@@ -282,6 +284,7 @@
       "key": "order_rating_response_mid_client",
       "name": "Ответ клиенту на оценку 4",
       "recipient": "client",
+      "reply": true,
       "timing": {
         "delay_minutes": 0
       },
@@ -295,6 +298,7 @@
       "key": "order_rating_response_low_client",
       "name": "Ответ клиенту на оценку 3 и ниже",
       "recipient": "client",
+      "reply": true,
       "timing": {
         "delay_minutes": 0
       },
