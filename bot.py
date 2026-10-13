@@ -157,6 +157,7 @@ from notifications.client_messaging import (
     OrderDetails,
     child_deal_id,
     decide_on_answer,
+    decide_on_reschedule,
     is_question_letter,
     letter_failure_words,
     letter_payload,
@@ -1028,6 +1029,15 @@ async def ensure_client_messaging_schema(conn: asyncpg.Connection) -> None:
         ADD COLUMN IF NOT EXISTS cancel_notified_at timestamptz;
         """
     )
+    # Отметка «заказ переносили, вопрос пересчитан». По ней повторный вопрос
+    # проходит и в «Заказ подтвержден»: клиент сказал «да» про старую дату,
+    # сделка там и осталась (решение владельца 13.10, п.4).
+    await conn.execute(
+        """
+        ALTER TABLE order_confirmations
+        ADD COLUMN IF NOT EXISTS rescheduled_at timestamptz;
+        """
+    )
     await conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_order_confirmations_phone
@@ -1871,6 +1881,196 @@ async def run_client_messaging_cycle() -> None:
         logger.info("Разговор с клиентом: %s", counters)
 
 
+def _confirmation_moved_to(order_at: datetime) -> str:
+    """Причина отмены старого вопроса — «заказ перенесён на 31.10.2026 10:00».
+
+    Дата и время по-московски: заказ на 00:30 иначе выглядел бы вчерашним.
+    """
+    return f"заказ перенесён на {order_at.astimezone(MOSCOW_TZ):%d.%m.%Y %H:%M}"
+
+
+def _confirmation_iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
+                                   order: OrderDetails, now: datetime,
+                                   in_hand_outbox_id: int | None = None) -> str:
+    """Заказ перенесли — переставить вопрос «подтверждаете заказ?».
+
+    Вопрос планируется один раз, при оформлении заказа, а перенос в календаре
+    админ-бот пишет только в поле сделки. 2026-10-10 клиенту ушёл вопрос про
+    11.10, хотя заказ ещё 08.10 перенесли на 31.10 (сделка 31703481).
+
+    `order` — заказ, как он лежит в CRM сейчас: дата из сделки, адрес из сделки,
+    недостающее — из лида, ровно как при планировании. Что делать, решает
+    правило `decide_on_reschedule` — здесь, под блокировкой строки ожидания:
+    проверка перед отправкой и обход могут прийти к одному заказу одновременно,
+    и второй не должен поставить второе письмо. Возвращает сделанное: `none`,
+    `replan`, `reask` или `update_time`.
+
+    Всё одной транзакцией: старое письмо отменено, новое поставлено, строка
+    переписана, след в журнале — либо всё, либо ничего.
+
+    `in_hand_outbox_id` — письмо, которое работник очереди держит в руках
+    прямо сейчас. Его отменяет он сам, по вердикту проверки; здесь его номер
+    не трогаем. Старое письмо успело уйти (отменить не вышло) — это уже
+    `reask`: клиент получил вопрос про старую дату, новый ставится всё равно.
+
+    Владельцу о перестановке не пишем никак (решение 3): ни сообщением, ни
+    строкой в суточной сводке. Поэтому у журнала свой `event_type` —
+    `confirmation_reschedule`: сводка считает `confirmation_status`.
+    """
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            SELECT deal_id, client_id, order_at, status, outbox_id, asked_at,
+                   asked_sent_at, answer_text
+            FROM order_confirmations
+            WHERE lead_id = $1
+            FOR UPDATE
+            """,
+            lead_id,
+        )
+        if row is None:
+            return "none"
+        action = decide_on_reschedule(
+            saved_order_at=row["order_at"], deal_order_at=order.order_at,
+            asked_sent_at=row["asked_sent_at"], now=now, tz=MOSCOW_TZ)
+        if action == "none":
+            return action
+
+        new_at = order.order_at
+        asked_at = row["asked_at"]
+        if action == "update_time":
+            # Вопрос уже задан, день тот же: заново не спрашиваем, только
+            # запоминаем время — иначе следующий обход увидел бы «перенос» снова.
+            await conn.execute(
+                """
+                UPDATE order_confirmations
+                SET order_at = $2,
+                    updated_at = NOW()
+                WHERE lead_id = $1
+                """,
+                lead_id,
+                new_at,
+            )
+        else:
+            old_outbox_id = row["outbox_id"]
+            if old_outbox_id and int(old_outbox_id) != in_hand_outbox_id:
+                cancelled = await cancel_pending_outbox(
+                    conn, int(old_outbox_id), _confirmation_moved_to(new_at))
+                if not cancelled:
+                    action = "reask"
+            plan = plan_confirmation(order_at=new_at, now=now)
+            asked_at = plan.ask_at
+            outbox_id: int | None = None
+            if plan.ask_at is not None:
+                outbox_id = await enqueue_notification(
+                    conn, notification_rules, event_key=CONFIRM_REQUEST_EVENT,
+                    client_id=row["client_id"],
+                    payload=letter_payload(order_at=new_at.astimezone(MOSCOW_TZ),
+                                           address=order.address),
+                    scheduled_at=plan.ask_at)
+            # Старое ожидание закрыто целиком: ответ и «звали владельца»
+            # относились к старой дате (решение 2). До работы меньше суток —
+            # вопроса нет, и ожидание закрыто как `dropped`: сторож незаданных
+            # вопросов такие не трогает.
+            await conn.execute(
+                """
+                UPDATE order_confirmations
+                SET order_at = $2,
+                    asked_at = $3,
+                    outbox_id = $4,
+                    status = $5,
+                    asked_sent_at = NULL,
+                    answered_at = NULL,
+                    answer_text = NULL,
+                    notified_at = NULL,
+                    rescheduled_at = NOW(),
+                    updated_at = NOW()
+                WHERE lead_id = $1
+                """,
+                lead_id,
+                new_at,
+                plan.ask_at,
+                outbox_id,
+                "planned" if plan.ask_at is not None else "dropped",
+            )
+
+        stamp = datetime.now(timezone.utc)
+        await conn.execute(
+            """
+            INSERT INTO amocrm_api_events (
+                event_id, event_type, entity_id, payload, action, created_at
+            )
+            VALUES ($1, 'confirmation_reschedule', $2, $3::jsonb, $4, $5)
+            ON CONFLICT (event_id) DO NOTHING
+            """,
+            f"confirmation_reschedule:{lead_id}:{int(stamp.timestamp() * 1_000_000)}",
+            str(lead_id),
+            json.dumps({
+                "deal_id": row["deal_id"],
+                "old_order_at": _confirmation_iso(row["order_at"]),
+                "old_status": row["status"],
+                "old_asked_sent_at": _confirmation_iso(row["asked_sent_at"]),
+                "old_answer_text": row["answer_text"],
+                "new_order_at": _confirmation_iso(new_at),
+                "new_asked_at": _confirmation_iso(asked_at),
+            }, ensure_ascii=False),
+            action,
+            int(stamp.timestamp()),
+        )
+    return action
+
+
+async def _confirmation_check_moved(entry: NotificationOutboxEntry,
+                                    pending: Mapping[str, Any], *,
+                                    deal: Mapping[str, Any],
+                                    lead: Mapping[str, Any] | None) -> PreSendVerdict:
+    """Последняя проверка перед вопросом: заказ не перенесли?
+
+    Зовётся, когда все прочие проверки уже сказали «можно». Дата в сделке
+    другая — письмо в руках у работника очереди спрашивает не о том дне: вопрос
+    пересчитывается на новую дату, а это письмо отменяется (решение владельца
+    13.10, п.1). Владельцу не пишем, след — только в журнале (п.3).
+
+    Пересчитать не вышло (база моргнула) — письмо откладываем, а не шлём:
+    вопрос про старую дату и есть та беда, ради которой проверка заведена.
+    """
+    deal_order = order_from_lead(deal, tz=MOSCOW_TZ)
+    now = datetime.now(timezone.utc)
+    action = decide_on_reschedule(
+        saved_order_at=pending["order_at"], deal_order_at=deal_order.order_at,
+        asked_sent_at=pending["asked_sent_at"], now=now, tz=MOSCOW_TZ)
+    if action != "replan":
+        return PRE_SEND_OK
+
+    deal_id = int(pending["deal_id"])
+    was = (pending["order_at"].astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+           if pending["order_at"] else "без даты")
+    became = deal_order.order_at.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+    if CLIENT_MESSAGING_DRY_RUN:
+        logger.info("Разговор с клиентом (репетиция): перенос: сделка %s, %s → %s, %s",
+                    deal_id, was, became, action)
+        return PRE_SEND_OK
+
+    order = prefer_deal_details(deal_order, order_from_lead(lead or {}, tz=MOSCOW_TZ))
+    try:
+        async with pool.acquire() as conn:
+            done = await _confirmation_reschedule(
+                conn, int(pending["lead_id"]), order=order, now=now,
+                in_hand_outbox_id=entry.id)
+    except Exception as exc:  # noqa: BLE001 — письмо подождёт следующей попытки
+        logger.exception("Разговор с клиентом: перенос сделки %s не пересчитан: %s",
+                         deal_id, exc)
+        return PreSendVerdict("retry",
+                              f"перенос сделки {deal_id} пересчитать не удалось: {exc}")
+    logger.info("Разговор с клиентом: перенос: сделка %s, %s → %s, %s",
+                deal_id, was, became, done)
+    return PreSendVerdict("cancel", _confirmation_moved_to(deal_order.order_at))
+
+
 async def _confirmation_before_send(entry: NotificationOutboxEntry) -> PreSendVerdict:
     """Можно ли задавать вопрос по этому заказу прямо сейчас.
 
@@ -1887,6 +2087,11 @@ async def _confirmation_before_send(entry: NotificationOutboxEntry) -> PreSendVe
     за сетевую заминку нечестно. «Сделка не наша забота» (связь не нашлась
     ещё при заведении ожидания) — шлём: заказ, скорее всего, настоящий,
     и молчание было бы хуже лишнего вопроса.
+
+    Последней сверяется дата: заказ жив, но его могли перенести (2026-10-10,
+    сделка 31703481 — вопрос про 11.10 ушёл, хотя работа уже стояла на 31.10).
+    Перенесли — вопрос пересчитывается на новую дату, а это письмо отменяется.
+    В репетиции — только строка в логе, письмо уходит как раньше.
     """
     if not is_question_letter(entry.event_key):
         return PRE_SEND_OK
@@ -1895,7 +2100,11 @@ async def _confirmation_before_send(entry: NotificationOutboxEntry) -> PreSendVe
 
     async with pool.acquire() as conn:
         pending = await conn.fetchrow(
-            "SELECT lead_id, deal_id FROM order_confirmations WHERE outbox_id = $1",
+            """
+            SELECT lead_id, deal_id, order_at, asked_sent_at, rescheduled_at
+            FROM order_confirmations
+            WHERE outbox_id = $1
+            """,
             entry.id,
         )
     if pending is None or not pending["deal_id"]:
@@ -1917,21 +2126,24 @@ async def _confirmation_before_send(entry: NotificationOutboxEntry) -> PreSendVe
     if owner_handles(deal):
         allowed, reason = False, "владелец ведёт заказ сам"
     else:
-        allowed, reason = may_ask_question(deal)
+        allowed, reason = may_ask_question(
+            deal, rescheduled=pending["rescheduled_at"] is not None)
 
     # Галочку владелец мог поставить и на лиде — карточек в цепочке две, и
     # обещание «ставьте где удобно» держится только если робот смотрит обе.
     # Вопросов за сутки единицы, лишний запрос в CRM здесь ничего не стоит.
+    lead: Mapping[str, Any] | None = None
     if allowed:
         try:
             async with AmoCRMAPIClient(AMOCRM_API_BASE, AMOCRM_API_TOKEN) as client:
-                if owner_handles(await client.fetch_lead(int(pending["lead_id"]))):
+                lead = await client.fetch_lead(int(pending["lead_id"]))
+                if owner_handles(lead):
                     allowed, reason = False, "владелец ведёт заказ сам"
         except Exception as exc:  # noqa: BLE001 — сеть моргнула, письмо подождёт
             return PreSendVerdict("retry",
                                   f"лид {pending['lead_id']} проверить не удалось: {exc}")
     if allowed:
-        return PRE_SEND_OK
+        return await _confirmation_check_moved(entry, pending, deal=deal, lead=lead)
 
     logger.info("Разговор с клиентом: вопрос по сделке %s отменён — %s",
                 deal_id, reason)
