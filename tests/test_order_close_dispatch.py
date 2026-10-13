@@ -275,6 +275,41 @@ class DispatchTests(_DispatchCase):
         self.edit_message_text.assert_not_awaited()
         self.delete_message.assert_not_awaited()
 
+    async def test_refresh_failure_does_not_remind_conducted_or_moved(self):
+        """Ревью 13.10, п.2: обновление строки упало — рассылка в том же проходе
+        всё равно не шлёт «не проведён» по проведённому или перенесённому заказу."""
+        await self._job()
+        await self._job("evt-moved", phones=("9160000000",))
+        await self._run(_msk(11, 10))
+        self._reset_telegram()
+        await self._execute(
+            "INSERT INTO orders (phone_digits, created_at, calendar_event_id) VALUES (NULL, $1, $2)",
+            _msk(11, 10, 3), EVENT,
+        )
+        await self._execute(
+            "UPDATE calendar_jobs SET order_date=$2 WHERE event_id=$1", "evt-moved", date(2026, 10, 11),
+        )
+
+        with mock.patch.object(bot, "_order_close_refresh", mock.AsyncMock(side_effect=RuntimeError("db"))):
+            await self._run(_msk(11, 10, 30))
+
+        self.send_message.assert_not_awaited()
+
+    async def test_window_rechecked_before_each_send(self):
+        """Ревью 13.10, п.3: окно проверяется перед каждой отправкой, а не раз за
+        проход — медленный Telegram не утаскивает напоминания за 20:00."""
+        await self._job()
+        await self._job("evt-second", phones=("9160000000",))
+        clock = iter([_msk(11, 19, 59), _msk(11, 19, 59)])
+
+        def tick():
+            return next(clock, _msk(11, 20, 1))
+
+        with mock.patch.object(bot, "_order_close_now", side_effect=tick):
+            await bot.run_order_close_reminders()
+
+        self.assertEqual(self.send_message.await_count, 2)  # один заказ, два чата
+
     async def test_gone_from_calendar_deletes_silently(self):
         await self._job()
         await self._run(_msk(11, 10))

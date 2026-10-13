@@ -3084,7 +3084,7 @@ async def _order_close_candidates(conn: Any, today: date) -> list[Any]:
 
 
 def _order_close_now() -> datetime:
-    """Текущее время для кнопки «Напомнить завтра» (тесты подменяют часы)."""
+    """Текущее время для рассылки и кнопки «Напомнить завтра» (тесты подменяют часы)."""
     return datetime.now(timezone.utc)
 
 
@@ -3317,7 +3317,7 @@ async def run_order_close_reminders(now: datetime | None = None) -> None:
     chats = _order_close_chats()
     if not chats:
         return
-    moment = now or datetime.now(timezone.utc)
+    moment = now or _order_close_now()
     today = moment.astimezone(MOSCOW_TZ).date()
     async with pool.acquire() as conn:
         candidates = await _order_close_candidates(conn, today)
@@ -3343,8 +3343,15 @@ async def run_order_close_reminders(now: datetime | None = None) -> None:
         )
     for record in due:
         job = jobs.get(record["event_id"])
-        if job is None or job["gone"]:
+        # Обновление строки могло упасть — тогда она осталась открытой, хотя заказ
+        # уже проведён или перенесён. Решаем по свежему разбору кандидата
+        # (ревью 13.10, п.2): лишнее «не проведён» хуже пропущенного прохода.
+        if job is None or job["gone"] or job["conducted"] or job["order_date"] >= today:
             continue
+        # Окно — перед каждой отправкой: на заказ до четырёх обращений к Telegram,
+        # и медленный прокси утащил бы хвост прохода за 20:00 (ревью 13.10, п.3).
+        if not order_close_in_window(now or _order_close_now()):
+            break
         try:
             await _order_close_send_due(job, moment, chats)
         except Exception as exc:  # noqa: BLE001
