@@ -111,17 +111,60 @@ def render_text(
     третья — услуги (нет услуг — строки нет). Кнопка «Напомнить завтра» —
     отдельно (`SNOOZE_BUTTON_TEXT`).
     """
+    lines = [TITLE, *_order_lines(order_date, client_name, address, services)]
+    lines.extend(("", CALL_TO_ACTION))
+    return "\n".join(lines)
+
+def render_done_text(
+    *,
+    order_date: date,
+    client_name: str | None,
+    address: str | None,
+    services: Iterable[str] | None,
+) -> str:
+    """Вид последнего напоминания, когда заказ провели (задача 2): без кнопки.
+
+    Первая строка — «✅ Заказ проведён» вместо заголовка, строки заказа — как
+    в напоминании, призыва нет: по сообщению в чате видно, какой заказ закрылся.
+    """
+    return "\n".join([DONE_MARK, *_order_lines(order_date, client_name, address, services)])
+
+def render_snoozed_text(
+    *,
+    order_date: date,
+    client_name: str | None,
+    address: str | None,
+    services: Iterable[str] | None,
+    snoozed_by: str | None,
+) -> str:
+    """Вид напоминания после «Напомнить завтра» (задача 2): без кнопки.
+
+    Как напоминание, только призыв заменён на «Отложено до завтра — <кто нажал>»;
+    имени нет — просто «Отложено до завтра».
+    """
+    who = (snoozed_by or "").strip()
+    mark = f"{SNOOZED_MARK} — {who}" if who else SNOOZED_MARK
+    lines = [TITLE, *_order_lines(order_date, client_name, address, services)]
+    lines.extend(("", mark))
+    return "\n".join(lines)
+
+def _order_lines(
+    order_date: date,
+    client_name: str | None,
+    address: str | None,
+    services: Iterable[str] | None,
+) -> list[str]:
+    """Строки заказа: «дата · имя · адрес» (пустые пропускаются) и услуги, если есть."""
     details = [order_date.strftime("%d.%m")]
     for value in (client_name, address):
         text = (value or "").strip()
         if text:
             details.append(text)
-    lines = [TITLE, " · ".join(details)]
+    lines = [" · ".join(details)]
     services_line = service_names(services)
     if services_line:
         lines.append(services_line)
-    lines.extend(("", CALL_TO_ACTION))
-    return "\n".join(lines)
+    return lines
 
 
 def _align_to_window(moment: datetime) -> datetime:
@@ -154,6 +197,8 @@ __all__ = [
     "first_send_at",
     "in_window",
     "next_reminder_at",
+    "render_done_text",
+    "render_snoozed_text",
     "render_text",
     "service_names",
     "snooze_until",

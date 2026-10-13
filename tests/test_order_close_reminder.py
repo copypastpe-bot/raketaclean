@@ -208,5 +208,47 @@ class RenderTextTests(unittest.TestCase):
         self.assertEqual(ocr.SNOOZED_MARK, "Отложено до завтра")
 
 
+class ClosedViewsTests(unittest.TestCase):
+    """Вид сообщения после «проведён» и после «Напомнить завтра» (задача 2)."""
+
+    ORDER = dict(
+        order_date=date(2026, 10, 4),
+        client_name="Валерий",
+        address="Афонино, Восточная, 342",
+        services=["carpeting", "furniture"],
+    )
+
+    def test_done_view_keeps_order_lines_without_call_to_action(self):
+        self.assertEqual(
+            ocr.render_done_text(**self.ORDER),
+            "✅ Заказ проведён\n"
+            "04.10 · Валерий · Афонино, Восточная, 342\n"
+            "Ковры, мебель",
+        )
+
+    def test_snoozed_view_replaces_call_to_action_with_who_pressed(self):
+        self.assertEqual(
+            ocr.render_snoozed_text(**self.ORDER, snoozed_by="Иван Петров"),
+            "⚠️ Заказ не проведён в боте\n"
+            "04.10 · Валерий · Афонино, Восточная, 342\n"
+            "Ковры, мебель\n"
+            "\n"
+            "Отложено до завтра — Иван Петров",
+        )
+
+    def test_snoozed_view_without_name(self):
+        text = ocr.render_snoozed_text(**self.ORDER, snoozed_by="  ")
+        self.assertTrue(text.endswith("\n\nОтложено до завтра"))
+
+    def test_gone_record_keeps_only_date(self):
+        # Запись пропала из календаря: имени, адреса и услуг уже не взять.
+        self.assertEqual(
+            ocr.render_done_text(
+                order_date=date(2026, 10, 4), client_name=None, address=None, services=None
+            ),
+            "✅ Заказ проведён\n04.10",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
