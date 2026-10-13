@@ -528,6 +528,7 @@ exchange_task: asyncio.Task | None = None          # обмен amoCRM -> баз
 weekly_leads_task: asyncio.Task | None = None      # понедельничные лиды из amoCRM
 client_messaging_task: asyncio.Task | None = None  # письма клиенту до работы
 confirmation_watch_task: asyncio.Task | None = None  # сторож молчунов
+reschedule_watch_task: asyncio.Task | None = None    # обход переносов заказа
 unasked_watch_task: asyncio.Task | None = None       # сторож незаданных вопросов
 deferred_retry_task: asyncio.Task | None = None      # добор заказов без дочерней сделки
 client_bot_health_task: asyncio.Task | None = None
@@ -2388,6 +2389,143 @@ async def run_confirmation_silence_watch() -> None:
 
     if called:
         logger.info("Разговор с клиентом: позвал владельца к %s молчунам", called)
+
+
+# Обход переносов (ТЗ 2026-10-13, задача 2). Первый проход после старта бота
+# смотрит на 30 дней назад по сохранённой дате: так подхватываются заказы,
+# перенесённые до этой правки или пока бот стоял (сделка 31703481: вопрос про
+# 11.10 ушёл, а работа уже стояла на 31.10). Дальше — только заказы впереди.
+RESCHEDULE_FIRST_PASS_DEPTH = timedelta(days=30)
+# Лимит больше, чем у сторожей (50): те закрывают разобранное, и выборка
+# у них тает, а здесь заказ остаётся в выборке до дня работы. Упрись обход
+# в лимит — дальние заказы не проверялись бы вовсе, и перенос такого заказа
+# на раннюю дату прошёл бы мимо. Поэтому лимит — потолок с запасом над всеми
+# заказами впереди, а упёрлись в него — предупреждение в лог.
+RESCHEDULE_WATCH_LIMIT = 200
+_reschedule_watch_first_pass_done = False
+
+
+async def _confirmation_watch_deal(client: AmoCRMAPIClient,
+                                   row: Mapping[str, Any]) -> str:
+    """Один заказ обхода переносов. Возвращает, чем кончилось.
+
+    Действие правила (`none`, `replan`, `reask`, `update_time`), `rehearsal`
+    в репетиции, `skip` — заказ не наш, `crm_silent` — CRM не ответила.
+    """
+    deal_id = int(row["deal_id"])
+    try:
+        deal: Mapping[str, Any] | None = await client.fetch_lead(deal_id)
+    except AmoCRMAPIError as exc:
+        if exc.status != 404:
+            logger.warning("Перенос заказа: сделка %s не прочитана: %s", deal_id, exc)
+            return "crm_silent"
+        deal = None
+    except Exception as exc:  # noqa: BLE001 — сеть моргнула, следующий проход повторит
+        logger.warning("Перенос заказа: сделка %s не прочитана: %s", deal_id, exc)
+        return "crm_silent"
+
+    # Сделки нет, она ушла из воронки реализации или заказ ведёт владелец —
+    # это работа отмены и проверки перед отправкой, обход туда не лезет.
+    if (not deal or not deal.get("id")
+            or int(deal.get("pipeline_id") or 0) != AMO_PIPELINE_REALIZATION
+            or owner_handles(deal)):
+        return "skip"
+
+    deal_order = order_from_lead(deal, tz=MOSCOW_TZ)
+    now = datetime.now(timezone.utc)
+    action = decide_on_reschedule(
+        saved_order_at=row["order_at"], deal_order_at=deal_order.order_at,
+        asked_sent_at=row["asked_sent_at"], now=now, tz=MOSCOW_TZ)
+    if action == "none":
+        return action
+
+    was = row["order_at"].astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+    became = deal_order.order_at.astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+    if CLIENT_MESSAGING_DRY_RUN:
+        logger.info("Разговор с клиентом (репетиция): перенос: сделка %s, %s → %s, %s",
+                    deal_id, was, became, action)
+        return "rehearsal"
+
+    order = deal_order
+    if not deal_order.address:
+        # Адрес — как при планировании: из сделки, недостающее — из лида.
+        # Лид читаем только тогда: заказов за проход много, переносов единицы.
+        try:
+            lead: Mapping[str, Any] | None = await client.fetch_lead(int(row["lead_id"]))
+        except AmoCRMAPIError as exc:
+            if exc.status != 404:
+                logger.warning("Перенос заказа: лид %s не прочитан: %s",
+                               row["lead_id"], exc)
+                return "crm_silent"
+            lead = None
+        except Exception as exc:  # noqa: BLE001 — следующий проход повторит
+            logger.warning("Перенос заказа: лид %s не прочитан: %s", row["lead_id"], exc)
+            return "crm_silent"
+        order = prefer_deal_details(deal_order, order_from_lead(lead or {}, tz=MOSCOW_TZ))
+
+    async with pool.acquire() as conn:
+        done = await _confirmation_reschedule(conn, int(row["lead_id"]),
+                                              order=order, now=now)
+    logger.info("Разговор с клиентом: перенос: сделка %s, %s → %s, %s",
+                deal_id, was, became, done)
+    return done
+
+
+async def run_confirmation_reschedule_watch() -> None:
+    """Заказ перенесли — переставить вопрос «подтверждаете заказ?» заранее.
+
+    Проверка перед отправкой видит перенос, только когда письмо уже в руках
+    у работника очереди: за сутки до старой даты. Перенос на более раннюю дату
+    к этому часу опоздал бы, а перенос после заданного вопроса она не видит
+    вовсе — письма в очереди уже нет. Поэтому раз в 10 минут обход сверяет
+    дату в сделке со всеми живыми ожиданиями. Что делать, решает правило
+    `decide_on_reschedule`, пересчёт — `_confirmation_reschedule`: те же,
+    что у проверки перед отправкой.
+
+    Владельцу о перестановке не пишем (решение 3): след — только в журнале.
+    В репетиции — только строка в логе, в базу и очередь ничего.
+    """
+    global _reschedule_watch_first_pass_done
+    if not CLIENT_MESSAGING_ENABLED or pool is None or not _amocrm_api_enabled():
+        return
+
+    depth = (timedelta(0) if _reschedule_watch_first_pass_done
+             else RESCHEDULE_FIRST_PASS_DEPTH)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT lead_id, deal_id, order_at, asked_sent_at
+            FROM order_confirmations
+            WHERE status IN ('planned', 'confirmed', 'refused', 'owner_notified')
+              AND deal_id IS NOT NULL
+              AND deal_id <> 0
+              AND order_at > $1
+            ORDER BY order_at
+            LIMIT $2
+            """,
+            datetime.now(timezone.utc) - depth,
+            RESCHEDULE_WATCH_LIMIT,
+        )
+    if len(rows) >= RESCHEDULE_WATCH_LIMIT:
+        logger.warning("Перенос заказа: выборка упёрлась в лимит %s — "
+                       "дальние заказы в этот проход не сверены",
+                       RESCHEDULE_WATCH_LIMIT)
+
+    counters: dict[str, int] = {}
+    if rows:
+        async with AmoCRMAPIClient(AMOCRM_API_BASE, AMOCRM_API_TOKEN) as client:
+            for row in rows:
+                try:
+                    outcome = await _confirmation_watch_deal(client, row)
+                except Exception as exc:  # noqa: BLE001 — один заказ не роняет проход
+                    logger.exception("Перенос заказа: сделка %s не разобрана: %s",
+                                     row["deal_id"], exc)
+                    outcome = "error"
+                counters[outcome] = counters.get(outcome, 0) + 1
+    _reschedule_watch_first_pass_done = True
+
+    if any(key not in ("none", "skip") for key in counters):
+        logger.info("Перенос заказа: %s", counters)
 
 
 async def _amocrm_mark_unsorted_action(
@@ -13908,7 +14046,7 @@ async def unknown(msg: Message, state: FSMContext):
     await msg.answer("Команда не распознана. Выберите действие на клавиатуре ниже.", reply_markup=kb)
 
 async def main():
-    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task, own_heartbeat_task, unsorted_cards_task
+    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, reschedule_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task, own_heartbeat_task, unsorted_cards_task
     notification_rules = _load_notification_rules()
     pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=5)
     dp["pool"] = pool
@@ -14003,6 +14141,14 @@ async def main():
             schedule_periodic_job(CLIENT_MESSAGING_INTERVAL_SEC,
                                   run_confirmation_silence_watch,
                                   "confirmation_silence")
+        )
+    if reschedule_watch_task is None and CLIENT_MESSAGING_ENABLED:
+        # Тем же ритмом: перенос ловится не позже чем через десять минут,
+        # задолго до вопроса за сутки до работы.
+        reschedule_watch_task = asyncio.create_task(
+            schedule_periodic_job(CLIENT_MESSAGING_INTERVAL_SEC,
+                                  run_confirmation_reschedule_watch,
+                                  "confirmation_reschedule")
         )
     if unasked_watch_task is None and CLIENT_MESSAGING_ENABLED:
         unasked_watch_task = asyncio.create_task(

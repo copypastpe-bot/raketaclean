@@ -10,7 +10,9 @@
 (`_confirmation_reschedule`) — старое письмо отменено, новое стоит за сутки до
 новой даты, строка ожидания переписана, след только во внутреннем журнале.
 Само правило «что делать» — чистая функция, её таблица случаев —
-в tests/test_client_messaging.py.
+в tests/test_client_messaging.py. Задача 2 — обход раз в 10 минут
+(`run_confirmation_reschedule_watch`): тот же пересчёт, но без письма в руках
+работника очереди, по всем живым ожиданиям сразу.
 
 На настоящем Postgres (DSN в TEST_DB_DSN, без него классы пропускаются): своя
 схема, минимальная `clients`, остальные таблицы — теми же функциями, что
@@ -30,13 +32,16 @@ import asyncpg
 
 import bot
 from notifications.amo_exchange import AMO_FIELD_ADDRESS
+from notifications.amocrm_api import AmoCRMAPIError
 from notifications.client_messaging import (
     AMO_FIELD_ORDER_DATETIME,
+    AMO_FIELD_OWNER_HANDLES,
     AMO_PIPELINE_REALIZATION,
     AMO_STAGE_CONFIRMED,
     AMO_STAGE_ORDER_CREATED,
     ASK_BEFORE,
     CONFIRM_REQUEST_EVENT,
+    SILENCE_LIMIT,
 )
 from notifications.outbox import (
     PRE_SEND_OK,
@@ -94,12 +99,17 @@ def _lead(*, address=None):
             "custom_fields_values": _fields(order_at=None, address=address)}
 
 
-def _fake_amo(entities):
-    """Заглушка amoCRM: карточки по номеру, как `fetch_lead`."""
+def _fake_amo(entities, calls=None):
+    """Заглушка amoCRM: карточки по номеру, как `fetch_lead`.
+
+    Исключение вместо карточки — CRM ответила на этот номер ошибкой.
+    В `calls` пишутся открытия клиента (`"client"`) и запрошенные номера.
+    """
 
     class FakeAmo:
         def __init__(self, *args, **kwargs):
-            pass
+            if calls is not None:
+                calls.append("client")
 
         async def __aenter__(self):
             return self
@@ -108,7 +118,12 @@ def _fake_amo(entities):
             return False
 
         async def fetch_lead(self, lead_id):
-            return entities[int(lead_id)]
+            if calls is not None:
+                calls.append(int(lead_id))
+            value = entities[int(lead_id)]
+            if isinstance(value, Exception):
+                raise value
+            return value
 
     return FakeAmo
 
@@ -141,13 +156,14 @@ class _RescheduleDbCase(unittest.IsolatedAsyncioTestCase):
             server_settings={"search_path": SCHEMA},
         )
         self.amo = {}
+        self.amo_calls = []
         for target, value in (
             ("pool", self.pool),
             ("notification_rules", RULES),
             ("CLIENT_MESSAGING_ENABLED", True),
             ("CLIENT_MESSAGING_DRY_RUN", False),
             ("_amocrm_api_enabled", lambda: True),
-            ("AmoCRMAPIClient", _fake_amo(self.amo)),
+            ("AmoCRMAPIClient", _fake_amo(self.amo, self.amo_calls)),
         ):
             patcher = mock.patch.object(bot, target, value)
             patcher.start()
@@ -518,6 +534,259 @@ class RescheduleRecomputeTests(_RescheduleDbCase):
         await self._reschedule(self.new_at + timedelta(days=1))
 
         self.assertEqual(len(await self._journal()), 2)
+
+
+# Ещё заказы — для проходов обхода по нескольким ожиданиям сразу.
+EXTRA = [(31703500 + n, 31703600 + n) for n in range(4)]
+
+
+def _deal_for(deal_id, **kwargs):
+    return {**_deal(**kwargs), "id": deal_id}
+
+
+class RescheduleWatchTests(_RescheduleDbCase):
+    """Обход раз в 10 минут (задача 2): ловит перенос сам, не дожидаясь письма.
+
+    Проверка перед отправкой видит перенос только за сутки до старой даты, а
+    перенос на более раннюю дату к этому часу уже опоздал бы. И вопрос, уже
+    заданный клиенту, она не видит вовсе — письма в очереди больше нет.
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # Каждый тест начинается как первый проход после старта бота.
+        patcher = mock.patch.object(bot, "_reschedule_watch_first_pass_done", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def _other(self, lead_id, deal_id, *, order_at, status="planned", sent=False):
+        """Ещё одно ожидание, без письма в очереди."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO order_confirmations (
+                    lead_id, deal_id, client_id, phone_digits, order_at, status,
+                    asked_at, asked_sent_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz,
+                        CASE WHEN $8 THEN $7::timestamptz END)
+                """,
+                lead_id, deal_id, self.client_id, CLIENT_DIGITS, order_at, status,
+                order_at - ASK_BEFORE, sent)
+
+    async def _row_of(self, lead_id):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(
+                "SELECT * FROM order_confirmations WHERE lead_id = $1", lead_id)
+
+    async def test_moved_earlier_before_question_is_replanned(self):
+        """Перенос на более раннюю дату: вопрос стоит на старое, позднее время,
+        и проверка перед отправкой поймала бы перенос слишком поздно."""
+        self.old_at = self.now + timedelta(days=20)
+        old_id = await self._pending()
+        earlier = (self.now + timedelta(days=5)).replace(hour=9, minute=30)
+        self._crm(_deal(order_at=earlier))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        old = await self._letter(old_id)
+        self.assertEqual(old["status"], "cancelled")
+        self.assertEqual(old["last_error"],
+                         f"заказ перенесён на {earlier:%d.%m.%Y %H:%M}")
+        letters = await self._letters()
+        self.assertEqual(len(letters), 2)
+        new = letters[-1]
+        self.assertEqual(new["status"], "pending")
+        self.assertEqual(new["scheduled_at"], earlier - ASK_BEFORE)
+        self.assertEqual(json.loads(new["payload"]),
+                         {"date": f"{earlier:%d.%m.%Y}", "time": "09:30",
+                          "address": "ул. Новая, 1"})
+        row = await self._row()
+        self.assertEqual(row["order_at"], earlier)
+        self.assertEqual(row["asked_at"], earlier - ASK_BEFORE)
+        self.assertEqual(row["outbox_id"], new["id"])
+        self.assertEqual(row["status"], "planned")
+        self.assertIsNotNone(row["rescheduled_at"])
+        self.assertEqual([r["action"] for r in await self._journal()], ["replan"])
+
+    async def test_answered_yes_then_moved_is_asked_again(self):
+        """Решения 2 и 4: клиент сказал «да», сделка в «Заказ подтвержден», а
+        заказ перенесли на другой день. Спрашиваем заново за сутки до новой
+        даты; сторож молчунов по старому вопросу владельца не зовёт."""
+        await self._pending(status="confirmed", sent=True, answer="Да",
+                            letter_status="sent")
+        async with self.pool.acquire() as conn:
+            # Вопрос ушёл дольше, чем сторож молчунов ждёт ответа: не сбрось
+            # пересчёт отметку отправки — сторож позвал бы владельца сразу.
+            await conn.execute(
+                "UPDATE order_confirmations SET asked_sent_at = $2 WHERE lead_id = $1",
+                LEAD_ID, datetime.now(MSK) - SILENCE_LIMIT - timedelta(hours=1))
+        self._crm(_deal(order_at=self.new_at, status_id=AMO_STAGE_CONFIRMED))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual(row["status"], "planned")
+        self.assertEqual(row["order_at"], self.new_at)
+        self.assertIsNotNone(row["rescheduled_at"])
+        for column in ("asked_sent_at", "answered_at", "answer_text", "notified_at"):
+            self.assertIsNone(row[column], column)
+        new = (await self._letters())[-1]
+        self.assertEqual(row["outbox_id"], new["id"])
+        self.assertEqual(new["scheduled_at"], self.new_at - ASK_BEFORE)
+        self.assertEqual([r["action"] for r in await self._journal()], ["reask"])
+
+        notify = mock.AsyncMock()
+        with mock.patch.object(bot, "_confirmation_notify_owner", notify):
+            await bot.run_confirmation_silence_watch()
+        notify.assert_not_called()
+
+    async def test_same_day_new_time_only_updates_time(self):
+        """Вопрос задан, день тот же, другое только время — заново не спрашиваем."""
+        await self._pending(status="confirmed", sent=True, answer="Да",
+                            letter_status="sent")
+        same_day = self.old_at + timedelta(minutes=30)
+        if same_day.date() != self.old_at.date():
+            same_day = self.old_at - timedelta(minutes=30)
+        self._crm(_deal(order_at=same_day, status_id=AMO_STAGE_CONFIRMED))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual(row["order_at"], same_day)
+        self.assertEqual(row["status"], "confirmed")
+        self.assertEqual(row["answer_text"], "Да")
+        self.assertIsNone(row["rescheduled_at"])
+        self.assertEqual(len(await self._letters()), 1)
+        self.assertEqual([r["action"] for r in await self._journal()], ["update_time"])
+
+    async def test_first_pass_looks_back_30_days_then_only_ahead(self):
+        """Живой случай 31703481: вопрос про 11.10 ушёл, клиент промолчал,
+        владельца позвали, а заказ ещё 08.10 перенесли на 31.10. Первый проход
+        после старта бота смотрит на 30 дней назад по сохранённой дате и
+        подхватывает такие заказы; дальше — только заказы с датой впереди."""
+        self.old_at = self.now - timedelta(days=3)
+        await self._pending(status="owner_notified", sent=True, letter_status="sent")
+        self._crm(_deal(order_at=self.new_at))
+        (old_lead, old_deal), (late_lead, late_deal) = EXTRA[0], EXTRA[1]
+        too_old = self.now - timedelta(days=40)
+        await self._other(old_lead, old_deal, order_at=too_old,
+                          status="owner_notified", sent=True)
+        self.amo[old_deal] = _deal_for(old_deal, order_at=self.new_at)
+
+        await bot.run_confirmation_reschedule_watch()
+
+        row = await self._row()
+        self.assertEqual(row["status"], "planned")
+        self.assertEqual(row["order_at"], self.new_at)
+        self.assertEqual(row["asked_at"], self.new_at - ASK_BEFORE)
+        self.assertIsNone(row["notified_at"])
+        self.assertIsNotNone(row["rescheduled_at"])
+        self.assertEqual([r["action"] for r in await self._journal()], ["reask"])
+        self.assertNotIn(old_deal, self.amo_calls, "старше 30 дней — не смотрим")
+        self.assertEqual((await self._row_of(old_lead))["order_at"], too_old)
+
+        # Второй проход: заказ, чья сохранённая дата уже прошла, не смотрим.
+        passed = self.now - timedelta(days=2)
+        await self._other(late_lead, late_deal, order_at=passed,
+                          status="owner_notified", sent=True)
+        self.amo[late_deal] = _deal_for(late_deal, order_at=self.new_at)
+        self.amo_calls.clear()
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertNotIn(late_deal, self.amo_calls)
+        self.assertIn(DEAL_ID, self.amo_calls, "заказ впереди сверяется каждый проход")
+        self.assertEqual((await self._row_of(late_lead))["order_at"], passed)
+        self.assertEqual(len(await self._journal()), 1, "второй раз переставлять нечего")
+
+    async def test_rehearsal_only_logs(self):
+        """Репетиция: строка в логе, в базу и очередь — ничего."""
+        old_id = await self._pending()
+        self._crm(_deal(order_at=self.new_at))
+
+        with mock.patch.object(bot, "CLIENT_MESSAGING_DRY_RUN", True), \
+                self.assertLogs(bot.logger, level="INFO") as logs:
+            await bot.run_confirmation_reschedule_watch()
+
+        self.assertTrue(any("перенос" in line and str(DEAL_ID) in line
+                            and "replan" in line for line in logs.output), logs.output)
+        self.assertEqual((await self._letter(old_id))["status"], "pending")
+        self.assertEqual(len(await self._letters()), 1)
+        row = await self._row()
+        self.assertEqual(row["order_at"], self.old_at)
+        self.assertEqual(row["outbox_id"], old_id)
+        self.assertIsNone(row["rescheduled_at"])
+        self.assertEqual(await self._journal(), [])
+
+    async def test_crm_failure_on_one_deal_does_not_stop_the_pass(self):
+        """Сбой CRM на одной сделке — лог и дальше; следующий проход повторит."""
+        (broken_lead, broken_deal), (silent_lead, silent_deal) = EXTRA[0], EXTRA[1]
+        soon = self.now + timedelta(hours=30)
+        # Сломанные сделки идут первыми: их даты раньше.
+        await self._other(broken_lead, broken_deal, order_at=soon)
+        await self._other(silent_lead, silent_deal, order_at=soon + timedelta(hours=1))
+        self.amo[broken_deal] = AmoCRMAPIError(500, "amoCRM лежит")
+        self.amo[silent_deal] = TimeoutError("сеть моргнула")
+        self.old_at = self.now + timedelta(days=3)
+        await self._pending(status="confirmed", sent=True, answer="Да",
+                            letter_status="sent")
+        self._crm(_deal(order_at=self.new_at, status_id=AMO_STAGE_CONFIRMED))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertEqual((await self._row())["order_at"], self.new_at)
+        self.assertEqual((await self._row_of(broken_lead))["order_at"], soon)
+        self.assertEqual([r["action"] for r in await self._journal()], ["reask"])
+        self.assertEqual(self.amo_calls.count("client"), 1, "один клиент CRM на проход")
+
+    async def test_deals_that_are_not_ours_are_left_alone(self):
+        """Сделки нет, она ушла из воронки реализации или заказ ведёт владелец —
+        это работа отмены и проверки перед отправкой; обход их не трогает."""
+        moved = _deal(order_at=self.new_at)
+        owner_flag = {"field_id": AMO_FIELD_OWNER_HANDLES, "values": [{"value": "1"}]}
+        cards = [
+            AmoCRMAPIError(404, "сделку удалили"),
+            {},                                   # amoCRM отвечает 204 без тела
+            {**moved, "id": EXTRA[2][1], "pipeline_id": 1},
+            {**moved, "id": EXTRA[3][1],
+             "custom_fields_values": moved["custom_fields_values"] + [owner_flag]},
+        ]
+        start = self.now + timedelta(days=3)
+        for (lead_id, deal_id), card in zip(EXTRA, cards):
+            await self._other(lead_id, deal_id, order_at=start)
+            self.amo[deal_id] = card
+
+        await bot.run_confirmation_reschedule_watch()
+
+        for lead_id, deal_id in EXTRA:
+            self.assertIn(deal_id, self.amo_calls)
+            row = await self._row_of(lead_id)
+            self.assertEqual(row["order_at"], start, deal_id)
+            self.assertIsNone(row["rescheduled_at"], deal_id)
+        self.assertEqual(await self._journal(), [])
+        self.assertEqual(await self._letters(), [])
+
+    async def test_only_live_waits_with_a_deal_are_checked(self):
+        """Брошенные ожидания (`dropped`) и заказы без сделки обход не читает."""
+        start = self.now + timedelta(days=3)
+        await self._other(EXTRA[0][0], EXTRA[0][1], order_at=start, status="dropped")
+        await self._other(EXTRA[1][0], None, order_at=start)
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertEqual([call for call in self.amo_calls if call != "client"], [])
+
+    async def test_address_missing_in_deal_is_taken_from_lead(self):
+        """Адрес — как при планировании: из сделки, недостающее — из лида."""
+        await self._pending()
+        self._crm(_deal(order_at=self.new_at, address=None),
+                  _lead(address="ул. Лидовая, 7"))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        new = (await self._letters())[-1]
+        self.assertEqual(json.loads(new["payload"])["address"], "ул. Лидовая, 7")
 
 
 if __name__ == "__main__":
