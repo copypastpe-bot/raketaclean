@@ -195,6 +195,7 @@ from notifications.amocrm_unsorted import (
     render_card_text,
     unsorted_kind,
 )
+from notifications.order_close_reminder import LOOKBACK_DAYS as ORDER_CLOSE_LOOKBACK_DAYS
 from expense_categories import EXPENSE_CATEGORIES, normalize_expense_category, suggest_expense_category
 from telegram_transport import TelegramIPFallbackResolver
 from cleaning.schema import ensure_cleaning_schema
@@ -2966,6 +2967,92 @@ async def unsorted_card_done_cb(query: CallbackQuery):
         await query.answer("Уже отмечено")
         targets = [pressed] if pressed is not None else []
     await _unsorted_card_deliver(_unsorted_card_from_row(row), card_id, previous=targets, closed=True)
+
+
+# --- Сторож проведения заказов (ТЗ docs/plans/2026-10-13-order-close-reminder.md) ---
+
+# Откуда брать записи календаря. Константа, а не имя прямо в запросе: тесты
+# подменяют её таблицей с теми же колонками в своей схеме.
+ORDER_CLOSE_JOBS_SOURCE = "adminbot.calendar_jobs"
+
+
+async def _order_close_candidates(conn: Any, today: date) -> list[Any]:
+    """Записи календаря для сторожа проведения заказов (задача 1 ТЗ 2026-10-13).
+
+    Берёт две группы:
+    - записи с `order_date` от `today − 14` до `today − 1` (московские даты),
+      которые не проведены;
+    - все записи с открытым напоминанием (`order_close_reminders.status='open'`)
+      любой давности — проведённые тоже, чтобы рассылка их закрыла; открытое
+      напоминание, чьей записи в календаре больше нет, приходит с `gone=True`.
+
+    «Проведён» — любое из, начиная с 00:00 МСК дня накануне записи и без
+    верхней границы (заказ бывает проведён через неделю):
+    - заказ химчистки, привязанный к записи (`orders.calendar_event_id`);
+    - заказ химчистки, где последние 10 цифр `orders.phone_digits` — любой из
+      номеров записи;
+    - не удалённая уборка клининга клиента с любым из номеров записи (дата —
+      `coalesce(happened_at, created_at)`).
+
+    Строка ответа: `event_id`, `order_date`, `client_name`, `address`,
+    `services` (у пропавшей записи — дата из напоминания, остальное None),
+    `reminder_id` и `reminder_status` (строка напоминания любого статуса, если
+    есть), `gone`, `conducted`. Порядок — по дате записи. Ошибки базы не
+    глушит: решает вызывающий.
+    """
+    first_day = today - timedelta(days=ORDER_CLOSE_LOOKBACK_DAYS)
+    last_day = today - timedelta(days=1)
+    return await conn.fetch(
+        f"""
+        WITH jobs AS (
+            SELECT j.event_id, j.phones, j.order_date, j.client_name, j.address, j.services,
+                   ((j.order_date - 1)::timestamp AT TIME ZONE 'Europe/Moscow') AS since
+            FROM {ORDER_CLOSE_JOBS_SOURCE} j
+            WHERE j.order_date BETWEEN $1 AND $2
+               OR j.event_id IN (
+                   SELECT event_id FROM order_close_reminders WHERE status = 'open'
+               )
+        ),
+        checked AS (
+            SELECT jobs.*,
+                   (
+                       EXISTS (
+                           SELECT 1
+                           FROM orders o
+                           WHERE o.created_at >= jobs.since
+                             AND (o.calendar_event_id = jobs.event_id
+                                  OR right(o.phone_digits, 10) = ANY(jobs.phones))
+                       )
+                       OR EXISTS (
+                           SELECT 1
+                           FROM cleaning_orders co
+                           JOIN clients c ON c.id = co.client_id
+                           WHERE co.deleted_at IS NULL
+                             AND coalesce(co.happened_at, co.created_at) >= jobs.since
+                             AND right(c.phone_digits, 10) = ANY(jobs.phones)
+                       )
+                   ) AS conducted
+            FROM jobs
+        )
+        SELECT coalesce(c.event_id, r.event_id) AS event_id,
+               coalesce(c.order_date, r.order_date) AS order_date,
+               c.client_name,
+               c.address,
+               c.services,
+               r.id AS reminder_id,
+               r.status AS reminder_status,
+               (c.event_id IS NULL) AS gone,
+               coalesce(c.conducted, false) AS conducted
+        FROM checked c
+        FULL JOIN order_close_reminders r ON r.event_id = c.event_id
+        WHERE r.status = 'open'
+           OR (c.event_id IS NOT NULL AND NOT c.conducted
+               AND c.order_date BETWEEN $1 AND $2)
+        ORDER BY order_date, event_id
+        """,
+        first_day,
+        last_day,
+    )
 
 
 async def amocrm_api_polling_loop() -> None:
