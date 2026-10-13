@@ -30,6 +30,7 @@ from notifications.client_messaging import (
     SILENCE_LIMIT,
     child_deal_id,
     decide_on_answer,
+    decide_on_reschedule,
     is_question_letter,
     letter_failure_words,
     letter_payload,
@@ -803,3 +804,94 @@ class CancelLetterText(unittest.TestCase):
         payload = letter_payload(
             order_at=datetime(2026, 9, 11, 10, 0, tzinfo=MSK), address=None)
         self.assertEqual(payload["date"], "11.09.2026")
+
+
+class RescheduleRuleTests(unittest.TestCase):
+    """Заказ перенесли — что делать с вопросом «подтверждаете заказ?».
+
+    Живой случай 2026-10-10, сделка 31703481: перенос 11.10 → 31.10 записан
+    в сделку 08.10, а вопрос про 11.10 всё равно ушёл клиенту 10.10. Решения
+    владельца 13.10: вопрос не ушёл — переставить на новую дату; ушёл —
+    спросить заново; сменилось только время в тот же день у уже спрошенного
+    заказа — заново не спрашивать, запомнить время.
+    """
+
+    NOW = datetime(2026, 10, 8, 15, 35, tzinfo=MSK)
+    SENT = datetime(2026, 10, 7, 10, 0, tzinfo=MSK)
+
+    def _decide(self, *, saved, deal, sent):
+        return decide_on_reschedule(saved_order_at=saved, deal_order_at=deal,
+                                    asked_sent_at=sent, now=self.NOW, tz=MSK)
+
+    def test_table_of_cases(self):
+        at = lambda d, h, m=0: datetime(2026, 10, d, h, m, tzinfo=MSK)  # noqa: E731
+        utc = timezone.utc
+        cases = [
+            # (что проверяем, сохранённое, в сделке, вопрос ушёл, ожидаемое)
+            ("вопрос не ушёл, всё совпадает", at(11, 10), at(11, 10), None, "none"),
+            ("вопрос не ушёл, перенос вперёд", at(11, 10), at(31, 10), None, "replan"),
+            ("вопрос не ушёл, перенос назад", at(31, 10), at(11, 10), None, "replan"),
+            ("вопрос не ушёл, только время", at(11, 10), at(11, 14), None, "replan"),
+            ("вопрос ушёл, всё совпадает", at(11, 10), at(11, 10), self.SENT, "none"),
+            ("вопрос ушёл, перенос вперёд", at(11, 10), at(31, 10), self.SENT, "reask"),
+            ("вопрос ушёл, перенос назад", at(31, 10), at(11, 10), self.SENT, "reask"),
+            ("вопрос ушёл, только время", at(11, 10), at(11, 14), self.SENT, "update_time"),
+            ("новая дата в прошлом, вопрос не ушёл", at(11, 10), at(8, 12), None, "none"),
+            ("новая дата в прошлом, вопрос ушёл", at(11, 10), at(8, 12), self.SENT, "none"),
+            ("новое время ровно сейчас", at(11, 10), self.NOW, None, "none"),
+            ("в сделке нет даты, вопрос не ушёл", at(11, 10), None, None, "none"),
+            ("в сделке нет даты, вопрос ушёл", at(11, 10), None, self.SENT, "none"),
+            # Граница суток по Москве: 23:30 → 00:30 следующего дня — это другой
+            # день, хотя между ними час. В UTC оба момента — один день (20:30 и
+            # 21:30 предыдущего числа), и сравнение по UTC ошиблось бы.
+            ("граница суток по Москве", at(11, 23, 30), at(12, 0, 30), self.SENT, "reask"),
+            ("тот же момент в другой зоне", at(11, 10),
+             at(11, 10).astimezone(utc), self.SENT, "none"),
+            ("тот же день, сохранённое в UTC", at(11, 10).astimezone(utc),
+             at(11, 18), self.SENT, "update_time"),
+        ]
+        for title, saved, deal, sent, expected in cases:
+            with self.subTest(title):
+                self.assertEqual(self._decide(saved=saved, deal=deal, sent=sent),
+                                 expected)
+
+    def test_unknown_saved_date_is_a_change(self):
+        """Ожидание без даты (поле правили руками) — любая дата в сделке новая."""
+        deal = datetime(2026, 10, 31, 10, 0, tzinfo=MSK)
+        self.assertEqual(self._decide(saved=None, deal=deal, sent=None), "replan")
+        self.assertEqual(self._decide(saved=None, deal=deal, sent=self.SENT), "reask")
+
+
+class RescheduledQuestionGuardTests(unittest.TestCase):
+    """Повторный вопрос после переноса (решение владельца 13.10, п.4).
+
+    Сделка, где клиент уже сказал «да», стоит в «Заказ подтвержден» и там
+    остаётся. Спросить заново по ней можно — но только если заказ переносили:
+    без отметки о переносе подтверждённая сделка по-прежнему стоп.
+    """
+
+    def _deal(self, **over):
+        deal = {"id": 31703481, "pipeline_id": AMO_PIPELINE_REALIZATION,
+                "status_id": AMO_STAGE_CONFIRMED}
+        deal.update(over)
+        return deal
+
+    def test_confirmed_deal_is_asked_again_after_reschedule(self):
+        self.assertEqual(may_ask_question(self._deal(), rescheduled=True), (True, ""))
+
+    def test_confirmed_deal_without_reschedule_stays_closed(self):
+        allowed, reason = may_ask_question(self._deal())
+        self.assertFalse(allowed)
+        self.assertTrue(reason)
+
+    def test_order_created_is_asked_either_way(self):
+        deal = self._deal(status_id=AMO_STAGE_ORDER_CREATED)
+        self.assertTrue(may_ask_question(deal)[0])
+        self.assertTrue(may_ask_question(deal, rescheduled=True)[0])
+
+    def test_reschedule_opens_no_other_doors(self):
+        """Перенос не открывает ни чужую воронку, ни дальние этапы, ни удалённую сделку."""
+        for deal in (None, {"text": ""}, self._deal(pipeline_id=1),
+                     self._deal(status_id=142), self._deal(status_id=143)):
+            with self.subTest(deal=deal):
+                self.assertFalse(may_ask_question(deal, rescheduled=True)[0])

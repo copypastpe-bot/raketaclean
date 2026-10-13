@@ -329,7 +329,8 @@ def is_question_letter(event_key: str) -> bool:
     return event_key == CONFIRM_REQUEST_EVENT
 
 
-def may_ask_question(deal: Optional[Mapping[str, Any]]) -> tuple[bool, str]:
+def may_ask_question(deal: Optional[Mapping[str, Any]], *,
+                     rescheduled: bool = False) -> tuple[bool, str]:
     """Жив ли ещё заказ, по которому робот собрался задать вопрос.
 
     Решение владельца 2026-09-03: никаких вопросов по закрытой сделке. Проверка
@@ -337,6 +338,11 @@ def may_ask_question(deal: Optional[Mapping[str, Any]]) -> tuple[bool, str]:
     измениться. 2026-09-03 сделку удалили совсем — заказ завёлся по ошибке
     из дублированной записи календаря, — и клиент чуть не получил вопрос
     о работе, которой уже нет.
+
+    `rescheduled` — заказ переносили (в ожидании стоит `rescheduled_at`). Тогда
+    вопрос задаётся заново и по сделке в «Заказ подтвержден»: клиент сказал
+    «да» про старую дату, сделка там и осталась (решение владельца 13.10, п.4).
+    Без переноса подтверждённая сделка — по-прежнему стоп.
 
     `deal` пуст, когда сделки в CRM не нашлось. Причина отказа возвращается
     человеческими словами: она уходит в отмену письма, и по ней потом разбирают,
@@ -349,9 +355,51 @@ def may_ask_question(deal: Optional[Mapping[str, Any]]) -> tuple[bool, str]:
         return False, "заказа больше нет в CRM"
     if int(deal.get("pipeline_id") or 0) != AMO_PIPELINE_REALIZATION:
         return False, "сделка ушла из воронки реализации"
-    if int(deal.get("status_id") or 0) != AMO_STAGE_ORDER_CREATED:
+    stages = ((AMO_STAGE_ORDER_CREATED, AMO_STAGE_CONFIRMED) if rescheduled
+              else (AMO_STAGE_ORDER_CREATED,))
+    if int(deal.get("status_id") or 0) not in stages:
         return False, "сделка ушла с этапа «Заказ оформлен»"
     return True, ""
+
+
+def decide_on_reschedule(*, saved_order_at: Optional[datetime],
+                         deal_order_at: Optional[datetime],
+                         asked_sent_at: Optional[datetime],
+                         now: datetime, tz: tzinfo) -> str:
+    """Заказ перенесли? И что тогда делать с вопросом «подтверждаете заказ?».
+
+    Вопрос планируется один раз, при оформлении заказа. Перенос в календаре
+    админ-бот пишет в поле сделки «Дата и время заказа», а рабочий бот об этом
+    не знал: 2026-10-10 клиенту ушёл вопрос про 11.10, хотя ещё 08.10 заказ
+    перенесли на 31.10 (сделка 31703481). Решения владельца 13.10.
+
+    `saved_order_at` — дата работы в ожидании, `deal_order_at` — в сделке сейчас,
+    `asked_sent_at` — когда вопрос ушёл клиенту (пусто — ещё не уходил).
+    Ответ — одно из четырёх:
+
+    * `none` — ничего не делать: в сделке нет даты; новая работа уже прошла
+      (спрашивать не о чем); ничего не поменялось;
+    * `replan` — вопрос не уходил, а дата или время другие: старый вопрос
+      отменить, новый поставить за сутки до новой даты. Время сравниваем тоже —
+      в письме стоят и дата, и время;
+    * `reask` — вопрос уходил, а **день** другой: старое ожидание закрыть,
+      спросить заново за сутки до новой даты;
+    * `update_time` — вопрос уходил, день тот же, другое только время:
+      заново не спрашиваем, запоминаем новое время.
+
+    День считается по `tz` (Москва): заказ на 23:30 и на 00:30 следующего
+    числа — разные дни, хотя в UTC это одна дата.
+    """
+    if deal_order_at is None or deal_order_at <= now:
+        return "none"
+    if saved_order_at is not None and saved_order_at == deal_order_at:
+        return "none"
+    if asked_sent_at is None:
+        return "replan"
+    if (saved_order_at is not None
+            and saved_order_at.astimezone(tz).date() == deal_order_at.astimezone(tz).date()):
+        return "update_time"
+    return "reask"
 
 
 def owner_handles(entity: Optional[Mapping[str, Any]]) -> bool:
@@ -530,6 +578,7 @@ __all__ = [
     "OrderDetails",
     "child_deal_id",
     "decide_on_answer",
+    "decide_on_reschedule",
     "is_question_letter",
     "letter_failure_words",
     "letter_payload",
