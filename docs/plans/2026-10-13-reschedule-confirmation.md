@@ -108,6 +108,8 @@
   вопрос пропускается в «Заказ подтвержден» только при `rescheduled_at`; запись журнала
   с `event_type='confirmation_reschedule'` есть, в суточной сводке её нет.
 
+Выполнено: b4df1ab, d26b970, 38cfa10
+
 ### Задача 2. Обход раз в 10 минут
 
 - `run_confirmation_reschedule_watch()` в `bot.py`, рядом с `run_confirmation_silence_watch`.
