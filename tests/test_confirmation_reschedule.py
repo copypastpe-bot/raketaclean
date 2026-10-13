@@ -406,6 +406,40 @@ class ReschedulePreSendTests(_RescheduleDbCase):
         new = (await self._letters())[-1]
         self.assertEqual(json.loads(new["payload"])["address"], "ул. Лидовая, 7")
 
+    async def test_orphan_question_is_cancelled(self):
+        """Правка 1 ревью 13.10: письмо-вопрос, на которое не ссылается ни одно
+        ожидание, ни к какому заказу больше не относится — оно не уходит.
+
+        Законного пути получить такое письмо нет: ожидание и письмо ставятся
+        вместе. Но вопрос, переставленный пересчётом на новое письмо, а потом
+        вернувшийся в очередь, — именно такой, и он спрашивал бы про старую дату.
+        """
+        async with self.pool.acquire() as conn:
+            orphan_id = await enqueue_notification(
+                conn, RULES, event_key=CONFIRM_REQUEST_EVENT,
+                client_id=self.client_id,
+                payload={"date": f"{self.old_at:%d.%m.%Y}",
+                         "time": f"{self.old_at:%H:%M}", "address": "ул. Старая, 5"},
+                scheduled_at=self.old_at - ASK_BEFORE)
+
+        await self._run_worker()
+
+        letter = await self._letter(orphan_id)
+        self.assertEqual(letter["status"], "cancelled")
+        self.assertEqual(letter["last_error"], "вопрос больше не связан с заказом")
+        self.assertEqual(self.amo_calls, [], "в CRM за сиротой не ходим")
+
+    async def test_question_without_deal_still_goes(self):
+        """Ожидание есть, а связь со сделкой не нашлась — шлём, как раньше."""
+        old_id = await self._pending()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE order_confirmations SET deal_id = NULL WHERE lead_id = $1", LEAD_ID)
+
+        verdict = await bot._confirmation_before_send(_entry(old_id, self.client_id))
+
+        self.assertEqual(verdict, PRE_SEND_OK)
+
     async def test_journal_is_not_in_daily_summary(self):
         """Решение 3: владельцу о перестановке не пишем — и строкой в суточной
         сводке тоже. След остаётся только во внутреннем журнале."""
@@ -453,6 +487,26 @@ class RescheduleRecomputeTests(_RescheduleDbCase):
 
         self.assertEqual((await self._letter(old_id))["status"], "pending")
         self.assertEqual(len(await self._letters()), 2)
+
+    async def test_letter_in_the_workers_hands_is_busy(self):
+        """Правка 1 ревью 13.10: работник взял письмо в отправку, а пересчёт
+        пришёл не от него (обход). Ничего не трогаем: письмо ещё может вернуться
+        в очередь (ночная тишина, повтор проверки, сбой отправки) и уйти про
+        старую дату. Обход повторит через 10 минут."""
+        old_id = await self._pending()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE notification_outbox SET status='sending' WHERE id=$1", old_id)
+        before = await self._row()
+
+        self.assertEqual(await self._reschedule(self.new_at), "busy")
+
+        self.assertEqual((await self._letter(old_id))["status"], "sending")
+        self.assertEqual(len(await self._letters()), 1)
+        row = await self._row()
+        for column in ("order_at", "outbox_id", "status", "asked_at", "rescheduled_at"):
+            self.assertEqual(row[column], before[column], column)
+        self.assertEqual(await self._journal(), [])
 
     async def test_letter_already_gone_counts_as_reask(self):
         """Письмо успело уйти, пока шёл пересчёт: новое всё равно ставится."""
@@ -607,6 +661,42 @@ class RescheduleWatchTests(_RescheduleDbCase):
         self.assertEqual(row["outbox_id"], new["id"])
         self.assertEqual(row["status"], "planned")
         self.assertIsNotNone(row["rescheduled_at"])
+        self.assertEqual([r["action"] for r in await self._journal()], ["replan"])
+
+    async def test_letter_being_sent_is_left_until_it_is_back(self):
+        """Правка 1 ревью 13.10: старое письмо в отправке — обход его не трогает
+        и вопрос не перевешивает. Раньше перевешивал: письмо, вернувшееся потом
+        в очередь, уходило про старую дату (ссылки на него уже не было — проверка
+        перед отправкой пропускала), а следом — второй вопрос.
+
+        Письмо вернулось в очередь — следующий проход пересчитывает как обычно.
+        """
+        old_id = await self._pending()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE notification_outbox SET status='sending' WHERE id=$1", old_id)
+        self._crm(_deal(order_at=self.new_at))
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertEqual((await self._letter(old_id))["status"], "sending")
+        self.assertEqual(len(await self._letters()), 1)
+        row = await self._row()
+        self.assertEqual(row["outbox_id"], old_id)
+        self.assertEqual(row["order_at"], self.old_at)
+        self.assertEqual(await self._journal(), [])
+
+        # Ночная тишина вернула письмо в очередь до утра.
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE notification_outbox SET status='pending' WHERE id=$1", old_id)
+
+        await bot.run_confirmation_reschedule_watch()
+
+        self.assertEqual((await self._letter(old_id))["status"], "cancelled")
+        row = await self._row()
+        self.assertEqual(row["order_at"], self.new_at)
+        self.assertEqual(row["outbox_id"], (await self._letters())[-1]["id"])
         self.assertEqual([r["action"] for r in await self._journal()], ["replan"])
 
     async def test_answered_yes_then_moved_is_asked_again(self):

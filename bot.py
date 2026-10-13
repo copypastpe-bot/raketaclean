@@ -1912,7 +1912,7 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
     правило `decide_on_reschedule` — здесь, под блокировкой строки ожидания:
     проверка перед отправкой и обход могут прийти к одному заказу одновременно,
     и второй не должен поставить второе письмо. Возвращает сделанное: `none`,
-    `replan`, `reask` или `update_time`.
+    `replan`, `reask`, `update_time` или `busy` (ничего не сделано, повторить).
 
     Всё одной транзакцией: старое письмо отменено, новое поставлено, строка
     переписана, след в журнале — либо всё, либо ничего.
@@ -1922,11 +1922,33 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
     не трогаем. Старое письмо успело уйти (отменить не вышло) — это уже
     `reask`: клиент получил вопрос про старую дату, новый ставится всё равно.
 
+    Старое письмо в отправке (`sending`), и это не письмо в руках у того, кто
+    зовёт, — `busy`: ничего не трогаем, обход повторит через 10 минут. Письмо
+    в отправке может вернуться в очередь (ночная тишина, повтор проверки, сбой
+    отправки), и, перевесь мы вопрос, оно ушло бы про старую дату: ожидание на
+    него больше не ссылалось бы (ревью 13.10, правка 1).
+
     Владельцу о перестановке не пишем никак (решение 3): ни сообщением, ни
     строкой в суточной сводке. Поэтому у журнала свой `event_type` —
     `confirmation_reschedule`: сводка считает `confirmation_status`.
     """
     async with conn.transaction():
+        # Блокировки — в том же порядке, что у работника очереди: сначала
+        # письмо, потом ожидание. Он отмечает письмо отправленным и той же
+        # транзакцией пишет факт отправки в ожидание (`mark_outbox_sent`, затем
+        # `after_send`); возьми пересчёт их наоборот — транзакции ждали бы
+        # друг друга. Номер письма меняется только под блокировкой ожидания,
+        # поэтому после обеих блокировок он сверяется ещё раз.
+        old_outbox_id = await conn.fetchval(
+            "SELECT outbox_id FROM order_confirmations WHERE lead_id = $1",
+            lead_id,
+        )
+        letter_status: str | None = None
+        if old_outbox_id:
+            letter_status = await conn.fetchval(
+                "SELECT status FROM notification_outbox WHERE id = $1 FOR UPDATE",
+                int(old_outbox_id),
+            )
         row = await conn.fetchrow(
             """
             SELECT deal_id, client_id, order_at, status, outbox_id, asked_at,
@@ -1939,6 +1961,9 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
         )
         if row is None:
             return "none"
+        if row["outbox_id"] != old_outbox_id:
+            # Вопрос переставили, пока брали блокировки, — в этот раз ничего.
+            return "busy"
         action = decide_on_reschedule(
             saved_order_at=row["order_at"], deal_order_at=order.order_at,
             asked_sent_at=row["asked_sent_at"], now=now, tz=MOSCOW_TZ)
@@ -1961,8 +1986,9 @@ async def _confirmation_reschedule(conn: asyncpg.Connection, lead_id: int, *,
                 new_at,
             )
         else:
-            old_outbox_id = row["outbox_id"]
             if old_outbox_id and int(old_outbox_id) != in_hand_outbox_id:
+                if letter_status == "sending":
+                    return "busy"
                 cancelled = await cancel_pending_outbox(
                     conn, int(old_outbox_id), _confirmation_moved_to(new_at))
                 if not cancelled:
@@ -2071,6 +2097,10 @@ async def _confirmation_check_moved(entry: NotificationOutboxEntry,
                          deal_id, exc)
         return PreSendVerdict("retry",
                               f"перенос сделки {deal_id} пересчитать не удалось: {exc}")
+    if done == "busy":
+        # Вопрос переставляли одновременно с нами: письмо подождёт, следующая
+        # проверка увидит, ссылается ли на него ещё ожидание.
+        return PreSendVerdict("retry", f"перенос сделки {deal_id} пересчитывается")
     logger.info("Разговор с клиентом: перенос: сделка %s, %s → %s, %s",
                 deal_id, was, became, done)
     return PreSendVerdict("cancel", _confirmation_moved_to(deal_order.order_at))
@@ -2112,7 +2142,16 @@ async def _confirmation_before_send(entry: NotificationOutboxEntry) -> PreSendVe
             """,
             entry.id,
         )
-    if pending is None or not pending["deal_id"]:
+    if pending is None:
+        # Ни одно ожидание на это письмо не ссылается: вопрос переставили на
+        # новое письмо, а это вернулось в очередь (ночная тишина, повтор, сбой
+        # отправки). Ушло бы — клиент получил бы вопрос про старую дату, а
+        # следом второй (ревью 13.10, правка 1). Законного пути получить такое
+        # письмо иначе нет: ожидание и письмо ставятся вместе.
+        logger.info("Разговор с клиентом: вопрос %s ни к одному заказу не относится",
+                    entry.id)
+        return PreSendVerdict("cancel", "вопрос больше не связан с заказом")
+    if not pending["deal_id"]:
         return PRE_SEND_OK
 
     deal_id = int(pending["deal_id"])
