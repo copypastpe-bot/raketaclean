@@ -195,7 +195,18 @@ from notifications.amocrm_unsorted import (
     render_card_text,
     unsorted_kind,
 )
-from notifications.order_close_reminder import LOOKBACK_DAYS as ORDER_CLOSE_LOOKBACK_DAYS
+# Под другими именами: `first_send_at` и `next_reminder_at` уже взяты из amocrm_unsorted.
+from notifications.order_close_reminder import (
+    LOOKBACK_DAYS as ORDER_CLOSE_LOOKBACK_DAYS,
+    SNOOZE_BUTTON_TEXT as ORDER_CLOSE_SNOOZE_BUTTON_TEXT,
+    first_send_at as order_close_first_send_at,
+    in_window as order_close_in_window,
+    next_reminder_at as order_close_next_reminder_at,
+    render_done_text as order_close_done_text,
+    render_snoozed_text as order_close_snoozed_text,
+    render_text as order_close_text,
+    snooze_until as order_close_snooze_until,
+)
 from expense_categories import EXPENSE_CATEGORIES, normalize_expense_category, suggest_expense_category
 from telegram_transport import TelegramIPFallbackResolver
 from cleaning.schema import ensure_cleaning_schema
@@ -339,6 +350,15 @@ ORDER_CALENDAR_PICK = _env_int("ORDER_CALENDAR_PICK", 0) == 1
 AMOCRM_UNSORTED_CARDS = _env_int("AMOCRM_UNSORTED_CARDS", 0) == 1
 UNSORTED_CARDS_DISPATCH_INTERVAL_SEC = 60
 UNSORTED_DONE_CB_PREFIX = "unsorted_done:"
+# Сторож проведения заказов (ТЗ docs/plans/2026-10-13-order-close-reminder.md):
+# запись-заказ в календаре есть, а заказа в боте нет — раз в 5 минут напоминание
+# в «Заказы подтверждения» (ORDERS_CONFIRM_CHAT_ID) и «Ракета чат сотрудников»
+# (STAFF_CHAT_ID, 0 — туда не слать) с кнопкой «Напомнить завтра».
+# По умолчанию выключено: ни строк, ни сообщений.
+ORDER_CLOSE_REMINDER_ENABLED = _env_int("ORDER_CLOSE_REMINDER_ENABLED", 0) == 1
+STAFF_CHAT_ID = _env_int("STAFF_CHAT_ID", 0)
+ORDER_CLOSE_REMINDER_INTERVAL_SEC = 300
+ORDER_CLOSE_SNOOZE_CB_PREFIX = "order_close_snooze:"
 
 # env rules
 MIN_CASH = Decimal(os.getenv("MIN_CASH", "2500"))
@@ -542,6 +562,7 @@ address_backfill_task: asyncio.Task | None = None  # дозаполнение а
 pending_order_reports_task: asyncio.Task | None = None  # отложенный отчёт и сообщение о деньгах
 own_heartbeat_task: asyncio.Task | None = None      # пульс рабочего бота (оповещения, задача 6)
 unsorted_cards_task: asyncio.Task | None = None     # карточки «Неразобранного» админам
+order_close_task: asyncio.Task | None = None        # сторож проведения заказов
 BONUS_CHANGE_NOTIFICATIONS_ENABLED = False
 
 # === Ignore group/supergroup/channel updates; work only in private chats ===
@@ -550,6 +571,13 @@ from aiogram import BaseMiddleware
 class IgnoreNonPrivateMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         chat = data.get("event_chat")
+        # Исключение — кнопка «Напомнить завтра» сторожа проведения заказов: она
+        # живёт в рабочих чатах (группах), нажимать может любой в чате. Только
+        # нажатия с её префиксом; сообщения и прочие кнопки из групп глушатся.
+        if isinstance(event, CallbackQuery) and (event.data or "").startswith(
+            ORDER_CLOSE_SNOOZE_CB_PREFIX
+        ):
+            return await handler(event, data)
         # If event has no chat (rare), or chat is not private — swallow
         if chat and getattr(chat, "type", None) != "private":
             return
@@ -3053,6 +3081,358 @@ async def _order_close_candidates(conn: Any, today: date) -> list[Any]:
         first_day,
         last_day,
     )
+
+
+def _order_close_now() -> datetime:
+    """Текущее время для кнопки «Напомнить завтра» (тесты подменяют часы)."""
+    return datetime.now(timezone.utc)
+
+
+def _order_close_chats() -> list[int]:
+    """Чаты напоминаний: «Заказы подтверждения» и чат сотрудников; 0 — не слать."""
+    chats: list[int] = []
+    for chat_id in (ORDERS_CONFIRM_CHAT_ID, STAFF_CHAT_ID):
+        if chat_id and chat_id not in chats:
+            chats.append(chat_id)
+    return chats
+
+
+def _order_close_fields(job: Mapping[str, Any] | None, order_date: date) -> dict[str, Any]:
+    """Поля текста из записи календаря; записи нет — только дата из напоминания."""
+    if job is None:
+        return {"order_date": order_date, "client_name": None, "address": None, "services": None}
+    return {
+        "order_date": job["order_date"],
+        "client_name": job["client_name"],
+        "address": job["address"],
+        "services": job["services"],
+    }
+
+
+async def _order_close_delete(reminder_id: int, messages: Sequence[tuple[int, int]]) -> None:
+    """Удалить сообщения напоминания; не вышло (старое, удалено руками) — пропустить."""
+    for chat_id, message_id in messages:
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Сторож проведения: напоминание %s, не удалось удалить сообщение %s в %s: %s",
+                reminder_id, message_id, chat_id, exc,
+            )
+
+
+async def _order_close_edit(reminder_id: int, messages: Sequence[tuple[int, int]], text: str) -> None:
+    """Переписать сообщения напоминания текстом `text` и убрать кнопку; ошибки — пропустить.
+
+    Текст простой, без разметки (`parse_mode=None`): в именах и адресах бывают `<`, `>`, `&`.
+    """
+    for chat_id, message_id in messages:
+        try:
+            await bot.edit_message_text(
+                text=text,
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode=None,
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Сторож проведения: напоминание %s, не удалось изменить сообщение %s в %s: %s",
+                reminder_id, message_id, chat_id, exc,
+            )
+
+
+async def _order_close_refresh(job: Mapping[str, Any], moment: datetime, today: date) -> None:
+    """Привести строку напоминания в соответствие свежему кандидату (до рассылки).
+
+    - строки нет — завести открытой, первое напоминание `order_date + 1, 10:00`;
+    - строка `closed`/`gone`, а запись снова среди непроведённых (заказ в боте
+      удалили, запись вернули в календарь) — открыть, напомнить сразу (в окне);
+    - открытая, запись пропала из календаря — последние сообщения удалить,
+      статус `gone`, молча;
+    - открытая, заказ провели — последние сообщения переписать на «✅ Заказ
+      проведён» без кнопки, статус `closed`;
+    - открытая, запись перенесли на сегодня или позже — последние сообщения
+      удалить, строку не закрывать, ждать первого напоминания по новой дате.
+
+    Изменения открытой строки — под `FOR UPDATE`: нажатие кнопки ждёт и видит
+    уже новое состояние.
+    """
+    event_id = job["event_id"]
+    status = job["reminder_status"]
+    order_date = job["order_date"]
+    if status is None:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO order_close_reminders (event_id, order_date, next_send_at)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (event_id) DO NOTHING
+                """,
+                event_id,
+                order_date,
+                order_close_first_send_at(order_date, moment),
+            )
+        logger.info("Сторож проведения: запись %s от %s не проведена — напоминание заведено", event_id, order_date)
+        return
+    if status != "open":
+        async with pool.acquire() as conn:
+            reopened = await conn.fetchval(
+                """
+                UPDATE order_close_reminders
+                SET status='open', closed_at=NULL, order_date=$2, next_send_at=$3
+                WHERE event_id=$1 AND status IN ('closed', 'gone')
+                RETURNING id
+                """,
+                event_id,
+                order_date,
+                order_close_first_send_at(order_date, moment),
+            )
+        if reopened:
+            logger.info("Сторож проведения: напоминание %s (запись %s) открыто заново", reopened, event_id)
+        return
+    if not (job["gone"] or job["conducted"] or order_date >= today):
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT * FROM order_close_reminders WHERE event_id=$1 AND status='open' FOR UPDATE",
+                event_id,
+            )
+            if row is None:
+                return
+            messages = _unsorted_card_messages(row["messages"])
+            if job["gone"]:
+                await _order_close_delete(row["id"], messages)
+                await conn.execute(
+                    "UPDATE order_close_reminders SET status='gone', closed_at=$2, messages='{}'::jsonb WHERE id=$1",
+                    row["id"],
+                    moment,
+                )
+                logger.info("Сторож проведения: напоминание %s (запись %s) — запись пропала из календаря", row["id"], event_id)
+            elif job["conducted"]:
+                await _order_close_edit(
+                    row["id"], messages, order_close_done_text(**_order_close_fields(job, order_date))
+                )
+                await conn.execute(
+                    "UPDATE order_close_reminders SET status='closed', closed_at=$2 WHERE id=$1",
+                    row["id"],
+                    moment,
+                )
+                logger.info("Сторож проведения: напоминание %s (запись %s) — заказ проведён", row["id"], event_id)
+            else:
+                next_send_at = order_close_first_send_at(order_date, moment)
+                if messages or row["next_send_at"] != next_send_at or row["order_date"] != order_date:
+                    await _order_close_delete(row["id"], messages)
+                    await conn.execute(
+                        """
+                        UPDATE order_close_reminders
+                        SET messages='{}'::jsonb, next_send_at=$2, order_date=$3
+                        WHERE id=$1
+                        """,
+                        row["id"],
+                        next_send_at,
+                        order_date,
+                    )
+                    logger.info(
+                        "Сторож проведения: напоминание %s (запись %s) — запись перенесли на %s",
+                        row["id"], event_id, order_date,
+                    )
+
+
+async def _order_close_send_due(
+    job: Mapping[str, Any], moment: datetime, chats: Sequence[int]
+) -> None:
+    """Отправить одно наступившее напоминание под блокировкой его строки.
+
+    Как у «Неразобранного» (`_unsorted_card_send_due`): строка держится
+    `FOR UPDATE` до записи новых номеров сообщений, нажатие «Напомнить завтра»
+    ждёт и правит уже новые сообщения. Прежние сообщения удаляются, в каждый чат
+    уходит новое с кнопкой. Отправка в один чат упала — в журнал, остальные
+    чаты идут дальше; время следующего напоминания (+30 минут в окне)
+    сдвигается всё равно, чтобы не повторять каждые 5 минут.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM order_close_reminders
+                WHERE event_id=$1 AND status='open' AND next_send_at <= $2
+                FOR UPDATE
+                """,
+                job["event_id"],
+                moment,
+            )
+            if row is None:
+                return
+            reminder_id = row["id"]
+            await _order_close_delete(reminder_id, _unsorted_card_messages(row["messages"]))
+            text = order_close_text(**_order_close_fields(job, row["order_date"]))
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=ORDER_CLOSE_SNOOZE_BUTTON_TEXT,
+                        callback_data=f"{ORDER_CLOSE_SNOOZE_CB_PREFIX}{reminder_id}",
+                    )
+                ]]
+            )
+            sent: dict[int, int] = {}
+            for chat_id in chats:
+                try:
+                    message = await bot.send_message(
+                        chat_id,
+                        text,
+                        parse_mode=None,
+                        disable_web_page_preview=True,
+                        reply_markup=keyboard,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Сторож проведения: напоминание %s, не удалось отправить в %s: %s",
+                        reminder_id, chat_id, exc,
+                    )
+                    continue
+                sent[chat_id] = message.message_id
+            await conn.execute(
+                "UPDATE order_close_reminders SET messages=$2::jsonb, next_send_at=$3 WHERE id=$1",
+                reminder_id,
+                json.dumps({str(chat_id): message_id for chat_id, message_id in sent.items()}),
+                order_close_next_reminder_at(moment),
+            )
+
+
+async def run_order_close_reminders(now: datetime | None = None) -> None:
+    """Один проход сторожа проведения заказов (фоновая задача, раз в 5 минут).
+
+    Только при `ORDER_CLOSE_REMINDER_ENABLED`. Обновляет напоминания по
+    кандидатам (`_order_close_candidates`, `_order_close_refresh`), затем —
+    только в окне 10:00–20:00 МСК — по каждой открытой с наступившим временем
+    удаляет прежние сообщения и шлёт новые в каждый заданный чат
+    (`_order_close_send_due`). Ошибка по одному заказу не останавливает остальные.
+    """
+    if pool is None or not ORDER_CLOSE_REMINDER_ENABLED:
+        return
+    chats = _order_close_chats()
+    if not chats:
+        return
+    moment = now or datetime.now(timezone.utc)
+    today = moment.astimezone(MOSCOW_TZ).date()
+    async with pool.acquire() as conn:
+        candidates = await _order_close_candidates(conn, today)
+    jobs: dict[str, Any] = {}
+    for job in candidates:
+        jobs[job["event_id"]] = job
+        try:
+            await _order_close_refresh(job, moment, today)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Сторож проведения: запись %s, обновление не удалось: %s", job["event_id"], exc)
+    if not order_close_in_window(moment):
+        return
+    async with pool.acquire() as conn:
+        due = await conn.fetch(
+            """
+            SELECT event_id
+            FROM order_close_reminders
+            WHERE status='open' AND next_send_at <= $1
+            ORDER BY next_send_at, id
+            LIMIT 50
+            """,
+            moment,
+        )
+    for record in due:
+        job = jobs.get(record["event_id"])
+        if job is None or job["gone"]:
+            continue
+        try:
+            await _order_close_send_due(job, moment, chats)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Сторож проведения: запись %s, рассылка не удалась: %s", record["event_id"], exc)
+
+
+# Регистрируется здесь, раньше обработчиков по состоянию сценария, — по той же
+# причине, что и `unsorted_card_done_cb` выше. Нажатие приходит из рабочих чатов
+# (групп): `IgnoreNonPrivateMiddleware` пропускает его по префиксу.
+@dp.callback_query(F.data.startswith(ORDER_CLOSE_SNOOZE_CB_PREFIX))
+async def order_close_snooze_cb(query: CallbackQuery):
+    """Нажатие «Напомнить завтра» на напоминании сторожа проведения (задача 2 ТЗ 2026-10-13).
+
+    Нажимать может любой в чате. Одно обновление «только если открыто»: тишина
+    до 10:00 следующего дня, кто и когда нажал (ждёт, если строку держит
+    рассылка, и получает её свежие номера сообщений). Удалось — в обоих чатах
+    «Отложено до завтра — <кто нажал>», без кнопки. Уже проведён или запись
+    пропала — короткий ответ и кнопка у нажатого сообщения убирается.
+    """
+    reminder_id = _to_int((query.data or "")[len(ORDER_CLOSE_SNOOZE_CB_PREFIX):], 0)
+    if not reminder_id or pool is None:
+        await query.answer("Напоминание не найдено.")
+        return
+    moment = _order_close_now()
+    user = query.from_user
+    name = (getattr(user, "full_name", None) or "").strip()
+    if not name:
+        name = f"@{user.username}" if getattr(user, "username", None) else str(user.id)
+    job = None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE order_close_reminders
+            SET next_send_at=$2, snoozed_by=$3, snoozed_by_name=$4, snoozed_at=$5
+            WHERE id=$1 AND status='open'
+            RETURNING *
+            """,
+            reminder_id,
+            order_close_snooze_until(moment),
+            user.id,
+            name,
+            moment,
+        )
+        snoozed = row is not None
+        if row is None:
+            row = await conn.fetchrow("SELECT * FROM order_close_reminders WHERE id=$1", reminder_id)
+        else:
+            job = await conn.fetchrow(
+                f"""
+                SELECT order_date, client_name, address, services
+                FROM {ORDER_CLOSE_JOBS_SOURCE}
+                WHERE event_id=$1
+                """,
+                row["event_id"],
+            )
+    if row is None:
+        await query.answer("Напоминание не найдено.")
+        return
+    pressed = (
+        (query.message.chat.id, query.message.message_id) if query.message is not None else None
+    )
+    if snoozed:
+        logger.info(
+            "Сторож проведения: напоминание %s (запись %s) отложил до %s пользователь %s",
+            reminder_id, row["event_id"], row["next_send_at"].isoformat(), user.id,
+        )
+        await query.answer()
+        targets = _unsorted_card_messages(row["messages"])
+        if pressed is not None and pressed not in targets:
+            # Нажали на сообщение, которого нет в напоминании (прежнее не удалилось) — его тоже.
+            targets.append(pressed)
+        text = order_close_snoozed_text(**_order_close_fields(job, row["order_date"]), snoozed_by=name)
+        await _order_close_edit(reminder_id, targets, text)
+        return
+    await query.answer("Заказ уже проведён" if row["status"] == "closed" else "Напоминание закрыто")
+    if pressed is None:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=pressed[0],
+            message_id=pressed[1],
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Сторож проведения: напоминание %s, не удалось убрать кнопку у %s в %s: %s",
+            reminder_id, pressed[1], pressed[0], exc,
+        )
 
 
 async def amocrm_api_polling_loop() -> None:
@@ -14231,7 +14611,7 @@ async def unknown(msg: Message, state: FSMContext):
     await msg.answer("Команда не распознана. Выберите действие на клавиатуре ниже.", reply_markup=kb)
 
 async def main():
-    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, reschedule_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task, own_heartbeat_task, unsorted_cards_task
+    global pool, daily_reports_task, birthday_task, promo_task, wire_reminder_task, notification_rules, notification_worker, wahelp_webhook, leads_promo_task, rewash_counter_task, sent_retry_task, dead_channels_cleanup_task, client_bot_health_task, amocrm_api_task, exchange_task, weekly_leads_task, client_messaging_task, confirmation_watch_task, reschedule_watch_task, unasked_watch_task, deferred_retry_task, address_backfill_task, pending_order_reports_task, own_heartbeat_task, unsorted_cards_task, order_close_task
     notification_rules = _load_notification_rules()
     pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=5)
     dp["pool"] = pool
@@ -14369,6 +14749,14 @@ async def main():
                 "unsorted_cards",
             )
         )
+    if order_close_task is None and ORDER_CLOSE_REMINDER_ENABLED:
+        order_close_task = asyncio.create_task(
+            schedule_periodic_job(
+                ORDER_CLOSE_REMINDER_INTERVAL_SEC,
+                run_order_close_reminders,
+                "order_close_reminders",
+            )
+        )
     if own_heartbeat_task is None and SERVICE_HEARTBEAT_ENABLED:
         own_heartbeat_task = asyncio.create_task(
             schedule_periodic_job(
@@ -14419,6 +14807,12 @@ async def main():
             unsorted_cards_task.cancel()
             try:
                 await unsorted_cards_task
+            except asyncio.CancelledError:
+                pass
+        if order_close_task is not None:
+            order_close_task.cancel()
+            try:
+                await order_close_task
             except asyncio.CancelledError:
                 pass
 
