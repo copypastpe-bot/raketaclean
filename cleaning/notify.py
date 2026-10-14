@@ -6,7 +6,6 @@ import logging
 import os
 
 from aiogram import Bot
-from aiogram.enums import ParseMode
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +17,11 @@ async def send_cleaning_money_flow(bot: Bot, text: str) -> None:
 
     Send-and-forget с логированием ошибки — внутренний канал админов,
     ретраи делать намеренно не будем (повторяет паттерн MONEY_FLOW_CHAT_ID).
+
+    Обычным текстом, без разметки: комментарий админа вставляется как есть, и
+    `<`, `>`, `&` в нём ломали разбор HTML — Telegram отказывал, а запись об
+    операции в чат молча не приходила. Разметки в этих сообщениях нет
+    (решение владельца 14.10).
     """
     if not CLEANING_MONEY_FLOW_CHAT_ID:
         logger.debug("CLEANING_MONEY_FLOW_CHAT_ID is not set; skipping cleaning notify")
@@ -26,7 +30,7 @@ async def send_cleaning_money_flow(bot: Bot, text: str) -> None:
         await bot.send_message(
             CLEANING_MONEY_FLOW_CHAT_ID,
             text,
-            parse_mode=ParseMode.HTML,
+            parse_mode=None,
         )
     except Exception as exc:
         logger.warning(
