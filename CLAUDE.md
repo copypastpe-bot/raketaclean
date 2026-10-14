@@ -115,6 +115,7 @@ Files longer than 500 lines and their function maps:
 - `cleaning/handlers.py` (1959 lines) -> `cleaning/handlers.py.map.md`
 - `raketa-notify/notifyd/db.py` (550 lines) -> `raketa-notify/notifyd/db.py.map.md`
 - `notifications/client_messaging.py` (604 lines) -> `notifications/client_messaging.py.map.md`
+- `notifications/outbox.py` (803 lines) -> `notifications/outbox.py.map.md`
 
 ## Server work (owner decision 2026-09-21)
 
