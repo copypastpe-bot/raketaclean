@@ -23,10 +23,12 @@ import logging
 import signal
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import asyncpg
 from aiogram import Bot, Dispatcher
+from aiogram.types import InlineKeyboardMarkup
 
 from adminbot import db
 from adminbot.amo import ids
@@ -36,7 +38,8 @@ from adminbot.config import Settings
 from adminbot.autocall import pbx as autocall_pbx
 from adminbot.autocall.engine import AutocallEngine
 from adminbot.autocall.pbx import MemoryPbx
-from adminbot.autocall.store import MemoryAutocallStore, PgAutocallStore
+from adminbot.autocall.store import (
+    MemoryAutocallStore, MemoryManagerCallbacks, PgAutocallStore, PgManagerCallbackSource)
 from adminbot.autocall.watcher import AutocallWatcher
 from adminbot.autocall.window import validate_window
 from adminbot.carpets.engine import CarpetEngine
@@ -66,7 +69,8 @@ from adminbot.sync.store import MemoryLinkStore, PgCleaningLinkStore, PgLinkStor
 from adminbot.sync.watcher import PgCleaningSource, PgOrderSource, Watcher
 from adminbot.sync.wire_payment import PgWirePaymentSource, WirePaymentSync
 from adminbot.tg.autocall_cards import (
-    connected_text, manager_text, no_phone_text, rehearsal_text as autocall_rehearsal_text)
+    called_keyboard, connected_text, manager_card_text, manager_text, no_phone_text,
+    rehearsal_text as autocall_rehearsal_text)
 from adminbot.tg.bot import (
     AddressAnswers, CalendarAnswers, CarpetAnswers, ContactAnswers, OwnerAnswers,
     OwnerCommands, build_router)
@@ -470,7 +474,7 @@ async def build_app(settings: Settings) -> App:
     # отдельный send-only бот для сообщений менеджеру (или None, если транспорт
     # не настроен); App должен закрыть его сессию при остановке сервиса.
     autocall_watcher, autocall_manager_bot = _build_autocall(
-        settings, own_pool, mail, live_amo, rehearsal_amo)
+        settings, own_pool, mail, live_amo, rehearsal_amo, bot_pool=bot_pool)
 
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(
@@ -875,8 +879,12 @@ def _build_calendar(settings: Settings, own_pool: Any, mail: OwnerMail,
 
 
 def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
-                    live_amo: AmoClient, rehearsal_amo: AmoClient):
+                    live_amo: AmoClient, rehearsal_amo: AmoClient, *,
+                    bot_pool: Any = None):
     """Собрать автозвонок по заявке с сайта. Возвращает (наблюдатель, бот менеджера).
+
+    `bot_pool` — база рабочего бота, только чтение: оттуда нажатия кнопки
+    «Я уже перезвонил» (ТЗ 2026-10-23), когда включён AUTOCALL_MANAGER_BUTTON.
 
     Функция выключена, окно звонков задано неверно или АТС не поднимается
     (нет ключей доступа либо боевого клиента в модуле ещё нет — он появится
@@ -921,6 +929,23 @@ def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
 
     amo = rehearsal_amo if settings.autocall_dry_run else live_amo
     manager_sender, manager_bot = _make_autocall_manager_sender(settings, mail, store)
+
+    # Кнопка «Я уже перезвонил» (ТЗ 2026-10-23): своя личка менеджера для
+    # сообщения, которое правится, и нажатия из таблицы рабочего бота. Кнопку
+    # некуда поставить (транспорт до менеджера не настроен) — робот работает
+    # по-прежнему, а журнал говорит, почему кнопки нет.
+    manager_button = settings.autocall_manager_button
+    manager_chat: Any = None
+    manager_callbacks: Any = None
+    if manager_button and manager_bot is None:
+        log.warning("Автозвонок: кнопка «Я уже перезвонил» не поднята — не настроен "
+                    "транспорт до менеджера (WORKER_TG_TOKEN/MANAGER_TG_CHAT_ID)")
+        manager_button = False
+    elif manager_button:
+        manager_chat = _make_autocall_manager_chat(settings, manager_bot, store)
+        manager_callbacks = (MemoryManagerCallbacks() if settings.autocall_dry_run
+                             else PgManagerCallbackSource(bot_pool))
+
     engine = AutocallEngine(
         pbx=pbx, amo=amo, store=store, manager_dials=settings.pbx_manager_dials,
         window_from_hour=settings.autocall_window_from_hour,
@@ -930,6 +955,9 @@ def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
             mail, settings.amo_base_url),
         notify_owner_connected=_make_autocall_connected_sender(
             mail, settings.amo_base_url, store),
+        manager_button=manager_button,
+        manager_chat=manager_chat,
+        manager_callbacks=manager_callbacks,
         dry_run=settings.autocall_dry_run,
     )
     watcher = AutocallWatcher(
@@ -937,8 +965,9 @@ def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
         poll_interval_sec=settings.autocall_poll_interval_sec,
         on_no_phone=_make_autocall_no_phone_sender(mail, settings.amo_base_url),
     )
-    log.info("Автозвонок: включён, режим %s",
-             "репетиция" if settings.autocall_dry_run else "БОЕВОЙ")
+    log.info("Автозвонок: включён, режим %s, кнопка «Я уже перезвонил» %s",
+             "репетиция" if settings.autocall_dry_run else "БОЕВОЙ",
+             "включена" if manager_button else "выключена")
     return watcher, manager_bot
 
 
@@ -1374,6 +1403,39 @@ def _make_autocall_manager_sender(settings: Settings, mail: OwnerMail, store: An
                         kind=MAIL_AUTOCALL_MANAGER, ref=lead_id)
 
     return send, manager_bot
+
+
+def _make_autocall_manager_chat(settings: Settings, manager_bot: Any, store: Any):
+    """Личка менеджера для сообщения с кнопкой «Я уже перезвонил» (ТЗ 2026-10-23).
+
+    Тот же send-only бот рабочего бота, что и у `_make_autocall_manager_sender`:
+    нажатие получает рабочий бот, он же дописывает «Принято». Здесь — отправить
+    сообщение и поправить его; текст строит `manager_card_text`, телефон
+    достаём из хранилища сами. Итог без кнопки — пустая клавиатура: так
+    Telegram убирает кнопку (тот же приём у рабочего бота).
+    """
+
+    async def text_of(lead_id: int, card: Any) -> str:
+        link = await store.get(lead_id)
+        phone10 = link.phone10 if link is not None else None
+        return manager_card_text(card.kind, lead_id, base_url=settings.amo_base_url,
+                                 phone10=phone10, retry_at=card.retry_at, at=card.at,
+                                 now=card.now)
+
+    async def send(lead_id: int, card: Any) -> int:
+        message = await manager_bot.send_message(
+            settings.manager_tg_chat_id, await text_of(lead_id, card),
+            reply_markup=called_keyboard(lead_id) if card.button else None)
+        return message.message_id
+
+    async def edit(message_id: int, lead_id: int, card: Any) -> None:
+        await manager_bot.edit_message_text(
+            text=await text_of(lead_id, card), chat_id=settings.manager_tg_chat_id,
+            message_id=message_id,
+            reply_markup=(called_keyboard(lead_id) if card.button
+                          else InlineKeyboardMarkup(inline_keyboard=[])))
+
+    return SimpleNamespace(send=send, edit=edit)
 
 
 def _make_autocall_rehearsal_sender(mail: OwnerMail, amo_base_url: str):

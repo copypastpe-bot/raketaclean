@@ -199,6 +199,122 @@ def test_autocall_live_with_pbx_settings_builds_online_pbx():
     assert watcher.engine.manager_dials == ("89001112233", "89004445566")
 
 
+_WORKER = dict(worker_tg_token="123456:ABCDEF-fake-token-value", manager_tg_chat_id=999)
+_PBX = dict(pbx_base_url="https://pbx.example", pbx_api_key="key",
+            pbx_manager_dials=("89001112233",))
+
+
+def test_autocall_button_is_off_by_default():
+    """Выключатель AUTOCALL_MANAGER_BUTTON выключен — движок без лички и нажатий."""
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=False,
+                                  **_PBX, **_WORKER)
+    watcher, _bot = _build_autocall(settings, None, None, object(), object(),
+                                    bot_pool=object())
+
+    assert watcher.engine.manager_button is False
+    assert watcher.engine.manager_chat is None
+    assert watcher.engine.manager_callbacks is None
+
+
+def test_autocall_button_live_reads_presses_through_bot_pool():
+    """Бой: нажатия — из таблицы рабочего бота через bot_pool (ТЗ 2026-10-23)."""
+    from adminbot.autocall.store import PgManagerCallbackSource
+    from adminbot.main import _build_autocall
+
+    bot_pool = object()
+    settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=False,
+                                  autocall_manager_button=True, **_PBX, **_WORKER)
+    watcher, _bot = _build_autocall(settings, None, None, object(), object(),
+                                    bot_pool=bot_pool)
+
+    assert watcher.engine.manager_button is True
+    assert watcher.engine.manager_chat is not None
+    assert isinstance(watcher.engine.manager_callbacks, PgManagerCallbackSource)
+    assert watcher.engine.manager_callbacks.pool is bot_pool
+
+
+def test_autocall_button_rehearsal_keeps_presses_in_memory():
+    from adminbot.autocall.store import MemoryManagerCallbacks
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=True,
+                                  autocall_manager_button=True, **_WORKER)
+    watcher, _bot = _build_autocall(settings, None, None, None, object(),
+                                    bot_pool=object())
+
+    assert isinstance(watcher.engine.manager_callbacks, MemoryManagerCallbacks)
+
+
+def test_autocall_button_without_manager_transport_stays_off(caplog):
+    """Кнопку некуда поставить (нет WORKER_TG_TOKEN/MANAGER_TG_CHAT_ID) — робот
+    работает по-прежнему, а в журнале сказано, почему кнопки нет."""
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=False,
+                                  autocall_manager_button=True, **_PBX)
+    with caplog.at_level("WARNING"):
+        watcher, manager_bot = _build_autocall(settings, None, None, object(), object(),
+                                               bot_pool=object())
+
+    assert manager_bot is None
+    assert watcher.engine.manager_button is False
+    assert any("Я уже перезвонил" in record.getMessage() for record in caplog.records)
+
+
+class FakeManagerBot:
+    """Send-only бот рабочего бота: что отправлено и что поправлено."""
+
+    def __init__(self):
+        self.sent = []
+        self.edited = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        from types import SimpleNamespace
+        self.sent.append((chat_id, text, kwargs))
+        return SimpleNamespace(message_id=4242)
+
+    async def edit_message_text(self, **kwargs):
+        self.edited.append(kwargs)
+
+
+async def test_manager_chat_sends_card_with_button_and_edits_to_final_without_it():
+    from datetime import datetime
+
+    from adminbot.amo.fields import MOSCOW_TZ
+    from adminbot.autocall.engine import ManagerCard
+    from adminbot.autocall.store import MemoryAutocallStore
+    from adminbot.main import _make_autocall_manager_chat
+
+    store = MemoryAutocallStore()
+    await store.create(31750907, phone10="9001234567")
+    settings = _autocall_settings(**_WORKER)
+    bot = FakeManagerBot()
+    chat = _make_autocall_manager_chat(settings, bot, store)
+    moment = datetime(2026, 10, 23, 10, 12, tzinfo=MOSCOW_TZ)
+
+    message_id = await chat.send(31750907, ManagerCard(
+        kind="retry_manager", button=True, retry_at=moment, now=moment))
+
+    assert message_id == 4242
+    chat_id, text, kwargs = bot.sent[0]
+    assert chat_id == 999
+    assert text == ("Робот не дозвонился до вас по заявке. Повтор в 10:12.\n"
+                    "Телефон клиента: +79001234567\n"
+                    "https://x/leads/detail/31750907")
+    buttons = [b for row in kwargs["reply_markup"].inline_keyboard for b in row]
+    assert [(b.text, b.callback_data) for b in buttons] == [
+        ("Я уже перезвонил", "autocall_called:31750907")]
+
+    await chat.edit(4242, 31750907, ManagerCard(kind="manager_called", button=False))
+
+    edit = bot.edited[0]
+    assert (edit["chat_id"], edit["message_id"]) == (999, 4242)
+    assert edit["text"].startswith("Вы перезвонили клиенту сами — робот остановился.")
+    assert edit["reply_markup"].inline_keyboard == []      # кнопка убрана
+
+
 def test_autocall_bad_window_raises():
     """Кривое окно валит старт — опечатку ловим при запуске, не в бою."""
     import pytest

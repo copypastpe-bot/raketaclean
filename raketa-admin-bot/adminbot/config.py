@@ -287,6 +287,10 @@ class Settings:
     # Окно, когда можно звонить клиенту (часы по Москве): вне окна заявка ждёт.
     autocall_window_from_hour: int = 10
     autocall_window_to_hour: int = 20
+    # Кнопка «Я уже перезвонил» в сообщении менеджеру (ТЗ 2026-10-23): одно
+    # сообщение на цепочку, перед повтором робот смотрит, не нажата ли она.
+    # Свой выключатель, по умолчанию выключен.
+    autocall_manager_button: bool = False
     # АТС: адрес, ключ и телефоны менеджера.
     # Не в REQUIRED_ENV: нужны только при включённой функции autocall.
     pbx_base_url: str = ""
@@ -380,6 +384,7 @@ class Settings:
             autocall_poll_interval_sec=_int("AUTOCALL_POLL_INTERVAL_SEC", 30),
             autocall_window_from_hour=_int("AUTOCALL_WINDOW_FROM", 10),
             autocall_window_to_hour=_int("AUTOCALL_WINDOW_TO", 20),
+            autocall_manager_button=_flag("AUTOCALL_MANAGER_BUTTON", False),
             pbx_base_url=os.environ.get("PBX_BASE_URL", "").strip().rstrip("/"),
             pbx_api_key=os.environ.get("PBX_API_KEY", "").strip(),
             pbx_manager_dials=_manager_dials("PBX_MANAGER_DIAL"),

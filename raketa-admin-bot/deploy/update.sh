@@ -52,6 +52,8 @@
 #   sudo raketa-admin-bot-update --autocall-on --autocall-rehearsal   автозвонок: репетиция
 #   sudo raketa-admin-bot-update --autocall-live                      автозвонок: боевой режим
 #   sudo raketa-admin-bot-update --autocall-off                       автозвонок: выключить
+#   sudo raketa-admin-bot-update --autocall-button-on|--autocall-button-off
+#                                             автозвонок: кнопка «Я уже перезвонил» в сообщении менеджеру
 #   sudo raketa-admin-bot-update --manager-dials=8930...,8986...      телефоны менеджера: рабочий, потом личный (через запятую, без пробелов)
 #   sudo raketa-admin-bot-update --telegram-proxy=http://user:pass@host:port  трафик до Telegram через прокси вне РФ
 #   sudo raketa-admin-bot-update --telegram-proxy-off                 вернуть прямой путь до Telegram
@@ -108,6 +110,7 @@ SHOW_LEAD_IDS=""
 AUTOCALL_EXAM=""
 AUTOCALL=""
 AUTOCALL_DRY=""
+AUTOCALL_BUTTON=""
 MANAGER_DIALS=""
 TELEGRAM_PROXY=""
 TELEGRAM_PROXY_SET=""
@@ -180,6 +183,8 @@ for arg in "$@"; do
         --autocall-off)       AUTOCALL=0 ;;
         --autocall-live)      AUTOCALL_DRY=0 ;;
         --autocall-rehearsal) AUTOCALL_DRY=1 ;;
+        --autocall-button-on)  AUTOCALL_BUTTON=1 ;;
+        --autocall-button-off) AUTOCALL_BUTTON=0 ;;
         --manager-dials=*)    MANAGER_DIALS="${arg#*=}" ;;
         --telegram-proxy=*)   TELEGRAM_PROXY="${arg#*=}"; TELEGRAM_PROXY_SET=1 ;;
         --telegram-proxy-off) TELEGRAM_PROXY=""; TELEGRAM_PROXY_SET=1 ;;
@@ -350,6 +355,7 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$GCAL_CALENDARS" ] && set_flag GCAL_CALENDAR_ID "$GCAL_CALENDARS"
 [ -n "$AUTOCALL" ] && set_flag AUTOCALL_ENABLED "$AUTOCALL"
 [ -n "$AUTOCALL_DRY" ] && set_flag AUTOCALL_DRY_RUN "$AUTOCALL_DRY"
+[ -n "$AUTOCALL_BUTTON" ] && set_flag AUTOCALL_MANAGER_BUTTON "$AUTOCALL_BUTTON"
 [ -n "$MANAGER_DIALS" ] && set_flag PBX_MANAGER_DIAL "$MANAGER_DIALS"
 
 # Доступы к почте робота лежат отдельным файлом у admin. Переносим их в настройки
@@ -407,6 +413,7 @@ echo "календари: $(flag_of GCAL_CALENDAR_ID)"
 now_autocall=$(flag_of AUTOCALL_ENABLED)
 now_autocall_dry=$(flag_of AUTOCALL_DRY_RUN)
 echo "автозвонок: $([ "$now_autocall" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_autocall_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключен')"
+echo "кнопка «Я уже перезвонил»: $([ "$(flag_of AUTOCALL_MANAGER_BUTTON)" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
 # Телефоны менеджера печатаем целиком: их видит только владелец у себя в консоли,
 # а проверить порядок «рабочий, потом личный» иначе нечем.
 echo "телефоны менеджера: $(flag_of PBX_MANAGER_DIAL)"
