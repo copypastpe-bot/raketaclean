@@ -47,7 +47,7 @@ Files longer than 500 lines and their function maps:
 - `adminbot/sync/engine.py` (772 lines) -> `adminbot/sync/engine.py.map.md`
 - `adminbot/tg/bot.py` (709 lines) -> `adminbot/tg/bot.py.map.md`
 - `adminbot/tg/cards.py` (690 lines) -> `adminbot/tg/cards.py.map.md`
-- `adminbot/autocall/engine.py` (669 lines) -> `adminbot/autocall/engine.py.map.md`
+- `adminbot/autocall/engine.py` (672 lines) -> `adminbot/autocall/engine.py.map.md`
 - `adminbot/autocall/pbx.py` (584 lines) -> `adminbot/autocall/pbx.py.map.md`
 
 ## Current Focus
