@@ -536,7 +536,7 @@ fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
 if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER$CARPETS_REMEMBER_LIVE" ] && [ -z "$GCAL_RUN" ] \
-        && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY" ]; then
+        && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY$AUTOCALL_BUTTON" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
     exit 0
