@@ -1,6 +1,10 @@
 # Карта функций: adminbot/db.py
 
-Обновлено 2026-10-12 (задача 1 ТЗ `2026-10-12-carpets-letter-report.md`: итог
+Обновлено 2026-10-23 (задача 2 ТЗ `2026-10-23-autocall-manager-button.md`: у цепочки
+автозвонка два новых поля, миграция 022 — `_autocall_from_row` читает
+`last_called_at` и `tg_message_id`, `_UPDATABLE_AUTOCALL_FIELDS` их разрешает; номера
+от автозвонка и ниже пересчитаны по факту `grep -nE '^(async )?def '`).
+Раньше — 2026-10-12 (задача 1 ТЗ `2026-10-12-carpets-letter-report.md`: итог
 письма после доведения строк и «сделайте руками» — добавлены `track_carpet_letter`,
 `carpet_letters_to_report`, `mark_carpet_letter_reported`,
 `fetch_carpet_links_by_ids`; `CarpetLink` получил `stuck_since`
@@ -38,7 +42,7 @@
 кандидатов `lead_ids` вместо `phone10`; круг правок по ревью — `fetch_carpet_taken_leads`
 теперь смотрит обе колонки, `lead_id` и `primary_lead_id`, как и «зеркальные»
 функции заказов и календаря).
-Строк в файле: 1876.
+Строк в файле: 1879.
 
 Правило файла: в схему `public` (таблицы рабочего бота) не пишем никогда —
 для неё здесь только SELECT. Всё собственное состояние живёт в схеме `adminbot`.
@@ -206,21 +210,21 @@ Python, а не в SQL (базы бота и админ-бота не обяза
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1563 | `_autocall_from_row` | строка → `AutocallLead` |
-| 1582–1613 | `get_/create_/update_autocall_lead` | цепочка попыток дозвона |
-| 1632 | `fetch_due_autocall_leads` | созревшие цепочки, просроченные первыми |
-| 1653 | `log_autocall_action` / 1665 `fetch_autocall_actions` | журнал по заявке |
-| 1794 | `get_autocall_cursor` / 1802 `save_autocall_cursor` | с какого `created_at` читать амо |
+| 1564 | `_autocall_from_row` | строка → `AutocallLead`; с миграции 022 — и `last_called_at`, `tg_message_id` (ТЗ 2026-10-23) |
+| 1585–1616 | `get_/create_/update_autocall_lead` | цепочка попыток дозвона |
+| 1635 | `fetch_due_autocall_leads` | созревшие цепочки, просроченные первыми |
+| 1656 | `log_autocall_action` / 1668 `fetch_autocall_actions` | журнал по заявке |
+| 1797 | `get_autocall_cursor` / 1805 `save_autocall_cursor` | с какого `created_at` читать амо |
 
 ## Почта владельца (`owner_outbox`)
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1680 | `add_owner_letter` | положить недоставленное сообщение в долг |
-| 1700 | `fetch_due_owner_letters` | созревшие долги, старые первыми |
-| 1722 | `fetch_owner_letters_for` | незаконченные долги по одной записи |
-| 1743 | `mark_owner_letter_sent` / 1756 `postpone_owner_letter` / 1770 `drop_owner_letter` | исход попытки |
-| 1784 | `count_owner_letters_waiting` | строка «жду отправки» для /status |
+| 1683 | `add_owner_letter` | положить недоставленное сообщение в долг |
+| 1703 | `fetch_due_owner_letters` | созревшие долги, старые первыми |
+| 1725 | `fetch_owner_letters_for` | незаконченные долги по одной записи |
+| 1746 | `mark_owner_letter_sent` / 1759 `postpone_owner_letter` / 1773 `drop_owner_letter` | исход попытки |
+| 1787 | `count_owner_letters_waiting` | строка «жду отправки» для /status |
 
 ## Удаления заказов и уборок (задача 4 ТЗ 2026-09-17 «удаление заказа освобождает сделку»)
 
@@ -233,5 +237,5 @@ Python, а не в SQL (базы бота и админ-бота не обяза
 
 | Строка | Функция | Назначение |
 |---|---|---|
-| 1828 | `fetch_pending_order_deletions` | удалённые заказы химчистки (`public.deleted_orders`) без отметки |
-| 1854 | `fetch_pending_cleaning_deletions` | уборки с `deleted_at` без отметки |
+| 1831 | `fetch_pending_order_deletions` | удалённые заказы химчистки (`public.deleted_orders`) без отметки |
+| 1857 | `fetch_pending_cleaning_deletions` | уборки с `deleted_at` без отметки |
