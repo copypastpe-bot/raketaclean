@@ -359,6 +359,11 @@ ORDER_CLOSE_REMINDER_ENABLED = _env_int("ORDER_CLOSE_REMINDER_ENABLED", 0) == 1
 STAFF_CHAT_ID = _env_int("STAFF_CHAT_ID", 0)
 ORDER_CLOSE_REMINDER_INTERVAL_SEC = 300
 ORDER_CLOSE_SNOOZE_CB_PREFIX = "order_close_snooze:"
+# Кнопка «Я уже перезвонил» робота автозвонка (ТЗ docs/plans/2026-10-23-autocall-manager-button.md):
+# сообщение с ней шлёт менеджеру админ-бот ключом рабочего бота, нажатие приходит сюда.
+# Тот же префикс собирает кнопку в админ-боте — менять только вместе. Выключателя
+# здесь нет: кнопка появляется, только когда её включил админ-бот.
+AUTOCALL_CALLED_CB_PREFIX = "autocall_called:"
 
 # env rules
 MIN_CASH = Decimal(os.getenv("MIN_CASH", "2500"))
@@ -3439,6 +3444,98 @@ async def order_close_snooze_cb(query: CallbackQuery):
         logger.warning(
             "Сторож проведения: напоминание %s, не удалось убрать кнопку у %s в %s: %s",
             reminder_id, pressed[1], pressed[0], exc,
+        )
+
+
+# --- Кнопка «Я уже перезвонил» робота автозвонка (ТЗ docs/plans/2026-10-23-autocall-manager-button.md) ---
+
+# Откуда брать статус цепочки звонков. Константа, а не имя прямо в запросе:
+# тесты подменяют её таблицей с теми же колонками в своей схеме.
+AUTOCALL_LEADS_SOURCE = "adminbot.autocall_leads"
+# Живая цепочка — те же статусы, что ACTIVE_STATUSES в
+# raketa-admin-bot/adminbot/autocall/chain.py. Остальные (done, no_contact,
+# gave_up, cancelled) — робот по сделке больше не звонит.
+AUTOCALL_LIVE_STATUSES = ("queued", "calling", "error")
+AUTOCALL_CALLED_ACCEPTED_LINE = "✅ Принято: робот по этой заявке больше не позвонит."
+
+
+# Регистрируется здесь, раньше обработчиков по состоянию сценария, — по той же
+# причине, что и `unsorted_card_done_cb` выше. Нажатие приходит из лички
+# менеджера: `IgnoreNonPrivateMiddleware` его не глушит.
+@dp.callback_query(F.data.startswith(AUTOCALL_CALLED_CB_PREFIX))
+async def autocall_called_cb(query: CallbackQuery):
+    """Нажатие «Я уже перезвонил» на сообщении робота автозвонка (задача 1 ТЗ 2026-10-23).
+
+    Сообщение шлёт менеджеру админ-бот ключом рабочего бота, ролей не проверяем.
+    Цепочка звонков по сделке живая — строка в `autocall_manager_callbacks`
+    (повторное нажатие строку не трогает), к сообщению дописывается «✅ Принято…»,
+    кнопка убирается; по этой строке админ-бот перед повтором остановит робота.
+    Цепочки нет или она закончилась — без записи, кнопка убирается. Не удалась
+    правка сообщения — нажатие всё равно записано: запись важнее вида сообщения.
+    """
+    if pool is None:
+        await query.answer("Не получилось записать нажатие, нажмите ещё раз")
+        return
+    lead_id = _to_int((query.data or "")[len(AUTOCALL_CALLED_CB_PREFIX):], 0)
+    user_id = query.from_user.id
+    async with pool.acquire() as conn:
+        status = await conn.fetchval(
+            f"SELECT status FROM {AUTOCALL_LEADS_SOURCE} WHERE lead_id=$1",
+            lead_id,
+        )
+        live = status in AUTOCALL_LIVE_STATUSES
+        if live:
+            await conn.execute(
+                """
+                INSERT INTO autocall_manager_callbacks (lead_id, tg_user_id)
+                VALUES ($1, $2)
+                ON CONFLICT (lead_id) DO NOTHING
+                """,
+                lead_id,
+                user_id,
+            )
+    message = query.message
+    if live:
+        logger.info(
+            "Автозвонок: менеджер %s нажал «Я уже перезвонил» по сделке %s (цепочка %s)",
+            user_id, lead_id, status,
+        )
+        await query.answer("Принято")
+        if message is None:
+            return
+        old_text = getattr(message, "text", None) or ""
+        text = f"{old_text}\n\n{AUTOCALL_CALLED_ACCEPTED_LINE}" if old_text else AUTOCALL_CALLED_ACCEPTED_LINE
+        try:
+            await bot.edit_message_text(
+                text=text,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                parse_mode=None,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Автозвонок: сделка %s, нажатие записано, но сообщение %s не изменилось: %s",
+                lead_id, message.message_id, exc,
+            )
+        return
+    logger.info(
+        "Автозвонок: «Я уже перезвонил» по сделке %s — цепочка %s, робот уже не звонит",
+        lead_id, status or "не найдена",
+    )
+    await query.answer("Робот по этой заявке уже не звонит")
+    if message is None:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Автозвонок: сделка %s, не удалось убрать кнопку у сообщения %s: %s",
+            lead_id, message.message_id, exc,
         )
 
 
