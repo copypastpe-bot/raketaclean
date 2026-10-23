@@ -25,6 +25,7 @@ from adminbot.autocall.pbx import (
     MemoryPbx,
     OnlinePbx,
     PbxError,
+    contact_from_history,
     outcome_from_history,
     parse_search_id,
 )
@@ -459,3 +460,229 @@ async def test_call_outcome_by_uuid_call_id(pbx_server):
     outcome = await client.call_outcome("abc-123", called_at=NOW)
 
     assert outcome is Outcome.CLIENT_NO_ANSWER
+
+
+# --- contact_since: был ли звонок с клиентом после попытки робота (ТЗ 2026-10-23, задача 3) ---
+#
+# Образцы — по полям из разведки 23.10 (окна 22.10 09:59–10:15 и 20.10 15:16–15:40
+# МСК), телефоны вымышленные. Одна попытка робота — одна запись: destination_number
+# — клиент, caller_id_number — набранный телефон менеджера, start_stamp — unix-время
+# строкой, совпадает с временем попытки до секунд. accountcode у всех записей
+# "inbound" — по нему направление не определить. Входящий от клиента: caller — клиент,
+# destination — номер компании, события — переводы на внутренние номера.
+
+RECHECK_CLIENT = "9007001122"
+MANAGER_WORK = "89001112233"        # рабочий телефон менеджера (PBX_MANAGER_DIAL, первый)
+MANAGER_PERSONAL = "89004445566"    # личный (второй)
+COMPANY_NUMBER = "74950001122"      # номер компании, с которого робот звонил клиенту
+RECHECK_DIALS = (MANAGER_WORK, MANAGER_PERSONAL)
+# Попытка робота 20.10 15:23:49 МСК (клиент не взял).
+LAST_CALLED_AT = datetime(2026, 10, 20, 12, 23, 49, 400000, tzinfo=timezone.utc)
+LAST_TS = int(LAST_CALLED_AT.timestamp())
+
+
+def _robot_record(**overrides):
+    """Запись попытки робота: менеджер взял, клиент не подошёл."""
+    record = {
+        "uuid": "robot-uuid-1",
+        "accountcode": "inbound",
+        "caller_id_number": "7" + MANAGER_WORK[1:],
+        "caller_id_name": "7" + MANAGER_WORK[1:],
+        "destination_number": "7" + RECHECK_CLIENT,
+        "start_stamp": str(LAST_TS),
+        "end_stamp": str(LAST_TS + 73),
+        "contacted": False,
+        "user_talk_time": 0,
+        "hangup_cause": "NO_USER_RESPONSE",
+        "events": [{"type": "transfer", "number": "7" + RECHECK_CLIENT}],
+    }
+    record.update(overrides)
+    return record
+
+
+def _client_incoming(start_ts, **overrides):
+    """Входящий от клиента, пропущенный (образец 20.10 15:24:55)."""
+    record = {
+        "uuid": "incoming-uuid-1",
+        "accountcode": "inbound",
+        "caller_id_number": "8" + RECHECK_CLIENT,
+        "caller_id_name": "8" + RECHECK_CLIENT,
+        "destination_number": COMPANY_NUMBER,
+        "start_stamp": str(start_ts),
+        "end_stamp": str(start_ts + 40),
+        "contacted": False,
+        "user_talk_time": 0,
+        "hangup_cause": "NORMAL_CLEARING",
+        "events": [
+            {"type": "transfer", "number": "5100"},
+            {"type": "transfer", "number": "5000"},
+            {"type": "transfer", "number": "100"},
+            {"type": "user", "number": "100"},
+        ],
+    }
+    record.update(overrides)
+    return record
+
+
+def _unrelated(start_ts):
+    """Чужой звонок в том же окне: номер клиента не встречается ни в одном поле."""
+    return {"uuid": "other", "accountcode": "inbound", "caller_id_number": "79161230000",
+            "destination_number": COMPANY_NUMBER, "start_stamp": str(start_ts),
+            "contacted": True, "user_talk_time": 50}
+
+
+def _contact(records, *, dials=RECHECK_DIALS, since=LAST_CALLED_AT, phone=RECHECK_CLIENT):
+    return contact_from_history(records, client_phone=phone, since=since,
+                                manager_phones=dials)
+
+
+def _at(ts):
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
+def test_contact_robot_own_attempt_is_not_a_contact():
+    """Своя попытка робота — не звонок с клиентом: повтор идёт, как раньше."""
+    assert _contact([_robot_record()]) is None
+
+
+def test_contact_robot_own_attempt_from_personal_phone_is_not_a_contact():
+    """После неудачи менеджера робот звонит на личный телефон — тоже своя запись."""
+    record = _robot_record(caller_id_number="7" + MANAGER_PERSONAL[1:],
+                           caller_id_name="7" + MANAGER_PERSONAL[1:])
+    assert _contact([record]) is None
+
+
+def test_contact_robot_own_attempt_a_few_seconds_late_is_still_own():
+    """start_stamp совпадает с попыткой до секунд — запись в пределах 60 с своя."""
+    assert _contact([_robot_record(start_stamp=str(LAST_TS + 60))]) is None
+
+
+def test_contact_missed_incoming_from_client_counts():
+    """Решение владельца 5: любой звонок клиента, даже пропущенный, отменяет повтор.
+    Образец 20.10: клиент перезвонил через минуту после попытки робота и не дозвонился."""
+    incoming_ts = LAST_TS + 66
+    records = [_unrelated(LAST_TS + 10), _robot_record(), _client_incoming(incoming_ts)]
+
+    assert _contact(records) == _at(incoming_ts)
+
+
+def test_contact_outgoing_from_office_through_pbx_counts():
+    """Звонок по номеру клиента через АТС из офиса — тоже отменяет повтор."""
+    office_ts = LAST_TS + 200
+    record = _robot_record(uuid="office", caller_id_number="101", caller_id_name="Офис",
+                           start_stamp=str(office_ts), contacted=True, user_talk_time=95,
+                           hangup_cause="NORMAL_CLEARING", events=[])
+
+    assert _contact([_robot_record(), record]) == _at(office_ts)
+
+
+def test_contact_call_from_manager_phone_after_60_seconds_counts():
+    """Звонок с номера менеджера через АТС позже 60 с — уже не попытка робота."""
+    later_ts = LAST_TS + 61
+    record = _robot_record(uuid="manager-later", start_stamp=str(later_ts))
+
+    assert _contact([_robot_record(), record]) == _at(later_ts)
+
+
+def test_contact_returns_the_earliest_call():
+    records = [_client_incoming(LAST_TS + 400), _robot_record(),
+               _client_incoming(LAST_TS + 90), _client_incoming(LAST_TS + 250)]
+
+    assert _contact(records) == _at(LAST_TS + 90)
+
+
+def test_contact_none_when_only_unrelated_records():
+    """В окне бывают записи, где номер клиента не встречается, — к делу не относятся."""
+    assert _contact([_unrelated(LAST_TS + 5), _unrelated(LAST_TS + 300)]) is None
+
+
+def test_contact_none_for_empty_history():
+    assert _contact([]) is None
+
+
+@pytest.mark.parametrize("raw_number", ["79007001122", "89007001122", "+7 (900) 700-11-22"])
+def test_contact_matches_client_phone_tail_regardless_of_format(raw_number):
+    """Номера в истории в разных форматах — сравниваем по последним 10 цифрам."""
+    incoming = _client_incoming(LAST_TS + 120, caller_id_number=raw_number)
+    assert _contact([incoming]) == _at(LAST_TS + 120)
+
+
+def test_contact_manager_phone_matched_by_tail_too():
+    """Телефон менеджера в настройке и в истории — в разных форматах."""
+    record = _robot_record(caller_id_number="+7 900 111-22-33")
+    assert _contact([record]) is None
+
+
+def test_contact_accepts_numeric_start_stamp():
+    incoming = _client_incoming(LAST_TS + 120)
+    incoming["start_stamp"] = LAST_TS + 120
+    assert _contact([incoming]) == _at(LAST_TS + 120)
+
+
+def test_contact_ignores_calls_before_last_attempt():
+    """Звонок до попытки робота повтор не отменяет: робот звонил уже после него."""
+    assert _contact([_client_incoming(LAST_TS - 30)]) is None
+
+
+def test_contact_skips_record_without_start_stamp():
+    """Без времени звонок нельзя ни сравнить с попыткой, ни назвать менеджеру."""
+    incoming = _client_incoming(LAST_TS + 120)
+    del incoming["start_stamp"]
+    broken = _client_incoming(LAST_TS + 130, start_stamp="не число")
+    assert _contact([incoming, broken]) is None
+
+
+def test_contact_ignores_non_mapping_records():
+    assert _contact([None, "junk", _client_incoming(LAST_TS + 70)]) == _at(LAST_TS + 70)
+
+
+def test_contact_none_without_client_phone():
+    assert _contact([_client_incoming(LAST_TS + 70)], phone="") is None
+
+
+async def test_memory_pbx_contact_since_is_none_until_programmed():
+    """Фейк в сеть не ходит; ответ задаёт тест, запросы запоминаются."""
+    pbx = MemoryPbx()
+    until = _at(LAST_TS + 300)
+
+    assert await pbx.contact_since(RECHECK_CLIENT, since=LAST_CALLED_AT, until=until,
+                                   manager_phones=RECHECK_DIALS) is None
+
+    pbx.set_contact(_at(LAST_TS + 66))
+    assert await pbx.contact_since(RECHECK_CLIENT, since=LAST_CALLED_AT, until=until,
+                                   manager_phones=RECHECK_DIALS) == _at(LAST_TS + 66)
+    assert pbx.contact_queries == [
+        (RECHECK_CLIENT, LAST_CALLED_AT, until, RECHECK_DIALS),
+        (RECHECK_CLIENT, LAST_CALLED_AT, until, RECHECK_DIALS),
+    ]
+
+
+async def test_online_contact_since_searches_from_last_attempt_to_now(pbx_server):
+    """Окно запроса — [время прошлой попытки; сейчас], per_page=200; разбор — тот же."""
+    client, fake = pbx_server
+    fake.stub("/auth.json", {"status": "1", "data": {"key_id": "k1", "key": "s1"}})
+    fake.stub("/mongo_history/search.json", {
+        "status": "1",
+        "data": [_robot_record(), _client_incoming(LAST_TS + 66)],
+    })
+    until = _at(LAST_TS + 600)
+
+    contact_at = await client.contact_since(RECHECK_CLIENT, since=LAST_CALLED_AT,
+                                            until=until, manager_phones=RECHECK_DIALS)
+
+    assert contact_at == _at(LAST_TS + 66)
+    body = _body_for(fake, "/mongo_history/search.json")
+    assert body["start_stamp_from"] == str(LAST_TS)
+    assert body["start_stamp_to"] == str(LAST_TS + 600)
+    assert body["per_page"] == "200"
+
+
+async def test_online_contact_since_raises_pbx_error_on_status_zero(pbx_server):
+    """Ошибку АТС проверка не глотает — решает движок (recheck_failed и звонок)."""
+    client, fake = pbx_server
+    fake.stub("/auth.json", {"status": "1", "data": {"key_id": "k1", "key": "s1"}})
+    fake.stub("/mongo_history/search.json", {"status": "0", "comment": "history unavailable"})
+
+    with pytest.raises(PbxError, match="history unavailable"):
+        await client.contact_since(RECHECK_CLIENT, since=LAST_CALLED_AT,
+                                   until=_at(LAST_TS + 600), manager_phones=RECHECK_DIALS)

@@ -1,7 +1,8 @@
 """Протокол АТС для автозвонка: боевой клиент OnlinePbx и фейк для тестов.
 
 Движок (Задача 8) знает лишь два метода протокола `Pbx`: запустить звонок
-«менеджер → клиент» и спросить, чем он закончился. Как АТС это делает
+«менеджер → клиент» и спросить, чем он закончился; с ТЗ 2026-10-23 — третий:
+был ли звонок с клиентом после попытки робота (`contact_since`). Как АТС это делает
 внутри — не касается ни машины переходов (chain.py), ни хранилища
 (store.py). `MemoryPbx` — фейк для тестов и репетиции («репетиция не
 оставляет следов»); `OnlinePbx` — боевой клиент api2.onlinepbx.ru, факты о
@@ -21,7 +22,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Protocol
+from typing import (
+    Any, Awaitable, Callable, Iterable, Mapping, Optional, Protocol, Sequence,
+)
 
 import aiohttp
 
@@ -46,6 +49,18 @@ class Pbx(Protocol):
         """
         ...
 
+    async def contact_since(
+        self, client_phone: str, *, since: datetime, until: datetime,
+        manager_phones: Sequence[str],
+    ) -> Optional[datetime]:
+        """Самый ранний звонок с номером клиента в окне [since; until] (ТЗ 2026-10-23).
+
+        Свои попытки робота не считаются: `since` — время прошлой попытки,
+        `manager_phones` — телефоны менеджера, которые набирает робот (правило —
+        в `contact_from_history`). None — звонков с клиентом не было.
+        """
+        ...
+
 
 class MemoryPbx:
     """Фейковая АТС в памяти: для тестов и репетиции. В сеть не ходит никогда.
@@ -62,6 +77,9 @@ class MemoryPbx:
         self.calls: list[tuple[str, str]] = []
         self._outcomes: dict[str, Outcome] = dict(outcomes or {})
         self._next_id = 1
+        # Проверка истории перед повтором: ответ задаёт тест, запросы — для проверки.
+        self._contact: Optional[datetime] = None
+        self.contact_queries: list[tuple[str, datetime, datetime, tuple[str, ...]]] = []
 
     async def call_now(self, *, to_dial: str, client_phone: str) -> str:
         call_id = f"fake-{self._next_id}"
@@ -78,6 +96,17 @@ class MemoryPbx:
     def set_outcome(self, call_id: str, outcome: Outcome) -> None:
         """Запрограммировать исход звонка — можно и после call_now."""
         self._outcomes[call_id] = outcome
+
+    async def contact_since(
+        self, client_phone: str, *, since: datetime, until: datetime,
+        manager_phones: Sequence[str],
+    ) -> Optional[datetime]:
+        self.contact_queries.append((client_phone, since, until, tuple(manager_phones)))
+        return self._contact
+
+    def set_contact(self, moment: Optional[datetime]) -> None:
+        """Запрограммировать ответ проверки истории: когда был звонок с клиентом."""
+        self._contact = moment
 
 
 class PbxError(RuntimeError, OSError):
@@ -317,6 +346,31 @@ class OnlinePbx:
             records = []
         return outcome_from_history(records, client_phone=client_phone, uuid=uuid)
 
+    async def contact_since(
+        self, client_phone: str, *, since: datetime, until: datetime,
+        manager_phones: Sequence[str],
+    ) -> Optional[datetime]:
+        """Был ли звонок с клиентом после попытки робота — история АТС (ТЗ 2026-10-23).
+
+        Окно запроса — [since; until]: от прошлой попытки робота до «сейчас».
+        Разбор — в чистой `contact_from_history`. Ошибку АТС и обрыв сети не
+        глотаем: что делать при сбое проверки, решает движок (звонит, как
+        раньше, с отметкой `recheck_failed`).
+        """
+        payload = await self._request(
+            "/mongo_history/search.json",
+            form={
+                "start_stamp_from": str(int(since.timestamp())),
+                "start_stamp_to": str(int(until.timestamp())),
+                "per_page": "200",
+            },
+        )
+        records = payload.get("data")
+        if not isinstance(records, list):
+            records = []
+        return contact_from_history(records, client_phone=client_phone, since=since,
+                                    manager_phones=manager_phones)
+
 
 # --- разборная часть: чистые функции, без сети (тестируются напрямую) ---
 
@@ -391,6 +445,76 @@ def outcome_from_history(
     if _client_was_dialled(record):
         return Outcome.CLIENT_NO_ANSWER
     return Outcome.MANAGER_NO_ANSWER
+
+
+#: Своя запись робота — не дальше этого от времени попытки (разведка 23.10:
+#: `start_stamp` записи совпадает с временем попытки с точностью до секунд).
+OWN_ATTEMPT_WINDOW_SEC = 60
+
+
+def contact_from_history(
+    records: Iterable[Mapping[str, Any]],
+    *, client_phone: str, since: datetime, manager_phones: Sequence[str],
+) -> Optional[datetime]:
+    """Самый ранний звонок с клиентом после попытки робота (чистая функция, без сети).
+
+    Правило — по итогам разведки истории АТС 23.10 (ТЗ 2026-10-23, Задача 0):
+
+    - запись «с клиентом» — последние 10 цифр `caller_id_number` ИЛИ
+      `destination_number` равны телефону клиента: входящий от клиента несёт
+      его номер в `caller_id_number`, звонок клиенту — в `destination_number`;
+    - своя запись робота — `destination_number` = клиент, `caller_id_number` —
+      один из телефонов менеджера (`manager_phones`, по 10 цифрам) и
+      `start_stamp` не дальше OWN_ATTEMPT_WINDOW_SEC от `since` (время прошлой
+      попытки). Такая запись не считается. Звонок с номера менеджера через АТС
+      позже этих 60 с считается — это уже не попытка робота;
+    - любой другой звонок с клиентом считается, даже пропущенный (решение
+      владельца 5): исход звонка не смотрим.
+
+    Направление по `accountcode` не определить — там `inbound` у всех записей,
+    и у звонков робота тоже. Записи раньше `since` и без разбираемого
+    `start_stamp` пропускаются: без времени звонок нельзя ни сравнить с
+    попыткой, ни назвать менеджеру. Ответ — UTC-момент самого раннего
+    подходящего звонка; нет таких — None.
+    """
+    wanted = _last10_digits(client_phone)
+    if len(wanted) != 10:
+        return None
+    dials = {tail for tail in (_last10_digits(phone) for phone in manager_phones) if tail}
+    since_ts = since.timestamp()
+
+    earliest: Optional[int] = None
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        caller = _last10_digits(str(record.get("caller_id_number") or ""))
+        destination = _last10_digits(str(record.get("destination_number") or ""))
+        if wanted not in (caller, destination):
+            continue
+        stamp = _as_stamp(record.get("start_stamp"))
+        if stamp is None or stamp < int(since_ts):
+            continue
+        own_attempt = (destination == wanted and caller in dials
+                       and abs(stamp - since_ts) <= OWN_ATTEMPT_WINDOW_SEC)
+        if own_attempt:
+            continue
+        if earliest is None or stamp < earliest:
+            earliest = stamp
+
+    if earliest is None:
+        return None
+    return datetime.fromtimestamp(earliest, tz=timezone.utc)
+
+
+def _as_stamp(value: Any) -> Optional[int]:
+    """`start_stamp` — unix-время строкой (разведка 23.10); число тоже понимаем."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        stamp = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+    return stamp if stamp > 0 else None
 
 
 def _client_was_dialled(record: Mapping[str, Any]) -> bool:
