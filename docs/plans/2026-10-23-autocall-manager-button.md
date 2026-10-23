@@ -135,6 +135,8 @@
 
 ### Задача 1. Рабочий бот: кнопка и таблица нажатий
 
+Выполнено: 3650d69 — миграция 0019, `autocall_called_cb`, 8 тестов на настоящей базе, карта `bot.py` пересчитана.
+
 - Миграция `app/migrations/0019_autocall_manager_callbacks.sql`, безопасна для повтора:
   `public.autocall_manager_callbacks (lead_id bigint PRIMARY KEY, tg_user_id bigint NOT NULL,
   pressed_at timestamptz NOT NULL DEFAULT now())`. Комментарий в шапке — по образцу `0015`:
