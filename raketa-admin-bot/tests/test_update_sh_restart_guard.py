@@ -49,3 +49,9 @@ def test_autocall_button_switch_with_diagnostics_restarts():
     """--autocall-button-on вместе с диагностикой — служба перезапускается."""
     assert _restarts(SHOW_LEADS="1", AUTOCALL_BUTTON="1") is True
     assert _restarts(SHOW_LEADS="1", AUTOCALL_BUTTON="0") is True
+
+
+def test_autocall_recheck_switch_with_diagnostics_restarts():
+    """--autocall-recheck-on вместе с диагностикой — служба перезапускается."""
+    assert _restarts(SHOW_LEADS="1", AUTOCALL_RECHECK="1") is True
+    assert _restarts(SHOW_LEADS="1", AUTOCALL_RECHECK="0") is True

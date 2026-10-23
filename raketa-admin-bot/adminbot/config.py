@@ -291,6 +291,10 @@ class Settings:
     # сообщение на цепочку, перед повтором робот смотрит, не нажата ли она.
     # Свой выключатель, по умолчанию выключен.
     autocall_manager_button: bool = False
+    # Проверка истории АТС перед повтором (ТЗ 2026-10-23): звонок с клиентом
+    # после прошлой попытки робота — даже пропущенный — отменяет повтор.
+    # Свой выключатель, по умолчанию выключен.
+    autocall_pbx_recheck: bool = False
     # АТС: адрес, ключ и телефоны менеджера.
     # Не в REQUIRED_ENV: нужны только при включённой функции autocall.
     pbx_base_url: str = ""
@@ -385,6 +389,7 @@ class Settings:
             autocall_window_from_hour=_int("AUTOCALL_WINDOW_FROM", 10),
             autocall_window_to_hour=_int("AUTOCALL_WINDOW_TO", 20),
             autocall_manager_button=_flag("AUTOCALL_MANAGER_BUTTON", False),
+            autocall_pbx_recheck=_flag("AUTOCALL_PBX_RECHECK", False),
             pbx_base_url=os.environ.get("PBX_BASE_URL", "").strip().rstrip("/"),
             pbx_api_key=os.environ.get("PBX_API_KEY", "").strip(),
             pbx_manager_dials=_manager_dials("PBX_MANAGER_DIAL"),

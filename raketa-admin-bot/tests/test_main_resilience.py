@@ -263,6 +263,28 @@ def test_autocall_button_without_manager_transport_stays_off(caplog):
     assert any("Я уже перезвонил" in record.getMessage() for record in caplog.records)
 
 
+def test_autocall_pbx_recheck_is_off_by_default():
+    """Выключатель AUTOCALL_PBX_RECHECK выключен — историю АТС перед повтором не смотрим."""
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=False, **_PBX)
+    watcher, _bot = _build_autocall(settings, None, None, object(), object())
+
+    assert watcher.engine.pbx_recheck is False
+
+
+def test_autocall_pbx_recheck_switch_reaches_engine():
+    """Проверка истории АТС не зависит от кнопки: включается своим выключателем."""
+    from adminbot.main import _build_autocall
+
+    settings = _autocall_settings(autocall_enabled=True, autocall_dry_run=False,
+                                  autocall_pbx_recheck=True, **_PBX)
+    watcher, _bot = _build_autocall(settings, None, None, object(), object())
+
+    assert watcher.engine.pbx_recheck is True
+    assert watcher.engine.manager_button is False
+
+
 class FakeManagerBot:
     """Send-only бот рабочего бота: что отправлено и что поправлено."""
 

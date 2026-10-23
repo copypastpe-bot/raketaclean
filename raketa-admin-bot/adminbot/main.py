@@ -958,6 +958,7 @@ def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
         manager_button=manager_button,
         manager_chat=manager_chat,
         manager_callbacks=manager_callbacks,
+        pbx_recheck=settings.autocall_pbx_recheck,
         dry_run=settings.autocall_dry_run,
     )
     watcher = AutocallWatcher(
@@ -965,9 +966,11 @@ def _build_autocall(settings: Settings, own_pool: Any, mail: OwnerMail,
         poll_interval_sec=settings.autocall_poll_interval_sec,
         on_no_phone=_make_autocall_no_phone_sender(mail, settings.amo_base_url),
     )
-    log.info("Автозвонок: включён, режим %s, кнопка «Я уже перезвонил» %s",
+    log.info("Автозвонок: включён, режим %s, кнопка «Я уже перезвонил» %s, "
+             "проверка истории АТС перед повтором %s",
              "репетиция" if settings.autocall_dry_run else "БОЕВОЙ",
-             "включена" if manager_button else "выключена")
+             "включена" if manager_button else "выключена",
+             "включена" if settings.autocall_pbx_recheck else "выключена")
     return watcher, manager_bot
 
 

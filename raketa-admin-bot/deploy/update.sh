@@ -54,6 +54,8 @@
 #   sudo raketa-admin-bot-update --autocall-off                       автозвонок: выключить
 #   sudo raketa-admin-bot-update --autocall-button-on|--autocall-button-off
 #                                             автозвонок: кнопка «Я уже перезвонил» в сообщении менеджеру
+#   sudo raketa-admin-bot-update --autocall-recheck-on|--autocall-recheck-off
+#                                             автозвонок: перед повтором смотреть историю АТС
 #   sudo raketa-admin-bot-update --manager-dials=8930...,8986...      телефоны менеджера: рабочий, потом личный (через запятую, без пробелов)
 #   sudo raketa-admin-bot-update --telegram-proxy=http://user:pass@host:port  трафик до Telegram через прокси вне РФ
 #   sudo raketa-admin-bot-update --telegram-proxy-off                 вернуть прямой путь до Telegram
@@ -111,6 +113,7 @@ AUTOCALL_EXAM=""
 AUTOCALL=""
 AUTOCALL_DRY=""
 AUTOCALL_BUTTON=""
+AUTOCALL_RECHECK=""
 MANAGER_DIALS=""
 TELEGRAM_PROXY=""
 TELEGRAM_PROXY_SET=""
@@ -185,6 +188,8 @@ for arg in "$@"; do
         --autocall-rehearsal) AUTOCALL_DRY=1 ;;
         --autocall-button-on)  AUTOCALL_BUTTON=1 ;;
         --autocall-button-off) AUTOCALL_BUTTON=0 ;;
+        --autocall-recheck-on)  AUTOCALL_RECHECK=1 ;;
+        --autocall-recheck-off) AUTOCALL_RECHECK=0 ;;
         --manager-dials=*)    MANAGER_DIALS="${arg#*=}" ;;
         --telegram-proxy=*)   TELEGRAM_PROXY="${arg#*=}"; TELEGRAM_PROXY_SET=1 ;;
         --telegram-proxy-off) TELEGRAM_PROXY=""; TELEGRAM_PROXY_SET=1 ;;
@@ -356,6 +361,7 @@ set_flag() {                                  # имя переменной, н�
 [ -n "$AUTOCALL" ] && set_flag AUTOCALL_ENABLED "$AUTOCALL"
 [ -n "$AUTOCALL_DRY" ] && set_flag AUTOCALL_DRY_RUN "$AUTOCALL_DRY"
 [ -n "$AUTOCALL_BUTTON" ] && set_flag AUTOCALL_MANAGER_BUTTON "$AUTOCALL_BUTTON"
+[ -n "$AUTOCALL_RECHECK" ] && set_flag AUTOCALL_PBX_RECHECK "$AUTOCALL_RECHECK"
 [ -n "$MANAGER_DIALS" ] && set_flag PBX_MANAGER_DIAL "$MANAGER_DIALS"
 
 # Доступы к почте робота лежат отдельным файлом у admin. Переносим их в настройки
@@ -414,6 +420,7 @@ now_autocall=$(flag_of AUTOCALL_ENABLED)
 now_autocall_dry=$(flag_of AUTOCALL_DRY_RUN)
 echo "автозвонок: $([ "$now_autocall" = 1 ] && echo "ВКЛЮЧЁН, $([ "$now_autocall_dry" = 0 ] && echo 'БОЕВОЙ режим' || echo 'репетиция')" || echo 'выключен')"
 echo "кнопка «Я уже перезвонил»: $([ "$(flag_of AUTOCALL_MANAGER_BUTTON)" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
+echo "проверка истории АТС перед повтором: $([ "$(flag_of AUTOCALL_PBX_RECHECK)" = 1 ] && echo 'ВКЛЮЧЕНА' || echo 'выключена')"
 # Телефоны менеджера печатаем целиком: их видит только владелец у себя в консоли,
 # а проверить порядок «рабочий, потом личный» иначе нечем.
 echo "телефоны менеджера: $(flag_of PBX_MANAGER_DIAL)"
@@ -536,7 +543,7 @@ fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
 if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER$CARPETS_REMEMBER_LIVE" ] && [ -z "$GCAL_RUN" ] \
-        && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY$AUTOCALL_BUTTON" ]; then
+        && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY$AUTOCALL_BUTTON$AUTOCALL_RECHECK" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
     exit 0
