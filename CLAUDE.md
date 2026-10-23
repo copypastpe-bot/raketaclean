@@ -105,17 +105,18 @@ This project (Rules 4.2):
 
 Files longer than 500 lines and their function maps:
 
-- `bot.py` (14827 lines) -> `bot.py.map.md`
-- `raketa-admin-bot/adminbot/main.py` (1503 lines) -> `raketa-admin-bot/adminbot/main.py.map.md`
-- `raketa-admin-bot/adminbot/db.py` (1876 lines) -> `raketa-admin-bot/adminbot/db.py.map.md`
+- `bot.py` (14955 lines) -> `bot.py.map.md`
+- `raketa-admin-bot/adminbot/main.py` (1565 lines) -> `raketa-admin-bot/adminbot/main.py.map.md`
+- `raketa-admin-bot/adminbot/db.py` (1879 lines) -> `raketa-admin-bot/adminbot/db.py.map.md`
 - `raketa-admin-bot/adminbot/gcal/engine.py` (1187 lines) -> `raketa-admin-bot/adminbot/gcal/engine.py.map.md`
 - `raketa-admin-bot/adminbot/sync/engine.py` (772 lines) -> `raketa-admin-bot/adminbot/sync/engine.py.map.md`
 - `raketa-admin-bot/adminbot/tg/bot.py` (709 lines) -> `raketa-admin-bot/adminbot/tg/bot.py.map.md`
 - `raketa-admin-bot/adminbot/tg/cards.py` (690 lines) -> `raketa-admin-bot/adminbot/tg/cards.py.map.md`
 - `cleaning/handlers.py` (1959 lines) -> `cleaning/handlers.py.map.md`
 - `raketa-notify/notifyd/db.py` (550 lines) -> `raketa-notify/notifyd/db.py.map.md`
-- `notifications/client_messaging.py` (604 lines) -> `notifications/client_messaging.py.map.md`
+- `notifications/client_messaging.py` (628 lines) -> `notifications/client_messaging.py.map.md`
 - `notifications/outbox.py` (803 lines) -> `notifications/outbox.py.map.md`
+- `raketa-admin-bot/adminbot/autocall/engine.py` (628 lines) -> `raketa-admin-bot/adminbot/autocall/engine.py.map.md`
 
 ## Server work (owner decision 2026-09-21)
 
