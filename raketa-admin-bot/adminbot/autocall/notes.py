@@ -25,7 +25,8 @@ from typing import Optional
 from adminbot.amo.fields import MOSCOW_TZ
 
 #: Итог цепочки → что робот пишет в сделку. Ключ для остановки (gave_up) —
-#: причина из chain.NOTIFY_KINDS, для остальных финалов — статус цепочки.
+#: причина из chain.NOTIFY_KINDS, для остановки до повтора (cancelled) —
+#: причина из chain.CANCEL_*, для остальных финалов — статус цепочки.
 _DEAL_NOTES: dict[str, str] = {
     "done":
         "Автозвонок: соединил менеджера с клиентом.",
@@ -37,20 +38,30 @@ _DEAL_NOTES: dict[str, str] = {
         "по этой заявке.",
     "attempts_exhausted":
         "Автозвонок: попытки звонка исчерпаны (4). Робот остановился.",
+    # ТЗ 2026-10-23: робот остановился до повтора (статус cancelled).
+    "manager_called":
+        "Автозвонок: менеджер перезвонил клиенту сам (кнопка). Робот остановился.",
+    "client_called":
+        "Автозвонок: с клиентом уже был звонок через АТС ({contact} МСК) — клиент "
+        "перезвонил сам или звонили из офиса. Робот остановился.",
 }
 
 
 def deal_note_text(status: str, *, called_at: Optional[datetime] = None,
-                   reason: Optional[str] = None) -> str:
+                   reason: Optional[str] = None,
+                   contact_at: Optional[datetime] = None) -> str:
     """Примечание в сделку по завершённой цепочке — одно на цепочку.
 
     Запись разговора в примечание не тянем: в API истории АТС ссылки на неё
     нет, она живёт в кабинете АТС — туда и отправляем читателя.
 
+    `contact_at` — когда в истории АТС был звонок с клиентом (причина
+    client_called); без него такое примечание не пишется.
+
     Незнакомый статус — ValueError: пустое примечание в CRM хуже явной
     ошибки, потому что молча выглядит как «робот ничего не делал».
     """
-    key = reason if status == "gave_up" else status
+    key = reason if status in ("gave_up", "cancelled") else status
     try:
         head = _DEAL_NOTES[key]
     except KeyError:
@@ -58,6 +69,10 @@ def deal_note_text(status: str, *, called_at: Optional[datetime] = None,
             f"нет текста примечания для финала цепочки: status={status!r}, "
             f"reason={reason!r}"
         ) from None
+    if key == "client_called":
+        if contact_at is None:
+            raise ValueError("примечание client_called без времени звонка (contact_at)")
+        head = head.format(contact=contact_at.astimezone(MOSCOW_TZ).strftime("%H:%M"))
 
     lines = [head]
     if called_at is not None:

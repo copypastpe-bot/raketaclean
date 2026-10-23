@@ -236,10 +236,36 @@ def test_attempts_below_limit_still_retry():
 
 # --- Финальные статусы: движок не должен звать машину по закрытой цепочке ---
 
-@pytest.mark.parametrize("final_status", ["done", "no_contact", "gave_up"])
+@pytest.mark.parametrize("final_status", ["done", "no_contact", "gave_up", "cancelled"])
 def test_advance_on_final_status_raises(final_status):
     with pytest.raises(ValueError):
         advance(chain(status=final_status), Outcome.CONNECTED, NOW)
+
+
+def test_cancelled_is_final_and_not_active():
+    """ТЗ 2026-10-23, задача 2: робот остановился до повтора — цепочка закрыта.
+
+    Рабочий бот считает живыми те же queued|calling|error (кнопка «Я уже
+    перезвонил»); cancelled туда попадать не должен.
+    """
+    from adminbot.autocall.chain import (
+        ACTIVE_STATUSES, CANCEL_CLIENT_CALLED, CANCEL_MANAGER_CALLED, FINAL_STATUSES,
+        STATUS_CANCELLED,
+    )
+
+    assert STATUS_CANCELLED == "cancelled"
+    assert STATUS_CANCELLED in FINAL_STATUSES
+    assert STATUS_CANCELLED not in ACTIVE_STATUSES
+    assert set(ACTIVE_STATUSES) == {"queued", "calling", "error"}
+    assert (CANCEL_MANAGER_CALLED, CANCEL_CLIENT_CALLED) == ("manager_called", "client_called")
+
+
+@pytest.mark.parametrize("outcome", list(Outcome))
+def test_machine_never_produces_cancelled(outcome):
+    """cancelled ставит движок, машина переходов его не выдаёт."""
+    for start in (chain(), chain(attempts_total=4, manager_failures=1, client_failures=1)):
+        new, _effects = advance(start, outcome, NOW)
+        assert new.status != "cancelled"
 
 
 # --- Неизменяемость: advance не мутирует вход ---

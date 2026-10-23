@@ -183,3 +183,128 @@ def test_stuck_alert_text_no_link():
 
     assert "http" not in text
     assert "45" in text
+
+
+# --- сообщение менеджеру с кнопкой «Я уже перезвонил» (ТЗ 2026-10-23, задача 2) ---
+#
+# Одно сообщение на цепочку, дальше правится: пока впереди повтор — время
+# повтора и кнопка, робот закончил — итог без кнопки. Кнопку обрабатывает
+# рабочий бот (префикс AUTOCALL_CALLED_CB_PREFIX в корневом bot.py).
+
+from datetime import datetime, timezone  # noqa: E402
+
+from adminbot.amo.fields import MOSCOW_TZ  # noqa: E402
+from adminbot.autocall.chain import CARD_KINDS  # noqa: E402
+from adminbot.tg.autocall_cards import (  # noqa: E402
+    AUTOCALL_CALLED_CB_PREFIX, called_keyboard, manager_card_text,
+)
+
+PHONE_LINE = "Телефон клиента: +79001234567"
+
+
+def _msk(*args):
+    return datetime(*args, tzinfo=MOSCOW_TZ)
+
+
+def test_called_button_prefix_is_verbatim():
+    """Префикс живёт в двух кодовых базах — у рабочего бота такой же
+    (`AUTOCALL_CALLED_CB_PREFIX` в корневом bot.py). Разойдутся — нажатие
+    никто не поймает."""
+    assert AUTOCALL_CALLED_CB_PREFIX == "autocall_called:"
+
+
+def test_called_keyboard_has_one_button_with_lead_id():
+    keyboard = called_keyboard(LEAD_ID)
+
+    buttons = [button for row in keyboard.inline_keyboard for button in row]
+    assert len(buttons) == 1
+    assert buttons[0].text == "Я уже перезвонил"
+    assert buttons[0].callback_data == f"autocall_called:{LEAD_ID}"
+    assert len(buttons[0].callback_data.encode()) <= 64     # предел Telegram
+
+
+def test_retry_card_manager_missed_same_day():
+    """Время повтора — московское; день тот же — без даты."""
+    text = manager_card_text(
+        "retry_manager", LEAD_ID, base_url=BASE_URL, phone10=PHONE10,
+        retry_at=datetime(2026, 10, 23, 7, 12, tzinfo=timezone.utc),   # 10:12 МСК
+        now=datetime(2026, 10, 23, 7, 7, tzinfo=timezone.utc))
+
+    assert text == (
+        "Робот не дозвонился до вас по заявке. Повтор в 10:12.\n"
+        f"{PHONE_LINE}\n{DEAL_URL}"
+    )
+
+
+def test_retry_card_client_missed_same_day():
+    text = manager_card_text(
+        "retry_client", LEAD_ID, base_url=BASE_URL, phone10=PHONE10,
+        retry_at=_msk(2026, 10, 23, 10, 22), now=_msk(2026, 10, 23, 10, 12))
+
+    assert text == f"Клиент не взял трубку. Повтор в 10:22.\n{PHONE_LINE}\n{DEAL_URL}"
+
+
+def test_retry_card_next_day_names_the_date():
+    """Окно 10–20 перенесло повтор на завтра — дата в тексте обязательна."""
+    text = manager_card_text(
+        "retry_manager", LEAD_ID, base_url=BASE_URL, phone10=PHONE10,
+        retry_at=_msk(2026, 10, 24, 10, 0), now=_msk(2026, 10, 23, 19, 58))
+
+    assert text.splitlines()[0] == (
+        "Робот не дозвонился до вас по заявке. Повтор 24.10 в 10:00.")
+
+
+def test_final_card_connected():
+    text = manager_card_text("done", LEAD_ID, base_url=BASE_URL, phone10=PHONE10,
+                             at=_msk(2026, 10, 23, 10, 12))
+
+    assert text == f"Робот соединил вас с клиентом в 10:12.\n{PHONE_LINE}\n{DEAL_URL}"
+
+
+def test_final_card_manager_called():
+    text = manager_card_text("manager_called", LEAD_ID, base_url=BASE_URL, phone10=PHONE10)
+
+    assert text == (
+        f"Вы перезвонили клиенту сами — робот остановился.\n{PHONE_LINE}\n{DEAL_URL}")
+
+
+def test_final_card_client_called():
+    text = manager_card_text("client_called", LEAD_ID, base_url=BASE_URL,
+                             at=_msk(2026, 10, 23, 10, 9))
+
+    assert text == (
+        f"С клиентом уже был звонок через АТС в 10:09 — робот остановился.\n{DEAL_URL}")
+
+
+@pytest.mark.parametrize("kind", ["no_contact_final", "manager_unreachable",
+                                  "attempts_exhausted"])
+def test_final_card_keeps_current_texts(kind):
+    """Нынешние итоги не меняются (раздел «Чего не делать» ТЗ)."""
+    assert manager_card_text(kind, LEAD_ID, base_url=BASE_URL, phone10=PHONE10) == \
+        manager_text(kind, LEAD_ID, base_url=BASE_URL, phone10=PHONE10)
+
+
+def test_every_card_kind_builds_text():
+    moment = _msk(2026, 10, 23, 10, 12)
+    for kind in CARD_KINDS:
+        text = manager_card_text(kind, LEAD_ID, base_url=BASE_URL,
+                                 retry_at=moment, at=moment, now=moment)
+        assert DEAL_URL in text
+        assert "None" not in text
+
+
+@pytest.mark.parametrize("kind", ["client_retry_10", "не_бывает_такого"])
+def test_card_unknown_kind_raises(kind):
+    """client_retry_10 — отдельное прежнее сообщение, а не вид сообщения с кнопкой."""
+    with pytest.raises(ValueError):
+        manager_card_text(kind, LEAD_ID, base_url=BASE_URL)
+
+
+@pytest.mark.parametrize("kind,missing", [
+    ("retry_manager", "retry_at"), ("retry_client", "retry_at"),
+    ("done", "at"), ("client_called", "at"),
+])
+def test_card_without_its_moment_raises(kind, missing):
+    """Обещать «повтор в …» или «в 10:12» без времени нельзя — ошибка, а не пустота."""
+    with pytest.raises(ValueError):
+        manager_card_text(kind, LEAD_ID, base_url=BASE_URL)

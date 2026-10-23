@@ -5,7 +5,7 @@
 падает ошибкой, а не пишет в CRM пустоту.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -57,6 +57,29 @@ def test_deal_note_without_call_time_says_nothing_about_it():
     text = deal_note_text("done", called_at=None)
 
     assert "None" not in text
+
+
+def test_deal_note_cancelled_by_manager_button_is_verbatim():
+    """ТЗ 2026-10-23: менеджер нажал «Я уже перезвонил» — робот остановился."""
+    text = deal_note_text("cancelled", reason="manager_called")
+
+    assert text == ("Автозвонок: менеджер перезвонил клиенту сам (кнопка). "
+                    "Робот остановился.")
+
+
+def test_deal_note_cancelled_by_pbx_history_names_moscow_time():
+    """ТЗ 2026-10-23: в истории АТС уже был звонок с клиентом — время по Москве."""
+    contact_at = datetime(2026, 10, 23, 7, 9, tzinfo=timezone.utc)   # 10:09 по Москве
+    text = deal_note_text("cancelled", reason="client_called", contact_at=contact_at)
+
+    assert text == ("Автозвонок: с клиентом уже был звонок через АТС (10:09 МСК) — "
+                    "клиент перезвонил сам или звонили из офиса. Робот остановился.")
+
+
+def test_deal_note_client_called_needs_contact_time():
+    """Без времени звонка примечание «был звонок через АТС» писать нельзя."""
+    with pytest.raises(ValueError):
+        deal_note_text("cancelled", reason="client_called")
 
 
 def test_deal_note_unknown_status_raises():

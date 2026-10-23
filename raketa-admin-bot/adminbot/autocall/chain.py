@@ -45,13 +45,36 @@ STATUS_CALLING = "calling"        # команда АТС отдана, попы
 STATUS_DONE = "done"              # соединились — готово
 STATUS_NO_CONTACT = "no_contact"  # сделка ушла на этап «Не было первого контакта»
 STATUS_GAVE_UP = "gave_up"        # робот остановился (решение №3 или §4.5)
+#: Робот остановился до повтора (ТЗ 2026-10-23): менеджер нажал «Я уже
+#: перезвонил» или в истории АТС уже был звонок с клиентом. Машина переходов
+#: этот статус не выдаёт — его ставит движок перед повтором.
+STATUS_CANCELLED = "cancelled"
 #: Попытка упала технически (АТС/сеть), исхода нет — движок повторит сам.
 #: Машина переходов этот статус не обрабатывает, и в FINAL_STATUSES он
 #: не входит: цепочка ещё жива, наблюдатель должен её довести.
 STATUS_ERROR = "error"
 
 #: Статусы, после которых цепочка закрыта и попыток больше не будет.
-FINAL_STATUSES: tuple[str, ...] = (STATUS_DONE, STATUS_NO_CONTACT, STATUS_GAVE_UP)
+FINAL_STATUSES: tuple[str, ...] = (
+    STATUS_DONE, STATUS_NO_CONTACT, STATUS_GAVE_UP, STATUS_CANCELLED,
+)
+
+#: Почему цепочка закрыта статусом cancelled — журнал (`cancelled`,
+#: {"reason": …}), примечание в сделку и итог сообщения менеджеру.
+CANCEL_MANAGER_CALLED = "manager_called"   # менеджер нажал «Я уже перезвонил»
+CANCEL_CLIENT_CALLED = "client_called"     # в истории АТС уже был звонок с клиентом
+
+#: Сообщение менеджеру с кнопкой «Я уже перезвонил» (ТЗ 2026-10-23, выключатель
+#: AUTOCALL_MANAGER_BUTTON): одно на цепочку, дальше правится. Пока впереди
+#: повтор — retry_*, с кнопкой; робот закончил — итог без кнопки: done, причина
+#: cancelled или вид финального NotifyManager. Тексты — tg/autocall_cards.py.
+CARD_RETRY_MANAGER = "retry_manager"   # не взял менеджер (или исход неизвестен)
+CARD_RETRY_CLIENT = "retry_client"     # не взял клиент
+CARD_KINDS: tuple[str, ...] = (
+    CARD_RETRY_MANAGER, CARD_RETRY_CLIENT,
+    STATUS_DONE, CANCEL_MANAGER_CALLED, CANCEL_CLIENT_CALLED,
+    "no_contact_final", "manager_unreachable", "attempts_exhausted",
+)
 
 #: Статусы, по которым цепочка ещё не закончена: их наблюдатель добирает
 #: из базы. `error` тоже здесь — после сбоя цепочку нужно довести.
