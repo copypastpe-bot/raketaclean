@@ -204,6 +204,18 @@ class AutocallCalledButtonTests(unittest.IsolatedAsyncioTestCase):
         rows = await self._callbacks()
         self.assertEqual([r["lead_id"] for r in rows], [LEAD_ID])
 
+    async def test_db_error_before_recording_still_answers_manager(self):
+        # Сбой базы при чтении статуса цепочки — обработчик не должен падать
+        # до query.answer: менеджер получает тот же текст, что при pool is None,
+        # кнопку не трогаем.
+        with mock.patch.object(bot, "AUTOCALL_LEADS_SOURCE", f"{SCHEMA}.no_such_table"):
+            query = await self._press()
+
+        query.answer.assert_awaited_once_with("Не получилось записать нажатие, нажмите ещё раз")
+        self.edit_message_text.assert_not_awaited()
+        self.edit_message_reply_markup.assert_not_awaited()
+        self.assertEqual(await self._callbacks(), [])
+
     async def test_migration_is_safe_to_repeat(self):
         await self._chain("queued")
         await self._press()

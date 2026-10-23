@@ -3478,22 +3478,30 @@ async def autocall_called_cb(query: CallbackQuery):
         return
     lead_id = _to_int((query.data or "")[len(AUTOCALL_CALLED_CB_PREFIX):], 0)
     user_id = query.from_user.id
-    async with pool.acquire() as conn:
-        status = await conn.fetchval(
-            f"SELECT status FROM {AUTOCALL_LEADS_SOURCE} WHERE lead_id=$1",
+    try:
+        async with pool.acquire() as conn:
+            status = await conn.fetchval(
+                f"SELECT status FROM {AUTOCALL_LEADS_SOURCE} WHERE lead_id=$1",
+                lead_id,
+            )
+            live = status in AUTOCALL_LIVE_STATUSES
+            if live:
+                await conn.execute(
+                    """
+                    INSERT INTO autocall_manager_callbacks (lead_id, tg_user_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT (lead_id) DO NOTHING
+                    """,
+                    lead_id,
+                    user_id,
+                )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Автозвонок: сбой базы при нажатии «Я уже перезвонил» по сделке %s",
             lead_id,
         )
-        live = status in AUTOCALL_LIVE_STATUSES
-        if live:
-            await conn.execute(
-                """
-                INSERT INTO autocall_manager_callbacks (lead_id, tg_user_id)
-                VALUES ($1, $2)
-                ON CONFLICT (lead_id) DO NOTHING
-                """,
-                lead_id,
-                user_id,
-            )
+        await query.answer("Не получилось записать нажатие, нажмите ещё раз")
+        return
     message = query.message
     if live:
         logger.info(
