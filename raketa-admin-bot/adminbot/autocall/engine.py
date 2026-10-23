@@ -30,16 +30,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 
 import aiohttp
 
 from adminbot.amo import ids
 from adminbot.amo.client import AmoError
 from adminbot.autocall.chain import (
+    CANCEL_MANAGER_CALLED,
+    CARD_RETRY_CLIENT,
+    CARD_RETRY_MANAGER,
     FINAL_STATUSES,
     STATUS_CALLING,
+    STATUS_CANCELLED,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_GAVE_UP,
@@ -55,7 +60,7 @@ from adminbot.autocall.chain import (
 )
 from adminbot.autocall.notes import deal_note_text
 from adminbot.autocall.pbx import Pbx
-from adminbot.autocall.store import AutocallStore
+from adminbot.autocall.store import AutocallStore, ManagerCallbacks
 from adminbot.autocall.window import next_call_moment
 from adminbot.models import AutocallLead
 
@@ -81,6 +86,37 @@ NotifyOwnerRehearsalFn = Callable[[int, Optional[str]], Awaitable[None]]
 NotifyOwnerConnectedFn = Callable[[int], Awaitable[None]]
 
 
+@dataclass(frozen=True)
+class ManagerCard:
+    """Сообщение менеджеру с кнопкой «Я уже перезвонил» — или его итог (ТЗ 2026-10-23).
+
+    Движок решает, ЧТО сказать; текст строит `tg/autocall_cards.manager_card_text`
+    там, где известны ссылка на амо и телефон клиента (main.py).
+
+    kind     — вид из chain.CARD_KINDS;
+    button   — показывать ли кнопку (пока впереди повтор — да, итог — нет);
+    retry_at — когда повтор (уже после окна звонков), для retry_*;
+    at       — момент события итога: соединил (done), звонок через АТС (client_called);
+    now      — момент решения: повтор не сегодня — в тексте появится дата.
+    """
+
+    kind: str
+    button: bool
+    retry_at: Optional[datetime] = None
+    at: Optional[datetime] = None
+    now: Optional[datetime] = None
+
+
+class ManagerChat(Protocol):
+    """Личка менеджера в рабочем боте: отправить сообщение и поправить его."""
+
+    async def send(self, lead_id: int, card: ManagerCard) -> int:
+        """Отправить и вернуть номер сообщения."""
+
+    async def edit(self, message_id: int, lead_id: int, card: ManagerCard) -> None:
+        """Поправить отправленное; не вышло (сообщение удалено и т. п.) — исключение."""
+
+
 class AutocallEngine:
     """Продвигает одну цепочку автозвонка на один шаг за вызов `process_due`."""
 
@@ -96,6 +132,9 @@ class AutocallEngine:
         notify_manager: Optional[NotifyManagerFn] = None,
         notify_owner_rehearsal: Optional[NotifyOwnerRehearsalFn] = None,
         notify_owner_connected: Optional[NotifyOwnerConnectedFn] = None,
+        manager_button: bool = False,
+        manager_chat: Optional[ManagerChat] = None,
+        manager_callbacks: Optional[ManagerCallbacks] = None,
         dry_run: bool = True,
     ) -> None:
         self.pbx = pbx
@@ -112,14 +151,25 @@ class AutocallEngine:
         # (дизайн §6.5): по каждой доведённой до конца цепочке он видит одно
         # сообщение со ссылкой на сделку, как и в уборке/календаре.
         self.notify_owner_connected = notify_owner_connected
+        # Кнопка «Я уже перезвонил» (ТЗ 2026-10-23, выключатель
+        # AUTOCALL_MANAGER_BUTTON). Выключатель выключен — поведение ровно
+        # прежнее: личку и нажатия движок не трогает, даже если их передали.
+        self.manager_button = manager_button
+        self.manager_chat = manager_chat
+        self.manager_callbacks = manager_callbacks
         self.dry_run = dry_run
+
+    @property
+    def _cards_on(self) -> bool:
+        """Сообщение менеджеру с кнопкой вместо прежних отдельных сообщений."""
+        return self.manager_button and self.manager_chat is not None
 
     async def process_due(self, link: AutocallLead, now: datetime) -> None:
         """Продвинуть одну цепочку (см. модульную докстрину — три инварианта выше).
 
         `link` — запись из `store.due(now)`: наблюдатель находит её сам, движок
-        только исполняет один шаг. Финальные статусы (done|no_contact|gave_up)
-        сюда попадать не должны — `due` их не отдаёт; если всё же пришли (баг
+        только исполняет один шаг. Финальные статусы (done|no_contact|gave_up|
+        cancelled) сюда попадать не должны — `due` их не отдаёт; если всё же пришли (баг
         вызывающего), выходим тихо с предупреждением в лог, а не падаем.
         """
         if link.status in FINAL_STATUSES:
@@ -213,12 +263,20 @@ class AutocallEngine:
             )
             return
 
+        # Повтор, а менеджер уже нажал «Я уже перезвонил» (ТЗ 2026-10-23) —
+        # робот останавливается, звонка нет. Первую попытку ничто не держит.
+        if link.attempts_total >= 1 and await self._manager_pressed(link):
+            await self._cancel(link, CANCEL_MANAGER_CALLED)
+            return
+
         # Намерение — ДО команды АТС (инвариант №1 из модульной докстрины):
         # упади мы между этой записью и звонком, второй звонок по той же
         # попытке не уйдёт — цепочка обнаружится в "calling" без call_id и
         # уйдёт в Outcome.UNKNOWN по таймауту, а не позвонит ещё раз.
+        # last_called_at, в отличие от called_at, возврат в очередь переживает:
+        # перед повтором по нему видно, когда робот звонил в прошлый раз.
         await self.store.update(
-            link.lead_id, status=STATUS_CALLING, called_at=now,
+            link.lead_id, status=STATUS_CALLING, called_at=now, last_called_at=now,
             attempts_total=link.attempts_total + 1, next_action_at=None, call_id=None,
         )
         call_id = await self.pbx.call_now(
@@ -285,6 +343,13 @@ class AutocallEngine:
             "next_action_at": new_chain.next_action_at,
         }
 
+        # Сообщение с кнопкой (ТЗ 2026-10-23): впереди повтор — оно вместо
+        # прежнего client_retry_10; итог — правка того же сообщения вместо
+        # нового. Сообщения по цепочке нет — итог прежним путём.
+        use_card = self._cards_on and (
+            new_chain.status == STATUS_QUEUED or link.tg_message_id is not None)
+        final_kind: Optional[str] = None
+
         for effect in effects:
             if isinstance(effect, Retry):
                 # Повтор уважает окно звонков: желаемый момент из chain.py —
@@ -304,7 +369,10 @@ class AutocallEngine:
                 update_fields["called_at"] = None
                 update_fields["call_id"] = None
             elif isinstance(effect, NotifyManager):
-                await self._notify_manager(link.lead_id, effect.kind)
+                if use_card:
+                    final_kind = effect.kind
+                else:
+                    await self._notify_manager(link.lead_id, effect.kind)
             elif isinstance(effect, MoveLeadNoContact):
                 await self.amo.move_lead(
                     link.lead_id, ids.PIPELINE_PRIMARY, ids.PRIM_STAGE_NO_CONTACT,
@@ -321,15 +389,131 @@ class AutocallEngine:
             elif isinstance(effect, Done):
                 await self._notify_connected(link.lead_id)
 
+        if use_card:
+            card = self._outcome_card(link, new_chain.status, outcome, final_kind,
+                                      update_fields["next_action_at"], now)
+            if card is not None:
+                message_id = await self._show_card(link, card)
+                if message_id is not None:
+                    update_fields["tg_message_id"] = message_id
+
         await self.store.update(link.lead_id, **update_fields)
 
         if new_chain.status in FINAL_STATUSES:
             await self._leave_deal_note(link, new_chain.status, gave_up_reason)
 
+    # --- кнопка «Я уже перезвонил» (ТЗ 2026-10-23) ---
+
+    async def _manager_pressed(self, link: AutocallLead) -> bool:
+        """Нажимал ли менеджер кнопку по сделке. Выключатель выключен — не спрашиваем.
+
+        Таблица нажатий не ответила (нет миграции рабочего бота, сеть) —
+        считаем «не нажимал» и звоним, как раньше, с отметкой в журнале: сбой
+        проверки не должен держать звонок клиенту (то же правило, что в ТЗ для
+        проверки истории АТС).
+        """
+        if not (self.manager_button and self.manager_callbacks is not None):
+            return False
+        try:
+            return await self.manager_callbacks.pressed(link.lead_id)
+        except Exception as exc:  # noqa: BLE001 — сбой проверки не держит звонок
+            log.exception(
+                "Автозвонок, сделка %s: не удалось проверить кнопку «Я уже "
+                "перезвонил» — звоню, как раньше", link.lead_id,
+            )
+            await self.store.log_action(
+                link.lead_id, "button_check_failed", dry_run=self.dry_run,
+                payload={"error": str(exc)},
+            )
+            return False
+
+    async def _cancel(self, link: AutocallLead, reason: str,
+                      contact_at: Optional[datetime] = None) -> None:
+        """Робот остановился до повтора: статус cancelled, итог сообщения, примечание.
+
+        `reason` — chain.CANCEL_*; `contact_at` — когда в истории АТС был звонок
+        с клиентом (только для client_called). Итог правит сообщение с кнопкой;
+        его нет — менеджеру ничего нового не уходит (отдельного прежнего
+        сообщения для такого итога нет).
+        """
+        update_fields: dict[str, Any] = {"status": STATUS_CANCELLED, "next_action_at": None}
+        await self.store.log_action(
+            link.lead_id, "cancelled", dry_run=self.dry_run, payload={"reason": reason},
+        )
+        if self._cards_on and link.tg_message_id is not None:
+            message_id = await self._show_card(
+                link, ManagerCard(kind=reason, button=False, at=contact_at))
+            if message_id is not None:
+                update_fields["tg_message_id"] = message_id
+        await self.store.update(link.lead_id, **update_fields)
+        await self._leave_deal_note(link, STATUS_CANCELLED, reason, contact_at=contact_at)
+
+    @staticmethod
+    def _outcome_card(link: AutocallLead, status: str, outcome: Outcome,
+                      final_kind: Optional[str], retry_at: Optional[datetime],
+                      now: datetime) -> Optional[ManagerCard]:
+        """Что показать менеджеру после исхода попытки: повтор с кнопкой или итог."""
+        if status == STATUS_QUEUED:
+            kind = (CARD_RETRY_CLIENT if outcome is Outcome.CLIENT_NO_ANSWER
+                    else CARD_RETRY_MANAGER)
+            return ManagerCard(kind=kind, button=True, retry_at=retry_at, now=now)
+        if status == STATUS_DONE:
+            return ManagerCard(kind=STATUS_DONE, button=False, at=link.called_at or now)
+        if final_kind is not None:
+            return ManagerCard(kind=final_kind, button=False)
+        return None
+
+    async def _show_card(self, link: AutocallLead, card: ManagerCard) -> Optional[int]:
+        """Показать менеджеру сообщение с кнопкой: поправить то же или отправить новое.
+
+        Возвращает номер сообщения, которое цепочка теперь помнит, или None —
+        отправить не вышло. Правка не удалась (сообщение удалено и т. п.) —
+        отправляется новое. Сбой отправки цепочку не роняет — как у
+        `_notify_manager`.
+        """
+        if link.tg_message_id is not None:
+            try:
+                await self.manager_chat.edit(link.tg_message_id, link.lead_id, card)
+            except Exception as exc:  # noqa: BLE001 — не вышло править — отправим новое
+                log.warning(
+                    "Автозвонок, сделка %s: сообщение менеджеру %s не поправилось (%s) — "
+                    "отправляю новое", link.lead_id, link.tg_message_id, exc,
+                )
+                await self.store.log_action(
+                    link.lead_id, "card_edit_failed", dry_run=self.dry_run,
+                    payload={"kind": card.kind, "message_id": link.tg_message_id,
+                             "error": str(exc)},
+                )
+            else:
+                await self.store.log_action(
+                    link.lead_id, "notify", dry_run=self.dry_run,
+                    payload={"kind": card.kind, "message_id": link.tg_message_id,
+                             "edited": True},
+                )
+                return link.tg_message_id
+        try:
+            message_id = await self.manager_chat.send(link.lead_id, card)
+        except Exception as exc:  # noqa: BLE001 — недоставленное сообщение не роняет цепочку
+            log.exception(
+                "Автозвонок, сделка %s: сообщение менеджеру (%s) не ушло",
+                link.lead_id, card.kind,
+            )
+            await self.store.log_action(
+                link.lead_id, "notify_failed", dry_run=self.dry_run,
+                payload={"kind": card.kind, "error": str(exc)},
+            )
+            return None
+        await self.store.log_action(
+            link.lead_id, "notify", dry_run=self.dry_run,
+            payload={"kind": card.kind, "message_id": message_id, "edited": False},
+        )
+        return message_id
+
     # --- вспомогательное ---
 
     async def _leave_deal_note(
         self, link: AutocallLead, status: str, reason: Optional[str],
+        contact_at: Optional[datetime] = None,
     ) -> None:
         """Написать в сделку, чем кончилась цепочка: один раз, при финале.
 
@@ -343,7 +527,8 @@ class AutocallEngine:
         след для человека не должен отменять уже принятое решение робота.
         """
         try:
-            text = deal_note_text(status, called_at=link.called_at, reason=reason)
+            text = deal_note_text(status, called_at=link.called_at, reason=reason,
+                                  contact_at=contact_at)
             await self.amo.add_note(link.lead_id, text)
         except Exception:  # noqa: BLE001 — примечание не важнее самой цепочки
             log.exception(
