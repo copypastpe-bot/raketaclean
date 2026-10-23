@@ -41,13 +41,14 @@ changed only the local source path; the server paths are the same as before.
 
 Files longer than 500 lines and their function maps:
 
-- `adminbot/main.py` (1565 lines) -> `adminbot/main.py.map.md`
+- `adminbot/main.py` (1568 lines) -> `adminbot/main.py.map.md`
 - `adminbot/db.py` (1879 lines) -> `adminbot/db.py.map.md`
 - `adminbot/gcal/engine.py` (1187 lines) -> `adminbot/gcal/engine.py.map.md`
 - `adminbot/sync/engine.py` (772 lines) -> `adminbot/sync/engine.py.map.md`
 - `adminbot/tg/bot.py` (709 lines) -> `adminbot/tg/bot.py.map.md`
 - `adminbot/tg/cards.py` (690 lines) -> `adminbot/tg/cards.py.map.md`
-- `adminbot/autocall/engine.py` (628 lines) -> `adminbot/autocall/engine.py.map.md`
+- `adminbot/autocall/engine.py` (669 lines) -> `adminbot/autocall/engine.py.map.md`
+- `adminbot/autocall/pbx.py` (584 lines) -> `adminbot/autocall/pbx.py.map.md`
 
 ## Current Focus
 
