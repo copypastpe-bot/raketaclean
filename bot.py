@@ -3504,7 +3504,22 @@ async def autocall_called_cb(query: CallbackQuery):
         if message is None:
             return
         old_text = getattr(message, "text", None) or ""
-        text = f"{old_text}\n\n{AUTOCALL_CALLED_ACCEPTED_LINE}" if old_text else AUTOCALL_CALLED_ACCEPTED_LINE
+        if not old_text:
+            # Telegram прислал недоступное сообщение без текста — текст не трогаем,
+            # только убираем кнопку, как в ветке «уже не звонит».
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Автозвонок: сделка %s, нажатие записано, но кнопку убрать не удалось у %s: %s",
+                    lead_id, message.message_id, exc,
+                )
+            return
+        text = f"{old_text}\n\n{AUTOCALL_CALLED_ACCEPTED_LINE}"
         try:
             await bot.edit_message_text(
                 text=text,

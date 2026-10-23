@@ -149,6 +149,18 @@ class AutocallCalledButtonTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(call.kwargs["parse_mode"])
                 self.assertEqual(call.kwargs["reply_markup"].inline_keyboard, [])
 
+    async def test_live_chain_with_empty_text_only_drops_button(self):
+        # Telegram прислал недоступное сообщение без текста — текст не трогаем,
+        # только убираем кнопку; нажатие всё равно записывается.
+        await self._chain("queued")
+
+        query = await self._press(text=None)
+
+        query.answer.assert_awaited_once_with("Принято")
+        rows = await self._callbacks()
+        self.assertEqual([r["lead_id"] for r in rows], [LEAD_ID])
+        self._assert_button_dropped_only()
+
     async def test_second_press_keeps_one_row_without_error(self):
         await self._chain("queued")
         await self._press(user_id=MANAGER_ID)
