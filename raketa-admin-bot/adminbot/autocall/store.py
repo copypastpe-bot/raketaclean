@@ -161,3 +161,44 @@ class PgAutocallStore:
 
     async def actions_for(self, lead_id: int) -> list[dict]:
         return await db.fetch_autocall_actions(self._pool, lead_id)
+
+
+# --- Нажатия кнопки «Я уже перезвонил» (ТЗ 2026-10-23, задача 2) ---
+#
+# Кнопка стоит в сообщении менеджеру, которое админ-бот шлёт ключом рабочего
+# бота, — поэтому нажатие получает рабочий бот и пишет строку в свою таблицу
+# `public.autocall_manager_callbacks` (его миграция 0019). Админ-бот её только
+# читает, перед повтором: «по этой сделке нажимали?».
+
+
+class ManagerCallbacks(Protocol):
+    """Что движку нужно знать о нажатиях — и ничего сверх того."""
+
+    async def pressed(self, lead_id: int) -> bool: ...
+
+
+class MemoryManagerCallbacks:
+    """Нажатия в памяти: для репетиции и тестов. В базу не ходит."""
+
+    def __init__(self) -> None:
+        self.pressed_leads: set[int] = set()
+
+    def press(self, lead_id: int) -> None:
+        self.pressed_leads.add(lead_id)
+
+    async def pressed(self, lead_id: int) -> bool:
+        return lead_id in self.pressed_leads
+
+
+class PgManagerCallbackSource:
+    """Таблица нажатий рабочего бота. Читает через `bot_pool` — как `PgPromoCallbackSource`."""
+
+    def __init__(self, pool) -> None:
+        self.pool = pool
+
+    async def pressed(self, lead_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            value = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM public.autocall_manager_callbacks "
+                "WHERE lead_id = $1)", lead_id)
+        return bool(value)
