@@ -859,6 +859,7 @@ class FakeManagerChat:
         self.edited: list[tuple[int, int, ManagerCard]] = []
         self.fail_edit = False
         self.fail_send = False
+        self.edit_error: Exception | None = None   # точный ответ Telegram на правку
         self._next_id = 9000
 
     async def send(self, lead_id: int, card: ManagerCard) -> int:
@@ -871,6 +872,8 @@ class FakeManagerChat:
     async def edit(self, message_id: int, lead_id: int, card: ManagerCard) -> None:
         if self.fail_edit:
             raise RuntimeError("Bad Request: message to edit not found")
+        if self.edit_error is not None:
+            raise self.edit_error
         self.edited.append((message_id, lead_id, card))
 
 
@@ -1272,3 +1275,52 @@ async def test_button_check_failure_after_call_shows_retry_as_before():
     assert retried.next_action_at is not None
     assert [card.kind for _lead, card, _id in chat.sent] == ["retry_manager"]
     assert [row["action"] for row in store.actions].count("button_check_failed") == 1
+
+
+# --- «message is not modified» — правка удалась (правка П3 по ревью Задачи 2) ---
+#
+# Telegram отвечает ошибкой, если текст и кнопка не изменились (бывает при
+# повторе шага после сбоя записи в базу). Сообщение уже такое, как нужно, —
+# нового не слать.
+
+def _not_modified_error():
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import EditMessageText
+    return TelegramBadRequest(
+        method=EditMessageText(text="x", chat_id=1, message_id=9001),
+        message="Bad Request: message is not modified: specified new message content "
+                "and reply markup are exactly the same as a current content and reply "
+                "markup of the message")
+
+
+async def test_button_edit_not_modified_is_a_successful_edit():
+    store, pbx, amo, chat, _callbacks, notified, engine = _button_setup()
+    await store.create(724, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 724, msk(2026, 10, 23, 10, 0),
+                           Outcome.MANAGER_NO_ANSWER)
+    chat.edit_error = _not_modified_error()
+
+    second = await _attempt(store, pbx, engine, 724, first.next_action_at,
+                            Outcome.CLIENT_NO_ANSWER)
+
+    assert second.status == "queued"
+    assert len(chat.sent) == 1                   # нового сообщения нет
+    assert second.tg_message_id == 9001
+    assert "card_edit_failed" not in [row["action"] for row in store.actions]
+
+
+async def test_button_cancel_edit_not_modified_sends_nothing_new():
+    store, pbx, amo, chat, callbacks, notified, engine = _button_setup()
+    await store.create(725, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 725, msk(2026, 10, 23, 10, 0),
+                           Outcome.MANAGER_NO_ANSWER)
+    chat.edit_error = _not_modified_error()
+    callbacks.press(725)
+
+    await engine.process_due(await store.get(725), first.next_action_at)
+
+    final = await store.get(725)
+    assert final.status == "cancelled"
+    assert len(chat.sent) == 1
+    assert final.tg_message_id == 9001
+    assert "card_edit_failed" not in [row["action"] for row in store.actions]

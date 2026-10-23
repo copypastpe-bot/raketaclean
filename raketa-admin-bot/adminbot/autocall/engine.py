@@ -82,6 +82,16 @@ _TRANSIENT_ERRORS = (AmoError, aiohttp.ClientError, asyncio.TimeoutError, OSErro
 #: Пауза перед повторной попыткой после сетевого сбоя.
 _ERROR_RETRY = timedelta(seconds=60)
 
+
+def _message_not_modified(exc: Exception) -> bool:
+    """Telegram отказал в правке, потому что править нечего: текст и кнопка те же.
+
+    Бывает при повторе шага после сбоя записи в базу. Сообщение уже такое, как
+    нужно, — это удачная правка, а не повод слать новое. Узнаём по тексту
+    ответа: движок не знает про aiogram и его классы ошибок.
+    """
+    return "message is not modified" in str(exc).lower()
+
 NotifyManagerFn = Callable[[int, str], Awaitable[None]]
 NotifyOwnerRehearsalFn = Callable[[int, Optional[str]], Awaitable[None]]
 NotifyOwnerConnectedFn = Callable[[int], Awaitable[None]]
@@ -493,23 +503,27 @@ class AutocallEngine:
 
         Возвращает номер сообщения, которое цепочка теперь помнит, или None —
         отправить не вышло. Правка не удалась (сообщение удалено и т. п.) —
-        отправляется новое. Сбой отправки цепочку не роняет — как у
-        `_notify_manager`.
+        отправляется новое; «message is not modified» — правка удалась.
+        Сбой отправки цепочку не роняет — как у `_notify_manager`.
         """
         if link.tg_message_id is not None:
             try:
                 await self.manager_chat.edit(link.tg_message_id, link.lead_id, card)
             except Exception as exc:  # noqa: BLE001 — не вышло править — отправим новое
-                log.warning(
-                    "Автозвонок, сделка %s: сообщение менеджеру %s не поправилось (%s) — "
-                    "отправляю новое", link.lead_id, link.tg_message_id, exc,
-                )
-                await self.store.log_action(
-                    link.lead_id, "card_edit_failed", dry_run=self.dry_run,
-                    payload={"kind": card.kind, "message_id": link.tg_message_id,
-                             "error": str(exc)},
-                )
+                edited = _message_not_modified(exc)
+                if not edited:
+                    log.warning(
+                        "Автозвонок, сделка %s: сообщение менеджеру %s не поправилось "
+                        "(%s) — отправляю новое", link.lead_id, link.tg_message_id, exc,
+                    )
+                    await self.store.log_action(
+                        link.lead_id, "card_edit_failed", dry_run=self.dry_run,
+                        payload={"kind": card.kind, "message_id": link.tg_message_id,
+                                 "error": str(exc)},
+                    )
             else:
+                edited = True
+            if edited:
                 await self.store.log_action(
                     link.lead_id, "notify", dry_run=self.dry_run,
                     payload={"kind": card.kind, "message_id": link.tg_message_id,
