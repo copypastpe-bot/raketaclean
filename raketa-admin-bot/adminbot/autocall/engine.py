@@ -513,8 +513,11 @@ class AutocallEngine:
         update_fields: dict[str, Any] = {
             **(fields or {}), "status": STATUS_CANCELLED, "next_action_at": None,
         }
+        payload: dict[str, Any] = {"reason": reason}
+        if contact_at is not None:
+            payload["contact_at"] = contact_at.isoformat()
         await self.store.log_action(
-            link.lead_id, "cancelled", dry_run=self.dry_run, payload={"reason": reason},
+            link.lead_id, "cancelled", dry_run=self.dry_run, payload=payload,
         )
         if self._cards_on and link.tg_message_id is not None:
             message_id = await self._show_card(

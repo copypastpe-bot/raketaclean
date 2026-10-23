@@ -1384,7 +1384,9 @@ async def test_recheck_client_called_cancels_retry_without_a_call():
     assert pbx.contact_queries == [
         (PHONE, now, first.next_action_at, (MANAGER_DIAL, MANAGER_DIAL_PERSONAL))]
     cancelled = [row for row in store.actions if row["action"] == "cancelled"]
-    assert [row["payload"] for row in cancelled] == [{"reason": "client_called"}]
+    assert [row["payload"] for row in cancelled] == [
+        {"reason": "client_called", "contact_at": contact_at.isoformat()}
+    ]
     assert _notes(amo) == [CLIENT_CALLED_NOTE]
 
     # Закрытая цепочка больше не трогается.
