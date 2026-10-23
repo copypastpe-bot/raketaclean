@@ -61,8 +61,35 @@ class ParseAnswerTests(unittest.TestCase):
 
     def test_anything_else_is_unclear(self):
         """Непонятое не гадаем — оно уходит владельцу."""
-        for text in ("перенесите на среду", "5", "", "ok", "давайте"):
+        for text in ("перенесите на среду", "5", "", "давайте"):
             self.assertEqual(parse_answer(text), "unclear", text)
+
+    def test_ok_is_yes(self):
+        """Решение владельца 2026-10-23: «ок» — это «да»."""
+        for text in ("ок", "Ок", "ОК!", "окей", "ok", "OK.", "Ок, ждём"):
+            self.assertEqual(parse_answer(text), "yes", text)
+
+    def test_greeting_before_answer_is_skipped(self):
+        """Решение владельца 2026-10-23: приветствие в начале не мешает ответу.
+
+        Три клиента ответили «Здравствуйте! Да» (14.09, 18.09, 20.10) — робот
+        видел первое слово «здравствуйте» и звал владельца к ясному «да».
+        """
+        for text in ("Здравствуйте! Да", "Здравствуйте\nДа", "Добрый день, да",
+                     "добрый вечер да", "Доброе утро! Да", "Привет, да",
+                     "Приветствую. Да", "Здрасте да", "здрасьте, да",
+                     "Здравствуй, да", "Здравствуйте, ок"):
+            self.assertEqual(parse_answer(text), "yes", text)
+        self.assertEqual(parse_answer("Здравствуйте, нет"), "no")
+
+    def test_greeting_alone_or_with_other_words_is_unclear(self):
+        for text in ("Здравствуйте", "Добрый день!", "Здравствуйте, а можно перенести?",
+                     "Добрый день, подскажите время"):
+            self.assertEqual(parse_answer(text), "unclear", text)
+
+    def test_thanks_before_answer_is_not_skipped(self):
+        """Решение владельца 2026-10-23: «спасибо» в начале не пропускаем."""
+        self.assertEqual(parse_answer("Спасибо, да"), "unclear")
 
     def test_uncertainty_is_not_a_refusal(self):
         """«Не знаю» — это не отказ, а разговор: им занимается владелец.
@@ -315,6 +342,36 @@ class DecideOnAnswerTests(unittest.TestCase):
             self.assertEqual(decide_on_answer(answer="yes", status=status,
                                               asked_sent_at=self.SENT_AT),
                              "ignore", status)
+
+    def test_nothing_counts_after_work_started(self):
+        """Решение владельца 2026-10-23: ожидание кончается в момент начала работы.
+
+        21.10 работа была в 23:30 накануне, а «да» менеджера в 10:35 следующего
+        дня робот принял за ответ и написал «специалист позвонит за 30 минут».
+        """
+        order_at = datetime(2026, 10, 20, 23, 30, tzinfo=MSK)
+        for answer in ("yes", "no", "unclear"):
+            for status in ("planned", "owner_notified"):
+                self.assertEqual(
+                    decide_on_answer(answer=answer, status=status,
+                                     asked_sent_at=self.SENT_AT,
+                                     order_at=order_at, now=order_at),
+                    "ignore", f"{answer}/{status}")
+
+    def test_yes_before_work_starts_confirms(self):
+        order_at = datetime(2026, 10, 20, 23, 30, tzinfo=MSK)
+        self.assertEqual(
+            decide_on_answer(answer="yes", status="owner_notified",
+                             asked_sent_at=self.SENT_AT, order_at=order_at,
+                             now=order_at - timedelta(minutes=1)),
+            "confirm")
+
+    def test_no_work_time_keeps_waiting(self):
+        """Времени работы в сделке нет — срок не применяется, как раньше."""
+        self.assertEqual(
+            decide_on_answer(answer="yes", status="planned", asked_sent_at=self.SENT_AT,
+                             order_at=None, now=datetime(2027, 1, 1, tzinfo=MSK)),
+            "confirm")
 
     def test_nothing_counts_before_the_question_was_sent(self):
         """Решение владельца 1: нет вопроса — нет ожидания. Никогда.

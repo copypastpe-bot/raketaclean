@@ -4355,8 +4355,8 @@ async def _confirmation_pending_for(digits: str) -> asyncpg.Record | None:
     после него, ради редкого, но злого случая: у клиента два заказа подряд,
     свежий ещё не спрошен, а ответ пришёл на предыдущий.
 
-    Ожидание умирает через сутки после работы: «да», пришедшее через неделю,
-    подтверждать уже нечего — мастер либо съездил, либо нет.
+    Ожидание умирает с началом работы (`PENDING_TTL_AFTER_ORDER`, решение
+    владельца 2026-10-23): подтверждать уже нечего — мастер на месте.
     """
     if pool is None:
         return None
@@ -4492,6 +4492,14 @@ async def _confirmation_call_owner(pending: Mapping[str, Any], *, answer: str,
         )
 
 
+# Метки WAHelp «пишет клиент» (названия — из scripts/export_wahelp_chats.py).
+# Всё остальное — мы сами: окно WAHelp, amoCRM web, Telegram на телефоне.
+# 2026-10-21 «Да, счет и акт оставили» менеджера пришло не с «from_operator»,
+# и робот принял его за ответ клиентки на вопрос о заказе. Поэтому список
+# разрешённых, а не запрещённых меток (решение владельца 2026-10-23).
+WAHELP_CLIENT_DESTINATIONS = frozenset({"from_client", "from"})
+
+
 async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
     if pool is None:
         return False
@@ -4499,7 +4507,13 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
     if not isinstance(data, Mapping):
         return False
     destination = str(data.get("destination") or data.get("direction") or "").lower()
-    if destination in {"", "from_operator", "operator"}:
+    if destination not in WAHELP_CLIENT_DESTINATIONS:
+        # Свои письма и их статусы идут потоком — их в журнал не пишем.
+        # Чужую метку пишем без текста и телефона: по ней видно, что клиент
+        # не потерялся под незнакомым названием.
+        if destination not in {"", "from_operator"}:
+            logger.info("WAHelp: метка %s (%s) — не клиент, пропускаю",
+                        destination[:40], str(payload.get("event") or "")[:40])
         return False
     channel_alias = None
     channel_uuid = None
@@ -4567,7 +4581,9 @@ async def handle_wahelp_inbound(payload: Mapping[str, Any]) -> bool:
         # Запрос уже отсеял неотправленные вопросы, но решение принимает правило:
         # разойдись они однажды — молчаливо победил бы SQL, а он не покрыт тестами.
         action = decide_on_answer(answer=answer, status=str(pending["status"]),
-                                  asked_sent_at=pending["asked_sent_at"])
+                                  asked_sent_at=pending["asked_sent_at"],
+                                  order_at=pending["order_at"],
+                                  now=datetime.now(timezone.utc))
         if action == "confirm":
             await _confirmation_accept(pending, normalized_text)
             return True

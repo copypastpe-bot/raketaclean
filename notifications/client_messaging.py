@@ -21,9 +21,11 @@ from .amo_exchange import AMO_FIELD_ADDRESS, field_enum_ids, field_values
 ASK_BEFORE = timedelta(days=1)        # за сутки от времени заказа (решение владельца)
 SILENCE_LIMIT = timedelta(hours=3)    # столько ждём ответа, потом зовём владельца
 
-# Сколько ожидание живёт после времени работы. Ответ «да», пришедший через
-# неделю, подтверждать уже нечего: мастер либо съездил, либо нет.
-PENDING_TTL_AFTER_ORDER = timedelta(days=1)
+# Сколько ожидание живёт после времени работы. Решение владельца 2026-10-23:
+# нисколько — с началом работы подтверждать уже нечего, мастер на месте.
+# 2026-10-21 работа была в 23:30, а «да» менеджера в 10:35 следующего дня
+# робот принял за ответ и написал клиентке «специалист позвонит за 30 минут».
+PENDING_TTL_AFTER_ORDER = timedelta(0)
 
 # Воронка реализации и её этапы. Номера этапов в разных воронках свои, поэтому
 # воронку проверяем всегда: без этого робот написал бы клиентам чужих сделок.
@@ -73,8 +75,18 @@ ANSWER_LIMIT = 1500
 
 # Только однозначные слова. «Не» сюда не входит намеренно: «не знаю», «не уверен»,
 # «не смогу сказать» — это разговор, а не отказ, и вести его должен владелец.
-_YES = {"да", "ага", "верно", "подтверждаю", "подтверждаем"}
+# «Ок» — «да» по решению владельца 2026-10-23.
+_YES = {"да", "ага", "верно", "подтверждаю", "подтверждаем", "ок", "окей", "ok"}
 _NO = {"нет", "отмена", "отменяю", "отменяем"}
+
+# Приветствие перед ответом ответом не считается и пропускается (решение
+# владельца 2026-10-23): «Здравствуйте! Да» трижды уходило владельцу как
+# непонятное. «Спасибо» сюда не входит — тоже его решение.
+_GREETINGS = (
+    ("здравствуйте",), ("здравствуй",), ("здрасте",), ("здрасьте",),
+    ("добрый", "день"), ("добрый", "вечер"), ("доброе", "утро"),
+    ("привет",), ("приветствую",),
+)
 
 _PUNCTUATION = "!.,;:?)("
 
@@ -89,11 +101,16 @@ class ConfirmationPlan:
 
 
 def parse_answer(text: Optional[str]) -> str:
-    """`yes`, `no` или `unclear`. Смотрим первое слово — его и просили прислать."""
-    cleaned = (text or "").strip().lower()
-    if not cleaned:
+    """`yes`, `no` или `unclear`. Смотрим первое слово после приветствия —
+    его и просили прислать."""
+    words = [word.strip(_PUNCTUATION) for word in (text or "").lower().split()]
+    for greeting in _GREETINGS:
+        if tuple(words[:len(greeting)]) == greeting:
+            words = words[len(greeting):]
+            break
+    if not words:
         return "unclear"
-    first = cleaned.split()[0].strip(_PUNCTUATION)
+    first = words[0]
     if first in _YES:
         return "yes"
     if first in _NO:
@@ -291,7 +308,9 @@ def letter_payload(*, order_at: Optional[datetime],
 
 
 def decide_on_answer(*, answer: str, status: str,
-                     asked_sent_at: Optional[datetime]) -> str:
+                     asked_sent_at: Optional[datetime],
+                     order_at: Optional[datetime] = None,
+                     now: Optional[datetime] = None) -> str:
     """Что делать с ответом клиента: `confirm`, `call_owner` или `ignore`.
 
     Первое правило — решение владельца 2026-09-03: **нет вопроса — нет
@@ -305,9 +324,14 @@ def decide_on_answer(*, answer: str, status: str,
     `owner_notified` означает, что владелец уже в разговоре: второй раз его
     об одном заказе не тревожим. Но «да» принимаем и после сигнала — решение
     владельца 7: клиент подтвердил, значит сделке место в подтверждённых.
+
+    С началом работы ожидание кончается (решение владельца 2026-10-23). Без
+    времени работы в сделке срок не применяется.
     """
     if asked_sent_at is None:
         return "ignore"                       # вопроса не было — отвечать не на что
+    if order_at is not None and now is not None and now >= order_at:
+        return "ignore"                       # работа началась — подтверждать нечего
     if status not in ("planned", "owner_notified"):
         return "ignore"                       # с этим заказом всё уже решено
     if answer == "yes":
