@@ -100,6 +100,21 @@ async def test_progress_is_saved_attempt_by_attempt(store):
     assert await store.update(99999999, status="error") is None
 
 
+async def test_button_fields_are_saved_and_empty_by_default(store):
+    """Миграция 022 (ТЗ 2026-10-23, задача 2): время последней попытки и номер
+    сообщения менеджеру с кнопкой. Новая цепочка — оба пустые; запись и чтение
+    одинаковы у памяти и базы."""
+    lead = await store.create(41500003, phone10="9601861067")
+    assert lead.last_called_at is None
+    assert lead.tg_message_id is None
+
+    await store.update(41500003, last_called_at=NOW, tg_message_id=7001)
+    saved = await store.get(41500003)
+
+    assert saved.last_called_at == NOW
+    assert saved.tg_message_id == 7001
+
+
 async def test_due_returns_only_chains_whose_time_has_come(store):
     """В работу идёт незаконченное, у чего срок подошёл; просроченное — первым.
 

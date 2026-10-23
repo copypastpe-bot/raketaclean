@@ -1556,7 +1556,8 @@ async def fetch_calendar_actions(own_pool: asyncpg.Pool, event_id: str,
 # Колонки adminbot.autocall_leads, которые разрешено менять.
 _UPDATABLE_AUTOCALL_FIELDS = frozenset(
     {"phone10", "status", "attempts_total", "manager_failures", "client_failures",
-     "next_action_at", "call_id", "called_at", "last_error"}
+     "next_action_at", "call_id", "called_at", "last_error",
+     "last_called_at", "tg_message_id"}       # миграция 022 (ТЗ 2026-10-23)
 )
 
 
@@ -1574,6 +1575,8 @@ def _autocall_from_row(row: Optional[asyncpg.Record]) -> Optional[AutocallLead]:
         call_id=row["call_id"],
         called_at=row["called_at"],
         last_error=row["last_error"],
+        last_called_at=row["last_called_at"],
+        tg_message_id=row["tg_message_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

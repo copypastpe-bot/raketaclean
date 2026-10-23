@@ -154,7 +154,7 @@ class AutocallLead:
     """
 
     lead_id: int
-    status: str                       # queued|calling|done|no_contact|gave_up|error
+    status: str                       # queued|calling|done|no_contact|gave_up|cancelled|error
     phone10: Optional[str] = None
     attempts_total: int = 0
     manager_failures: int = 0
@@ -163,6 +163,10 @@ class AutocallLead:
     call_id: Optional[str] = None     # идентификатор звонка в АТС
     called_at: Optional[datetime] = None        # когда отдали команду АТС
     last_error: Optional[str] = None
+    # Миграция 022 (ТЗ 2026-10-23): время последней попытки — в отличие от
+    # called_at переживает возврат в очередь; сообщение менеджеру с кнопкой.
+    last_called_at: Optional[datetime] = None
+    tg_message_id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
