@@ -1324,3 +1324,223 @@ async def test_button_cancel_edit_not_modified_sends_nothing_new():
     assert len(chat.sent) == 1
     assert final.tg_message_id == 9001
     assert "card_edit_failed" not in [row["action"] for row in store.actions]
+
+
+# --- Проверка истории АТС перед повтором (ТЗ 2026-10-23, задача 3) ---
+#
+# Выключатель AUTOCALL_PBX_RECHECK. Перед повтором робот спрашивает АТС: был ли
+# звонок с номером клиента после прошлой попытки (кроме своей)? Был — даже
+# пропущенный — цепочка закрывается статусом cancelled, причина client_called,
+# в сделке примечание со временем звонка. Проверка не ответила — звонок идёт,
+# как раньше, в журнале recheck_failed.
+
+import asyncio  # noqa: E402
+
+from adminbot.autocall.pbx import PbxError  # noqa: E402
+
+CLIENT_CALLED_NOTE = ("Автозвонок: с клиентом уже был звонок через АТС (10:01 МСК) — клиент "
+                      "перезвонил сам или звонили из офиса. Робот остановился.")
+
+
+class FailingRecheckPbx(MemoryPbx):
+    """АТС звонит как обычно, но история перед повтором не отвечает."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def contact_since(self, client_phone, *, since, until, manager_phones):
+        self.contact_queries.append((client_phone, since, until, tuple(manager_phones)))
+        raise self.error
+
+
+def make_recheck_engine(*, store, pbx, amo, pbx_recheck=True, manager_button=False,
+                        chat=None, callbacks=None, notify_manager=None):
+    return AutocallEngine(
+        pbx=pbx, amo=amo, store=store, manager_dials=(MANAGER_DIAL, MANAGER_DIAL_PERSONAL),
+        notify_manager=notify_manager,
+        manager_button=manager_button, manager_chat=chat, manager_callbacks=callbacks,
+        pbx_recheck=pbx_recheck, dry_run=False,
+    )
+
+
+async def test_recheck_client_called_cancels_retry_without_a_call():
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_recheck_engine(store=store, pbx=pbx, amo=amo)
+    await store.create(801, phone10=PHONE)
+    now = msk(2026, 10, 23, 10, 0)
+    first = await _attempt(store, pbx, engine, 801, now, Outcome.CLIENT_NO_ANSWER)
+    contact_at = msk(2026, 10, 23, 10, 1, 6)
+    pbx.set_contact(contact_at)              # клиент перезвонил и не дозвонился
+
+    await engine.process_due(await store.get(801), first.next_action_at)
+
+    final = await store.get(801)
+    assert final.status == "cancelled"
+    assert final.next_action_at is None
+    assert final.attempts_total == 1
+    assert len(pbx.calls) == 1                   # повтора нет
+    # Окно — от прошлой попытки до «сейчас»; телефоны менеджера — оба.
+    assert pbx.contact_queries == [
+        (PHONE, now, first.next_action_at, (MANAGER_DIAL, MANAGER_DIAL_PERSONAL))]
+    cancelled = [row for row in store.actions if row["action"] == "cancelled"]
+    assert [row["payload"] for row in cancelled] == [{"reason": "client_called"}]
+    assert _notes(amo) == [CLIENT_CALLED_NOTE]
+
+    # Закрытая цепочка больше не трогается.
+    await engine.process_due(final, first.next_action_at + timedelta(minutes=1))
+    assert len(pbx.calls) == 1
+
+
+async def test_recheck_client_called_edits_button_message_to_final():
+    """Сообщение с кнопкой есть — итог правкой того же сообщения, со временем звонка."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    chat, callbacks = FakeManagerChat(), MemoryManagerCallbacks()
+    engine = make_recheck_engine(store=store, pbx=pbx, amo=amo, manager_button=True,
+                                 chat=chat, callbacks=callbacks)
+    await store.create(802, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 802, msk(2026, 10, 23, 10, 0),
+                           Outcome.MANAGER_NO_ANSWER)
+    contact_at = msk(2026, 10, 23, 10, 1, 6)
+    pbx.set_contact(contact_at)
+
+    await engine.process_due(await store.get(802), first.next_action_at)
+
+    assert (await store.get(802)).status == "cancelled"
+    assert len(pbx.calls) == 1
+    assert chat.edited == [(9001, 802, ManagerCard(kind="client_called", button=False,
+                                                   at=contact_at))]
+    assert len(chat.sent) == 1
+
+
+async def test_recheck_runs_after_button_check():
+    """Кнопка нажата — останавливает она, историю АТС уже не спрашиваем."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    chat, callbacks = FakeManagerChat(), MemoryManagerCallbacks()
+    engine = make_recheck_engine(store=store, pbx=pbx, amo=amo, manager_button=True,
+                                 chat=chat, callbacks=callbacks)
+    await store.create(803, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 803, msk(2026, 10, 23, 10, 0),
+                           Outcome.MANAGER_NO_ANSWER)
+    callbacks.press(803)
+    pbx.set_contact(msk(2026, 10, 23, 10, 1, 6))
+
+    await engine.process_due(await store.get(803), first.next_action_at)
+
+    cancelled = [row for row in store.actions if row["action"] == "cancelled"]
+    assert [row["payload"] for row in cancelled] == [{"reason": "manager_called"}]
+    assert pbx.contact_queries == []
+
+
+async def test_recheck_no_contact_calls_as_before():
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_recheck_engine(store=store, pbx=pbx, amo=amo)
+    await store.create(804, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 804, msk(2026, 10, 23, 10, 0),
+                           Outcome.CLIENT_NO_ANSWER)
+
+    await engine.process_due(await store.get(804), first.next_action_at)
+
+    assert (await store.get(804)).status == "calling"
+    assert len(pbx.calls) == 2
+    assert len(pbx.contact_queries) == 1
+    assert "cancelled" not in [row["action"] for row in store.actions]
+
+
+async def test_recheck_first_attempt_is_not_checked():
+    """Проверка — только перед повтором: первую попытку ничто не держит."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_recheck_engine(store=store, pbx=pbx, amo=amo)
+    await store.create(805, phone10=PHONE)
+    pbx.set_contact(msk(2026, 10, 23, 9, 59))
+
+    await engine.process_due(await store.get(805), msk(2026, 10, 23, 10, 0))
+
+    assert (await store.get(805)).status == "calling"
+    assert pbx.contact_queries == []
+
+
+@pytest.mark.parametrize("error", [
+    PbxError("mongo_history/search.json: history unavailable"),
+    aiohttp.ClientError("АТС недоступна"),
+    asyncio.TimeoutError(),
+])
+async def test_recheck_failure_calls_as_before(error):
+    """Проверка истории не ответила — звонок идёт, как раньше, в журнале
+    recheck_failed: сбой проверки не должен задерживать звонок клиенту."""
+    store, amo = MemoryAutocallStore(), FakeAmo()
+    pbx = FailingRecheckPbx(error)
+    engine = make_recheck_engine(store=store, pbx=pbx, amo=amo)
+    await store.create(806, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 806, msk(2026, 10, 23, 10, 0),
+                           Outcome.MANAGER_NO_ANSWER)
+
+    await engine.process_due(await store.get(806), first.next_action_at)
+
+    assert (await store.get(806)).status == "calling"
+    assert len(pbx.calls) == 2
+    failed = [row for row in store.actions if row["action"] == "recheck_failed"]
+    assert len(failed) == 1
+    assert failed[0]["payload"] == {"error": str(error)}
+    assert "error" not in [row["action"] for row in store.actions]
+
+
+async def test_recheck_switch_off_does_not_ask_pbx():
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_recheck_engine(store=store, pbx=pbx, amo=amo, pbx_recheck=False)
+    await store.create(807, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 807, msk(2026, 10, 23, 10, 0),
+                           Outcome.CLIENT_NO_ANSWER)
+    pbx.set_contact(msk(2026, 10, 23, 10, 1, 6))
+
+    await engine.process_due(await store.get(807), first.next_action_at)
+
+    assert (await store.get(807)).status == "calling"
+    assert len(pbx.calls) == 2
+    assert pbx.contact_queries == []
+
+
+async def test_recheck_switch_off_behaves_exactly_as_before():
+    """Выключатель выключен — поведение ровно прежнее, даже если АТС «видит»
+    звонок клиента: те же звонки, сообщения, журнал, поля строки и действия в амо."""
+    def setup():
+        store, pbx, amo, notified = MemoryAutocallStore(), MemoryPbx(), FakeAmo(), []
+
+        async def notify_manager(lead_id, kind):
+            notified.append((lead_id, kind))
+        return store, pbx, amo, notified, notify_manager
+
+    store_a, pbx_a, amo_a, notified_a, notify_a = setup()
+    before = make_engine(store=store_a, pbx=pbx_a, amo=amo_a, notify_manager=notify_a)
+    lead_a = await _run_full_chain(before, store_a, pbx_a)
+
+    store_b, pbx_b, amo_b, notified_b, notify_b = setup()
+    pbx_b.set_contact(msk(2026, 10, 23, 19, 51))
+    switched_off = AutocallEngine(
+        pbx=pbx_b, amo=amo_b, store=store_b, manager_dials=(MANAGER_DIAL,),
+        notify_manager=notify_b, pbx_recheck=False, dry_run=False)
+    lead_b = await _run_full_chain(switched_off, store_b, pbx_b)
+
+    assert lead_a.status == "no_contact"
+    assert lead_b == lead_a
+    assert pbx_b.calls == pbx_a.calls
+    assert notified_b == notified_a
+    assert store_b.actions == store_a.actions
+    assert amo_b.calls == amo_a.calls
+    assert pbx_b.contact_queries == []
+
+
+async def test_recheck_without_last_called_at_calls_as_before():
+    """Цепочка без времени прошлой попытки (заведена до миграции 022) — окна нет,
+    АТС не спрашиваем, звоним, как раньше."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    engine = make_recheck_engine(store=store, pbx=pbx, amo=amo)
+    await store.create(808, phone10=PHONE)
+    await store.update(808, attempts_total=1, client_failures=1)
+    pbx.set_contact(msk(2026, 10, 23, 10, 1, 6))
+
+    await engine.process_due(await store.get(808), msk(2026, 10, 23, 10, 10))
+
+    assert (await store.get(808)).status == "calling"
+    assert len(pbx.calls) == 1
+    assert pbx.contact_queries == []

@@ -40,6 +40,7 @@ import aiohttp
 from adminbot.amo import ids
 from adminbot.amo.client import AmoError
 from adminbot.autocall.chain import (
+    CANCEL_CLIENT_CALLED,
     CANCEL_MANAGER_CALLED,
     CARD_RETRY_CLIENT,
     CARD_RETRY_MANAGER,
@@ -146,6 +147,7 @@ class AutocallEngine:
         manager_button: bool = False,
         manager_chat: Optional[ManagerChat] = None,
         manager_callbacks: Optional[ManagerCallbacks] = None,
+        pbx_recheck: bool = False,
         dry_run: bool = True,
     ) -> None:
         self.pbx = pbx
@@ -168,6 +170,9 @@ class AutocallEngine:
         self.manager_button = manager_button
         self.manager_chat = manager_chat
         self.manager_callbacks = manager_callbacks
+        # Проверка истории АТС перед повтором (ТЗ 2026-10-23, выключатель
+        # AUTOCALL_PBX_RECHECK). Выключена — АТС перед повтором не спрашиваем.
+        self.pbx_recheck = pbx_recheck
         self.dry_run = dry_run
 
     @property
@@ -279,6 +284,15 @@ class AutocallEngine:
         if link.attempts_total >= 1 and await self._manager_pressed(link):
             await self._cancel(link, CANCEL_MANAGER_CALLED)
             return
+
+        # Повтор, а с клиентом после прошлой попытки уже был звонок через АТС —
+        # клиент перезвонил сам (даже если не дозвонился) или звонили из офиса
+        # (ТЗ 2026-10-23, решение владельца 5). Робот останавливается.
+        if link.attempts_total >= 1:
+            contact_at = await self._pbx_contact(link, now)
+            if contact_at is not None:
+                await self._cancel(link, CANCEL_CLIENT_CALLED, contact_at)
+                return
 
         # Намерение — ДО команды АТС (инвариант №1 из модульной докстрины):
         # упади мы между этой записью и звонком, второй звонок по той же
@@ -455,6 +469,33 @@ class AutocallEngine:
                 payload={"error": str(exc)},
             )
             return False
+
+    async def _pbx_contact(self, link: AutocallLead, now: datetime) -> Optional[datetime]:
+        """Когда после прошлой попытки был звонок с клиентом через АТС; None — не было.
+
+        Выключатель выключен — АТС не спрашиваем. Нет времени прошлой попытки
+        (цепочка заведена до миграции 022) — окна нет, тоже не спрашиваем.
+        История не ответила (сеть, ошибка АТС) — считаем «не было» и звоним, как
+        раньше, с отметкой `recheck_failed` в журнале: сбой проверки не должен
+        задерживать звонок клиенту (решение ТЗ, по образцу `_manager_pressed`).
+        """
+        if not self.pbx_recheck or link.last_called_at is None:
+            return None
+        try:
+            return await self.pbx.contact_since(
+                link.phone10, since=link.last_called_at, until=now,
+                manager_phones=self.manager_dials,
+            )
+        except Exception as exc:  # noqa: BLE001 — сбой проверки не держит звонок
+            log.exception(
+                "Автозвонок, сделка %s: не удалось проверить историю АТС перед "
+                "повтором — звоню, как раньше", link.lead_id,
+            )
+            await self.store.log_action(
+                link.lead_id, "recheck_failed", dry_run=self.dry_run,
+                payload={"error": str(exc)},
+            )
+            return None
 
     async def _cancel(self, link: AutocallLead, reason: str,
                       contact_at: Optional[datetime] = None, *,
