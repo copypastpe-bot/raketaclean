@@ -1152,7 +1152,8 @@ async def test_button_check_failure_calls_as_before():
 
     assert (await store.get(712)).status == "calling"
     assert len(pbx.calls) == 2
-    assert [row["action"] for row in store.actions].count("button_check_failed") == 1
+    # Две отметки: после исхода первой попытки (правка П1) и перед повтором.
+    assert [row["action"] for row in store.actions].count("button_check_failed") == 2
 
 
 async def test_last_called_at_survives_retry():
@@ -1170,3 +1171,104 @@ async def test_last_called_at_survives_retry():
 
     await engine.process_due(retried, retried.next_action_at)
     assert (await store.get(713)).last_called_at == retried.next_action_at
+
+
+# --- Нажатие во время идущего звонка (правка П1 по ревью Задачи 2) ---
+#
+# Менеджер нажал кнопку, пока робот набирал номер: рабочий бот уже написал
+# «Принято» и убрал кнопку. Исход звонка ведёт к повтору — но повтора не будет,
+# поэтому цепочка закрывается сразу, без сообщения «Повтор в …».
+
+async def _press_during_second_call(store, pbx, engine, callbacks, lead_id, first,
+                                    outcome):
+    """Вторая попытка: робот набирает, менеджер жмёт кнопку, приходит исход."""
+    await engine.process_due(await store.get(lead_id), first.next_action_at)
+    calling = await store.get(lead_id)
+    assert calling.status == "calling"
+    callbacks.press(lead_id)
+    pbx.set_outcome(calling.call_id, outcome)
+    await engine.process_due(calling, first.next_action_at + timedelta(seconds=1))
+    return await store.get(lead_id)
+
+
+@pytest.mark.parametrize("first_outcome, second_outcome", [
+    (Outcome.CLIENT_NO_ANSWER, Outcome.MANAGER_NO_ANSWER),   # во второй раз не взял менеджер
+    (Outcome.MANAGER_NO_ANSWER, Outcome.CLIENT_NO_ANSWER),   # во второй раз не взял клиент
+], ids=["manager_no_answer", "client_no_answer"])
+async def test_button_pressed_during_call_closes_chain_instead_of_retry(
+        first_outcome, second_outcome):
+    store, pbx, amo, chat, callbacks, notified, engine = _button_setup()
+    await store.create(720, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 720, msk(2026, 10, 23, 10, 0), first_outcome)
+    assert first.tg_message_id == 9001
+
+    final = await _press_during_second_call(store, pbx, engine, callbacks, 720, first,
+                                            second_outcome)
+
+    assert final.status == "cancelled"
+    assert final.next_action_at is None
+    assert final.attempts_total == 2
+    assert (final.manager_failures, final.client_failures) == (1, 1)
+    assert final.called_at is None and final.call_id is None
+    assert len(chat.sent) == 1
+    # Сообщения «Повтор в …» нет — сразу итог.
+    assert chat.edited == [(9001, 720, ManagerCard(kind="manager_called", button=False))]
+    assert final.tg_message_id == 9001
+    assert notified == []                        # и client_retry_10 не ушёл
+    assert _notes(amo) == [MANAGER_CALLED_NOTE]
+    cancelled = [row for row in store.actions if row["action"] == "cancelled"]
+    assert [row["payload"] for row in cancelled] == [{"reason": "manager_called"}]
+
+    # Звонков больше нет.
+    await engine.process_due(final, first.next_action_at + timedelta(minutes=30))
+    assert len(pbx.calls) == 2
+
+
+async def test_button_pressed_during_call_connected_is_done_as_before():
+    """Нажатие во время звонка, а звонок соединил — итог «соединил», как раньше."""
+    store, pbx, amo, chat, callbacks, notified, engine = _button_setup()
+    await store.create(721, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 721, msk(2026, 10, 23, 10, 0),
+                           Outcome.MANAGER_NO_ANSWER)
+
+    final = await _press_during_second_call(store, pbx, engine, callbacks, 721, first,
+                                            Outcome.CONNECTED)
+
+    assert final.status == "done"
+    assert chat.edited == [(9001, 721, ManagerCard(kind="done", button=False,
+                                                   at=first.next_action_at))]
+    assert [row for row in store.actions if row["action"] == "cancelled"] == []
+    assert len(_notes(amo)) == 1 and _notes(amo) != [MANAGER_CALLED_NOTE]
+
+
+async def test_button_pressed_during_call_switch_off_retries_as_before():
+    store, pbx, amo, chat, callbacks, notified, engine = _button_setup(manager_button=False)
+    await store.create(722, phone10=PHONE)
+    first = await _attempt(store, pbx, engine, 722, msk(2026, 10, 23, 10, 0),
+                           Outcome.MANAGER_NO_ANSWER)
+
+    final = await _press_during_second_call(store, pbx, engine, callbacks, 722, first,
+                                            Outcome.CLIENT_NO_ANSWER)
+
+    assert final.status == "queued"
+    assert notified == [(722, "client_retry_10")]
+    assert chat.sent == [] and chat.edited == []
+    assert [row for row in store.actions if row["action"] == "cancelled"] == []
+
+
+async def test_button_check_failure_after_call_shows_retry_as_before():
+    """Проверка нажатия после исхода упала — сообщение о повторе и повтор, как
+    раньше, отметка в журнале."""
+    store, pbx, amo = MemoryAutocallStore(), MemoryPbx(), FakeAmo()
+    chat = FakeManagerChat()
+    engine = make_button_engine(store=store, pbx=pbx, amo=amo, chat=chat,
+                                callbacks=BrokenCallbacks())
+    await store.create(723, phone10=PHONE)
+
+    retried = await _attempt(store, pbx, engine, 723, msk(2026, 10, 23, 10, 0),
+                             Outcome.MANAGER_NO_ANSWER)
+
+    assert retried.status == "queued"
+    assert retried.next_action_at is not None
+    assert [card.kind for _lead, card, _id in chat.sent] == ["retry_manager"]
+    assert [row["action"] for row in store.actions].count("button_check_failed") == 1

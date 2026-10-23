@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 
@@ -332,6 +333,24 @@ class AutocallEngine:
         )
         new_chain, effects = advance(chain, outcome, now)
 
+        # Исход ведёт к повтору, а менеджер нажал «Я уже перезвонил», пока шёл
+        # этот звонок: рабочий бот уже написал «Принято». Повтора всё равно не
+        # будет — закрываем сразу, как проверка перед повтором, иначе сообщение
+        # «Повтор в …» до самого повтора (вечером — на всю ночь) обещало бы
+        # звонок. Эффекты повтора — только он сам и client_retry_10, оба не нужны.
+        if any(isinstance(effect, Retry) for effect in effects) \
+                and await self._manager_pressed(link):
+            await self._cancel(link, CANCEL_MANAGER_CALLED, fields={
+                "attempts_total": new_chain.attempts_total,
+                "manager_failures": new_chain.manager_failures,
+                "client_failures": new_chain.client_failures,
+                # Как при возврате в очередь: строка закрытой цепочки та же,
+                # что после остановки перед повтором, и примечание то же.
+                "called_at": None,
+                "call_id": None,
+            })
+            return
+
         # Один store.update на весь исход — не по одному на эффект. next_action_at
         # берём из new_chain (для Done/GaveUp/переноса он уже None); Retry —
         # единственный эффект, который его переопределяет через окно звонков.
@@ -428,15 +447,21 @@ class AutocallEngine:
             return False
 
     async def _cancel(self, link: AutocallLead, reason: str,
-                      contact_at: Optional[datetime] = None) -> None:
+                      contact_at: Optional[datetime] = None, *,
+                      fields: Optional[dict[str, Any]] = None) -> None:
         """Робот остановился до повтора: статус cancelled, итог сообщения, примечание.
 
         `reason` — chain.CANCEL_*; `contact_at` — когда в истории АТС был звонок
         с клиентом (только для client_called). Итог правит сообщение с кнопкой;
         его нет — менеджеру ничего нового не уходит (отдельного прежнего
-        сообщения для такого итога нет).
+        сообщения для такого итога нет). `fields` — что ещё записать в строку
+        той же записью (исход только что разобранной попытки).
         """
-        update_fields: dict[str, Any] = {"status": STATUS_CANCELLED, "next_action_at": None}
+        if fields:
+            link = dc_replace(link, **fields)
+        update_fields: dict[str, Any] = {
+            **(fields or {}), "status": STATUS_CANCELLED, "next_action_at": None,
+        }
         await self.store.log_action(
             link.lead_id, "cancelled", dry_run=self.dry_run, payload={"reason": reason},
         )
