@@ -118,6 +118,7 @@ Files longer than 500 lines and their function maps:
 - `notifications/outbox.py` (803 lines) -> `notifications/outbox.py.map.md`
 - `raketa-admin-bot/adminbot/autocall/engine.py` (672 lines) -> `raketa-admin-bot/adminbot/autocall/engine.py.map.md`
 - `raketa-admin-bot/adminbot/autocall/pbx.py` (584 lines) -> `raketa-admin-bot/adminbot/autocall/pbx.py.map.md`
+- `raketa-admin-bot/adminbot/amo/client.py` (503 lines) -> `raketa-admin-bot/adminbot/amo/client.py.map.md`
 
 ## Server work (owner decision 2026-09-21)
 
