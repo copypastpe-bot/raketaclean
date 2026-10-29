@@ -113,6 +113,7 @@ CLOSE_NEW_LEADS_LIVE=""
 CLOSE_REPEAT_TASKS=""
 CLOSE_REPEAT_TASKS_LIVE=""
 CLOSE_REPEAT_TASKS_LIMIT=""
+SHOW_UNANSWERED=""
 SHOW_LEAD_IDS=""
 AUTOCALL_EXAM=""
 AUTOCALL=""
@@ -190,6 +191,7 @@ for arg in "$@"; do
         --close-repeat-tasks)       CLOSE_REPEAT_TASKS=1 ;;
         --close-repeat-tasks-live)  CLOSE_REPEAT_TASKS=1; CLOSE_REPEAT_TASKS_LIVE=1 ;;
         --close-repeat-tasks-limit=*) CLOSE_REPEAT_TASKS_LIMIT="${arg#*=}" ;;
+        --unanswered)     SHOW_UNANSWERED=1 ;;
         --lead-ids=*)     SHOW_LEAD_IDS="${arg#*=}" ;;
         --autocall-exam)  AUTOCALL_EXAM=1 ;;
         --autocall-on)        AUTOCALL=1 ;;
@@ -565,6 +567,16 @@ if [ -n "$CLOSE_REPEAT_TASKS" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.close_repeat_tasks || true
 fi
 
+# Неотвеченные сообщения в чатах амо за две недели (просьба владельца
+# 2026-10-29): только читает CRM.
+if [ -n "$SHOW_UNANSWERED" ]; then
+    say "Неотвеченные сообщения в чатах"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS \
+        "$HOME_DIR/.venv/bin/python" -m scripts.show_unanswered || true
+fi
+
 # Экзамен фильтра заявок с сайта: читает CRM, ничего не меняет.
 if [ -n "$AUTOCALL_EXAM" ]; then
     say "Экзамен заявок с сайта"
@@ -575,7 +587,7 @@ if [ -n "$AUTOCALL_EXAM" ]; then
 fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$CLOSE_NEW_LEADS$CLOSE_REPEAT_TASKS$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER$CARPETS_REMEMBER_LIVE" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$CLOSE_NEW_LEADS$CLOSE_REPEAT_TASKS$SHOW_UNANSWERED$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER$CARPETS_REMEMBER_LIVE" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY$AUTOCALL_BUTTON$AUTOCALL_RECHECK" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."
