@@ -108,6 +108,8 @@ CLOSE_STALE_LIVE=""
 CLOSE_STALE_DAYS=""
 CLOSE_STALE_LIMIT=""
 CLOSE_STALE_SUCCESS_FROM=""
+CLOSE_NEW_LEADS=""
+CLOSE_NEW_LEADS_LIVE=""
 SHOW_LEAD_IDS=""
 AUTOCALL_EXAM=""
 AUTOCALL=""
@@ -180,6 +182,8 @@ for arg in "$@"; do
         --close-stale-days=*)  CLOSE_STALE_DAYS="${arg#*=}" ;;
         --close-stale-limit=*) CLOSE_STALE_LIMIT="${arg#*=}" ;;
         --close-stale-success-from=*) CLOSE_STALE_SUCCESS_FROM="${arg#*=}" ;;
+        --close-new-leads)       CLOSE_NEW_LEADS=1 ;;
+        --close-new-leads-live)  CLOSE_NEW_LEADS=1; CLOSE_NEW_LEADS_LIVE=1 ;;
         --lead-ids=*)     SHOW_LEAD_IDS="${arg#*=}" ;;
         --autocall-exam)  AUTOCALL_EXAM=1 ;;
         --autocall-on)        AUTOCALL=1 ;;
@@ -532,6 +536,17 @@ if [ -n "$CLOSE_STALE" ]; then
         "$HOME_DIR/.venv/bin/python" -m scripts.close_stale || true
 fi
 
+# Чистка «Новых лидов» старше недели без заказа в календаре (решение владельца
+# 2026-10-29). Без --close-new-leads-live только показывает список.
+if [ -n "$CLOSE_NEW_LEADS" ]; then
+    say "Новые лиды без заказа: $([ -n "$CLOSE_NEW_LEADS_LIVE" ] && echo 'ЗАКРЫТИЕ' || echo 'просмотр')"
+    cd "$APP_DIR"
+    ENV_VARS=$(grep -E "^(GCAL_|AMO_|ADMINBOT_|BOT_DB_)" "$ENV_FILE" | xargs || true)
+    sudo -u adminbot env $ENV_VARS \
+        CLOSE_NEW_LEADS_LIVE="${CLOSE_NEW_LEADS_LIVE:-0}" \
+        "$HOME_DIR/.venv/bin/python" -m scripts.close_new_leads || true
+fi
+
 # Экзамен фильтра заявок с сайта: читает CRM, ничего не меняет.
 if [ -n "$AUTOCALL_EXAM" ]; then
     say "Экзамен заявок с сайта"
@@ -542,7 +557,7 @@ if [ -n "$AUTOCALL_EXAM" ]; then
 fi
 
 # Диагностика ничего не меняет — перезапускать из-за неё боевую службу незачем.
-if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER$CARPETS_REMEMBER_LIVE" ] && [ -z "$GCAL_RUN" ] \
+if [ -n "$GCAL_CHECK$SHOW_LEADS$SHOW_LEAD_IDS$AUTOCALL_EXAM$SHOW_STALE$CLOSE_STALE$CLOSE_NEW_LEADS$GCAL_FORGET$CARPETS_HELD$CARPETS_RELEASE$CARPETS_REMEMBER$CARPETS_REMEMBER_LIVE" ] && [ -z "$GCAL_RUN" ] \
         && [ -z "$ENABLED$DRY_RUN$CARPETS$CARPETS_DRY$GCAL$GCAL_DRY$BACKLOG_FROM$AUTOCALL$AUTOCALL_DRY$AUTOCALL_BUTTON$AUTOCALL_RECHECK" ]; then
     echo
     echo "Служба не перезапускалась: это была только проверка."

@@ -340,6 +340,12 @@ class AmoClient:
     async def get_contact(self, contact_id: int) -> Optional[dict]:
         return await self.get(f"/api/v4/contacts/{contact_id}")
 
+    async def get_loss_reasons(self) -> list[dict]:
+        """Причины отказа аккаунта: их заводит владелец в настройках амо."""
+        payload = await self.get("/api/v4/leads/loss_reasons")
+        reasons = ((payload or {}).get("_embedded") or {}).get("loss_reasons") or []
+        return [reason for reason in reasons if isinstance(reason, dict)]
+
     # --- запись ---
     #
     # Каждый метод сначала описывает НАМЕРЕНИЕ, а потом (если не репетиция) исполняет его.
@@ -387,9 +393,16 @@ class AmoClient:
         intent = Intent(action="update_lead", entity="lead", entity_id=lead_id, payload=body)
         return await self._perform(intent, "PATCH", f"/api/v4/leads/{lead_id}")
 
-    async def move_lead(self, lead_id: int, pipeline_id: int, status_id: int) -> Intent:
-        """Перевести сделку на другой этап (в том числе в другую воронку)."""
-        body = {"pipeline_id": pipeline_id, "status_id": status_id}
+    async def move_lead(self, lead_id: int, pipeline_id: int, status_id: int, *,
+                        loss_reason_id: Optional[int] = None) -> Intent:
+        """Перевести сделку на другой этап (в том числе в другую воронку).
+
+        loss_reason_id — причина отказа: амо принимает её тем же запросом,
+        что и переход в «Закрыто и не реализовано».
+        """
+        body: dict[str, Any] = {"pipeline_id": pipeline_id, "status_id": status_id}
+        if loss_reason_id is not None:
+            body["loss_reason_id"] = loss_reason_id
         intent = Intent(action="move_lead", entity="lead", entity_id=lead_id, payload=body)
         return await self._perform(intent, "PATCH", f"/api/v4/leads/{lead_id}")
 
