@@ -105,14 +105,14 @@ This project (Rules 4.2):
 
 Files longer than 500 lines and their function maps:
 
-- `bot.py` (14963 lines) -> `bot.py.map.md`
+- `bot.py` (14971 lines) -> `bot.py.map.md`
 - `raketa-admin-bot/adminbot/main.py` (1568 lines) -> `raketa-admin-bot/adminbot/main.py.map.md`
 - `raketa-admin-bot/adminbot/db.py` (1879 lines) -> `raketa-admin-bot/adminbot/db.py.map.md`
 - `raketa-admin-bot/adminbot/gcal/engine.py` (1187 lines) -> `raketa-admin-bot/adminbot/gcal/engine.py.map.md`
 - `raketa-admin-bot/adminbot/sync/engine.py` (772 lines) -> `raketa-admin-bot/adminbot/sync/engine.py.map.md`
 - `raketa-admin-bot/adminbot/tg/bot.py` (709 lines) -> `raketa-admin-bot/adminbot/tg/bot.py.map.md`
 - `raketa-admin-bot/adminbot/tg/cards.py` (690 lines) -> `raketa-admin-bot/adminbot/tg/cards.py.map.md`
-- `cleaning/handlers.py` (1959 lines) -> `cleaning/handlers.py.map.md`
+- `cleaning/handlers.py` (2081 lines) -> `cleaning/handlers.py.map.md`
 - `raketa-notify/notifyd/db.py` (550 lines) -> `raketa-notify/notifyd/db.py.map.md`
 - `notifications/client_messaging.py` (628 lines) -> `notifications/client_messaging.py.map.md`
 - `notifications/outbox.py` (803 lines) -> `notifications/outbox.py.map.md`
