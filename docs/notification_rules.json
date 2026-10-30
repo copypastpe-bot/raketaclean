@@ -86,8 +86,10 @@
       "timing": {
         "delay_minutes": 0
       },
-      "template": "Заказ выполнен ✅\nПосле поступления оплаты мы сразу пришлём уведомление.\nСпасибо, что выбрали raketaclean.ru ✨",
-      "variables": []
+      "template": "Заказ выполнен ✅\nСумма чека: {{total_sum}} ₽\nСпасибо, что выбрали raketaclean.ru ✨",
+      "variables": [
+        "total_sum"
+      ]
     },
     {
       "key": "order_wire_payment_received",

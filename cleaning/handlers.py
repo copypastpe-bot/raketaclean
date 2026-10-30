@@ -346,12 +346,14 @@ async def _enqueue_cleaning_completed_notifications(
     if rules is None:
         return
     if is_wire_payment:
+        # Обычное письмо о выполненном заказе без бонусов: при «Расчётном» их нет,
+        # а уведомления о поступлении оплаты в клининге нет (решение владельца 30.10).
         await enqueue_notification(
             conn,
             rules,
             event_key="cleaning_order_completed_wire",
             client_id=client_id,
-            payload={},
+            payload={"total_sum": _money_str(total)},
         )
     else:
         await enqueue_notification(
