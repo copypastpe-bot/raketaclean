@@ -51,6 +51,21 @@ def get_min_order_amount(env: Mapping[str, str] = os.environ) -> Decimal:
     return _env_decimal(env, "CLEANING_MIN_ORDER_AMOUNT", "5500")
 
 
+_PG_INT4_MAX = 2_147_483_647
+
+
+def get_olya_foreman_id(env: Mapping[str, str] = os.environ) -> int | None:
+    """Id записи Оли в cleaning_foremen (CLEANING_OLYA_FOREMAN_ID) или None.
+
+    Строго целое: systemd не срезает хвостовой комментарий, «2 # Оля» — не id.
+    """
+    raw = (env.get("CLEANING_OLYA_FOREMAN_ID") or "").strip()
+    if not (raw.isascii() and raw.isdigit()):
+        return None
+    value = int(raw)
+    return value if 0 < value <= _PG_INT4_MAX else None
+
+
 def get_min_cash_amount(env: Mapping[str, str] = os.environ) -> Decimal:
     return _env_decimal(env, "MIN_CASH", "2500")
 

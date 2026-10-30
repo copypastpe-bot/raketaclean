@@ -19,7 +19,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from notifications import NotificationRules, enqueue_notification
 
-from .access import can_create_cleaning_order, get_user_role, has_permission, is_cleaning_admin
+from .access import (
+    admin_foreman_name,
+    can_create_cleaning_order,
+    ensure_admin_foreman,
+    get_active_foreman_by_id,
+    get_user_role,
+    has_permission,
+    is_cleaning_admin,
+)
 from .admin_ops import (
     CashMoveDeleteGoesNegative,
     CashMoveExceedsBalance,
@@ -138,6 +146,7 @@ from .orders import (
     calculate_bonus_max,
     cashbook_rows_from_payments,
     get_min_order_amount,
+    get_olya_foreman_id,
     is_wire_payment_method,
     parse_amount,
     validate_payment_parts,
@@ -267,9 +276,21 @@ def cleaning_main_kb() -> ReplyKeyboardMarkup:
     )
 
 
-async def _is_foreman(pool: asyncpg.Pool, tg_user_id: int) -> bool:
+async def _order_access(pool: asyncpg.Pool, tg_user_id: int) -> str | None:
+    """Кто проводит уборку: 'admin' | 'foreman' | None (нет доступа).
+
+    Путь решает роль, а не запись в cleaning_foremen: у админа она появится
+    после первой уборки «Дима», и путь Оли он получать не должен
+    (ТЗ 2026-10-30-admin-cleaning-order, задача 1).
+    """
     async with pool.acquire() as conn:
-        return await can_create_cleaning_order(conn, tg_user_id)
+        if await is_cleaning_admin(conn, tg_user_id):
+            if await has_permission(conn, tg_user_id, "cleaning_create_orders"):
+                return "admin"
+            return None
+        if await can_create_cleaning_order(conn, tg_user_id):
+            return "foreman"
+    return None
 
 
 async def _has_permission(pool: asyncpg.Pool, tg_user_id: int, permission: str) -> bool:
@@ -376,11 +397,12 @@ async def _enqueue_cleaning_completed_notifications(
 @router.message(F.text == "🧹 Провести уборку")
 async def start_cleaning_order(msg: Message, state: FSMContext, **data) -> None:
     pool: asyncpg.Pool = data["pool"]
-    if not await _is_foreman(pool, msg.from_user.id):
+    access = await _order_access(pool, msg.from_user.id)
+    if access is None:
         await msg.answer("Команда доступна только клининг-бригадирам.")
         return
     await state.clear()
-    await state.update_data(client_op_id=uuid.uuid4().hex)
+    await state.update_data(client_op_id=uuid.uuid4().hex, by_admin=access == "admin")
     await state.set_state(CleaningOrderFSM.phone)
     await msg.answer(
         "Введите номер клиента (9XXXXXXXXX, 8XXXXXXXXXX или +7XXXXXXXXXX):",
@@ -607,6 +629,11 @@ async def got_pay_amount(msg: Message, state: FSMContext) -> None:
 async def got_expense_category(msg: Message, state: FSMContext) -> None:
     text = msg.text.strip()
     if text == "Готово":
+        data = await state.get_data()
+        if data.get("by_admin"):
+            await state.set_state(CleaningOrderFSM.cash_holder)
+            await msg.answer(ORDER_CASH_HOLDER_QUESTION, reply_markup=_cash_holder_kb())
+            return
         await _show_confirm(msg, state)
         return
     if text not in CLEANING_EXPENSE_CATEGORIES:
@@ -635,6 +662,51 @@ async def got_expense_amount(msg: Message, state: FSMContext) -> None:
     )
 
 
+# ---------- шаг «Оля / Дима» уборки, которую проводит админ ----------
+# Один ответ решает три вещи: куда наличные и карта, откуда расходы уборки и
+# чья уборка (ТЗ docs/plans/2026-10-30-admin-cleaning-order.md, задача 2).
+
+ORDER_CASH_HOLDER_QUESTION = (
+    f"Чья уборка? «Оля» — деньги и расходы в «{CASH_HOLDER_OLYA_LABEL}», бригадир Ольга. "
+    f"«Дима» — в «{CASH_HOLDER_DIMA_LABEL}», бригадир — вы."
+)
+OLYA_FOREMAN_NOT_CONFIGURED = (
+    "Запись Оли не настроена (CLEANING_OLYA_FOREMAN_ID). Выберите «Дима» или «Отмена»."
+)
+
+
+def _foreman_display(fn: str | None, ln: str | None) -> str:
+    return ((fn or "") + (" " + ln if ln else "")).strip()
+
+
+async def _olya_foreman(conn: asyncpg.Connection) -> asyncpg.Record | None:
+    foreman_id = get_olya_foreman_id()
+    if foreman_id is None:
+        return None
+    return await get_active_foreman_by_id(conn, foreman_id)
+
+
+@router.message(CleaningOrderFSM.cash_holder, F.text)
+async def got_order_cash_holder(msg: Message, state: FSMContext, **kw) -> None:
+    holder = _parse_cash_holder(msg.text)
+    if holder is None:
+        await _reask_cash_holder(msg)
+        return
+    pool: asyncpg.Pool = kw["pool"]
+    async with pool.acquire() as conn:
+        if holder == CASH_HOLDER_OLYA:
+            foreman = await _olya_foreman(conn)
+            if foreman is None:
+                await msg.answer(OLYA_FOREMAN_NOT_CONFIGURED, reply_markup=_cash_holder_kb())
+                return
+            name = _foreman_display(foreman["fn"], foreman["ln"])
+        else:
+            fn, ln = await admin_foreman_name(conn, msg.from_user.id, msg.from_user.full_name)
+            name = _foreman_display(fn, ln)
+    await state.update_data(order_cash_holder=holder, order_foreman_name=name)
+    await _show_confirm(msg, state)
+
+
 async def _show_confirm(msg: Message, state: FSMContext) -> None:
     data = await state.get_data()
     total = Decimal(data["total_amount"])
@@ -659,6 +731,14 @@ async def _show_confirm(msg: Message, state: FSMContext) -> None:
             lines.append(f"  • {e['category']}: {_money_str(Decimal(e['amount']))}₽")
     else:
         lines.append("Расходов нет.")
+    if data.get("by_admin"):
+        holder_label = (
+            CASH_HOLDER_OLYA_LABEL
+            if data.get("order_cash_holder") == CASH_HOLDER_OLYA
+            else CASH_HOLDER_DIMA_LABEL
+        )
+        lines.append(f"Деньги и расходы: {holder_label}")
+        lines.append(f"Бригадир: {data.get('order_foreman_name') or '—'}")
     await state.set_state(CleaningOrderFSM.confirm)
     await msg.answer("\n".join(lines), reply_markup=_confirm_kb())
 
@@ -731,18 +811,44 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
     notification_rules: NotificationRules | None = kw.get("notification_rules")
     data = await state.get_data()
     foreman_tg = msg.from_user.id
+    by_admin = bool(data.get("by_admin"))
+    # Чьи наличные, карта и расходы уборки: у Оли всегда её деньги, у админа —
+    # его ответ «Оля / Дима» (ТЗ 2026-10-30-admin-cleaning-order, задача 3).
+    order_holder = CASH_HOLDER_OLYA
 
     async with pool.acquire() as conn:
-        foreman = await conn.fetchrow(
-            "SELECT id, fn, ln FROM cleaning_foremen WHERE tg_user_id=$1 AND is_active",
-            foreman_tg,
-        )
-        if not foreman:
-            await msg.answer("Доступ отозван.")
-            await state.clear()
-            return
+        if by_admin:
+            if not await is_cleaning_admin(conn, foreman_tg):
+                await msg.answer("Доступ отозван.")
+                await state.clear()
+                return
+            order_holder = data.get("order_cash_holder")
+            foreman = None  # «Дима» — запись админа заводится в транзакции
+            if order_holder == CASH_HOLDER_OLYA:
+                foreman = await _olya_foreman(conn)
+                if foreman is None:
+                    await state.set_state(CleaningOrderFSM.cash_holder)
+                    await msg.answer(OLYA_FOREMAN_NOT_CONFIGURED, reply_markup=_cash_holder_kb())
+                    return
+            elif order_holder != CASH_HOLDER_DIMA:
+                await state.set_state(CleaningOrderFSM.cash_holder)
+                await msg.answer(ORDER_CASH_HOLDER_QUESTION, reply_markup=_cash_holder_kb())
+                return
+        else:
+            foreman = await conn.fetchrow(
+                "SELECT id, fn, ln FROM cleaning_foremen WHERE tg_user_id=$1 AND is_active",
+                foreman_tg,
+            )
+            if not foreman:
+                await msg.answer("Доступ отозван.")
+                await state.clear()
+                return
 
         async with conn.transaction():
+            if foreman is None:
+                foreman = await ensure_admin_foreman(
+                    conn, foreman_tg, msg.from_user.full_name
+                )
             # клиент (upsert)
             if data.get("client_id"):
                 client_row = await conn.fetchrow(
@@ -793,6 +899,11 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
             )
             if order_row is None:
                 # уже было проведено по этому client_op_id — выходим тихо
+                if by_admin:
+                    await state.clear()
+                    kb = await _after_op_kb(msg, state, kw, ReplyKeyboardRemove())
+                    await msg.answer("Заказ уже проведён ранее.", reply_markup=kb)
+                    return
                 await msg.answer("Заказ уже проведён ранее.", reply_markup=ReplyKeyboardRemove())
                 await state.clear()
                 return
@@ -814,6 +925,8 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
             touches_olya = False  # задела ли уборка деньги Оли
             for method, amount in cashbook_rows_from_payments(parts):
                 holder = _income_cash_holder(method)
+                if holder == CASH_HOLDER_OLYA:
+                    holder = order_holder  # админ мог выбрать «Дима»
                 touches_olya = touches_olya or holder == CASH_HOLDER_OLYA
                 await record_income(
                     conn,
@@ -825,7 +938,7 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
                 )
 
             expenses = data.get("expenses") or []
-            touches_olya = touches_olya or bool(expenses)
+            touches_olya = touches_olya or (bool(expenses) and order_holder == CASH_HOLDER_OLYA)
             for e in expenses:
                 await record_expense(
                     conn,
@@ -833,7 +946,8 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
                     amount=Decimal(e["amount"]),
                     order_id=order_id,
                     comment=e["category"],
-                    cash_holder=CASH_HOLDER_OLYA,  # расходы при проведении — из денег Оли
+                    # у Оли — всегда её деньги, у админа — его выбор «Оля / Дима»
+                    cash_holder=order_holder,
                 )
 
             # Бонусы клиента — обновляем общий баланс и пишем в bonus_transactions
@@ -924,6 +1038,14 @@ async def do_provesti(msg: Message, state: FSMContext, **kw) -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning("cleaning order report enqueue failed for order_id=%s: %s", order_id, e)
 
+    if by_admin:
+        await state.clear()
+        kb = await _after_op_kb(msg, state, kw, cleaning_main_kb())
+        await msg.answer(
+            f"Заказ #{order_id} проведён. Касса клининга: {_money_str(balance_after)}₽.",
+            reply_markup=kb,
+        )
+        return
     await msg.answer(
         f"Заказ #{order_id} проведён. Касса клининга: {_money_str(balance_after)}₽.",
         reply_markup=cleaning_main_kb(),

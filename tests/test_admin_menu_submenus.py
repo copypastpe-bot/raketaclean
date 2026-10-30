@@ -33,6 +33,7 @@ from cleaning.fsm import (
     CleaningCashMoveFSM,
     CleaningDividendFSM,
     CleaningForemanExpenseFSM,
+    CleaningOrderFSM,
 )
 
 UNRECOGNIZED = "Команда не распознана. Выберите действие на клавиатуре ниже."
@@ -43,7 +44,7 @@ CLEANING_MAIN_BUTTONS = ["🧹 Провести уборку", "🔍 Клиен�
 
 ROOT_ROWS = [["Операции", "Отчёты"], ["Клиенты", "Клининг"]]
 OPERATIONS_ROWS = [["Приход", "Расход", "Изъятие"], ["Привязать", "Рассчитать ЗП"], ["Назад"]]
-CLEANING_ROWS = [["Приход", "Расход", "Баланс"], ["Перемещение", "Выплата прибыли"], ["Назад"]]
+CLEANING_ROWS = [["Провести уборку"], ["Приход", "Расход", "Баланс"], ["Перемещение", "Выплата прибыли"], ["Назад"]]
 
 BALANCE_REPLY = "Касса клининга: 50 000₽\nДеньги Ольга: 4 200₽"
 
@@ -72,6 +73,10 @@ OPERATIONS_BUTTONS = {
 
 # Подменю «Клининг» — существующие клининговые сценарии.
 CLEANING_BUTTONS = {
+    "Провести уборку": (
+        "Введите номер клиента (9XXXXXXXXX, 8XXXXXXXXXX или +7XXXXXXXXXX):",
+        CleaningOrderFSM.phone,
+    ),
     "Приход": (
         "Ручной приход в кассу клининга.\nВыберите метод:",
         CleaningCashAddFSM.method,

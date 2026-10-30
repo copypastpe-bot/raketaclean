@@ -5662,6 +5662,7 @@ def admin_operations_kb() -> ReplyKeyboardMarkup:
 def admin_cleaning_kb() -> ReplyKeyboardMarkup:
     """Подменю «Клининг»: существующие сценарии `cleaning/handlers.py` (задача 3)."""
     rows = [
+        [KeyboardButton(text="Провести уборку")],
         [KeyboardButton(text="Приход"), KeyboardButton(text="Расход"), KeyboardButton(text="Баланс")],
         [KeyboardButton(text="Перемещение"), KeyboardButton(text="Выплата прибыли")],
         [KeyboardButton(text="Назад")],
@@ -12730,6 +12731,13 @@ async def admin_cleaning_balance(msg: Message, state: FSMContext, **kw):
 @dp.message(F.text == "Перемещение", admin_menu_idle)
 async def admin_cleaning_move(msg: Message, state: FSMContext, **kw):
     await start_cash_move(msg, state, **kw)
+
+
+# Уборку админ проводит сценарием Оли с шагом «Оля / Дима»
+# (ТЗ docs/plans/2026-10-30-admin-cleaning-order.md, задача 4).
+@dp.message(F.text == "Провести уборку", admin_menu_idle)
+async def admin_cleaning_order(msg: Message, state: FSMContext, **kw):
+    await start_cleaning_order(msg, state, **kw)
 
 
 @dp.message(F.text == "Выплата прибыли", admin_menu_idle)

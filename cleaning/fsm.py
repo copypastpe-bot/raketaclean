@@ -17,6 +17,9 @@ class CleaningOrderFSM(StatesGroup):
     expense_category = State()
     expense_amount = State()
     expense_more = State()
+    # Только у админа: «Оля / Дима» — куда деньги и расходы и чья уборка
+    # (ТЗ docs/plans/2026-10-30-admin-cleaning-order.md, задача 2).
+    cash_holder = State()
     confirm = State()
 
 
